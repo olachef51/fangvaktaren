@@ -387,11 +387,17 @@
             <div class="hr"></div>
             <h3>💾 Lagring & Distribution</h3>
             <div class="mini" id="storageInfo">—</div>
+            <div class="mini" id="cloudStatus">Moln: ej inloggad</div>
             <div class="actions" style="flex-wrap: wrap;">
               <button id="btnShrinkAll" class="btn ghost miniBtn">Komprimera bilder</button>
               <button id="btnPurgeImg" class="btn secondary miniBtn">Ta bort bildfrågor</button>
               <button id="btnResetTeacher" class="btn secondary miniBtn">Nollställ Elevdata</button>
               <button id="btnFullReset" class="btn danger miniBtn" title="Rensar ALLT utom lösenord/epost.">Nollställ Hela Spelet</button>
+
+              <button id="btnCloudLogin"  class="btn ghost miniBtn"     type="button">Logga in (Google)</button>
+              <button id="btnCloudLogout" class="btn secondary miniBtn" type="button">Logga ut</button>
+              <button id="btnCloudSave"   class="btn ghost miniBtn"     type="button">Spara till moln</button>
+              <button id="btnCloudLoad"   class="btn ghost miniBtn"     type="button">Hämta från moln</button>
             </div>
           </div>
 
@@ -1881,6 +1887,142 @@
       statusEl.textContent = `Fel: ${e.message}`;
     }
   }
+  /* === Firebase moln-spara / ladda === */
+  function getFirebaseHandles() {
+    const fv = window.fvFirebase;
+    if (!fv || !fv.auth || !fv.db) return null;
+    return fv;
+  }
+
+  function updateCloudUI(user, note) {
+    const el        = document.getElementById('cloudStatus');
+    const btnLogin  = document.getElementById('btnCloudLogin');
+    const btnLogout = document.getElementById('btnCloudLogout');
+    const btnSave   = document.getElementById('btnCloudSave');
+    const btnLoad   = document.getElementById('btnCloudLoad');
+
+    const hasFirebase = !!getFirebaseHandles();
+    if (!el) return;
+
+    if (!hasFirebase) {
+      el.textContent = "Moln: inte aktiverat i denna version.";
+      [btnLogin, btnLogout, btnSave, btnLoad].forEach(b => { if (b) b.disabled = true; });
+      return;
+    }
+
+    if (user) {
+      const who = user.email || user.displayName || user.uid;
+      el.textContent = "Moln: inloggad som " + who + (note ? " – " + note : "");
+      if (btnLogin)  btnLogin.disabled  = true;
+      if (btnLogout) btnLogout.disabled = false;
+      if (btnSave)   btnSave.disabled   = false;
+      if (btnLoad)   btnLoad.disabled   = false;
+    } else {
+      el.textContent = "Moln: ej inloggad." + (note ? " " + note : "");
+      if (btnLogin)  btnLogin.disabled  = false;
+      if (btnLogout) btnLogout.disabled = true;
+      if (btnSave)   btnSave.disabled   = true;
+      if (btnLoad)   btnLoad.disabled   = true;
+    }
+  }
+
+  async function ensureTeacherLogin() {
+    const fv = getFirebaseHandles();
+    if (!fv) { notify("Molnlagring är inte aktiverad i denna version."); return null; }
+    const { auth, provider, signInWithPopup } = fv;
+
+    let user = auth.currentUser;
+    if (user) return user;
+
+    try {
+      const res = await signInWithPopup(auth, provider);
+      user = res.user;
+      updateCloudUI(user);
+      return user;
+    } catch (e) {
+      console.error("Login fail:", e);
+      notify("Kunde inte logga in.");
+      updateCloudUI(null);
+      return null;
+    }
+  }
+
+  async function cloudSaveGame() {
+    const fv = getFirebaseHandles();
+    if (!fv) { notify("Molnlagring är inte aktiverad."); return; }
+    const user = await ensureTeacherLogin();
+    if (!user) return;
+
+    const { db, doc, setDoc } = fv;
+    const s = load();
+    const payload = {
+      bank:       s.bank       || {},
+      objectives: s.objectives || [],
+      thresholds: s.thresholds || DEFAULT.thresholds,
+      updatedAt:  new Date().toISOString()
+    };
+
+    try {
+      await setDoc(doc(db, "fangvaktarenGames", user.uid), payload, { merge: true });
+      updateCloudUI(user, "senast sparad nu.");
+      notify("Frågebank och delmål sparade i molnet.");
+    } catch (e) {
+      console.error("Cloud save fail:", e);
+      notify("Kunde inte spara till molnet.");
+      updateCloudUI(user, "fel vid sparande.");
+    }
+  }
+
+  async function cloudLoadGame() {
+    const fv = getFirebaseHandles();
+    if (!fv) { notify("Molnlagring är inte aktiverad."); return; }
+    const user = await ensureTeacherLogin();
+    if (!user) return;
+
+    const { db, doc, getDoc } = fv;
+
+    try {
+      const snap = await getDoc(doc(db, "fangvaktarenGames", user.uid));
+      if (!snap.exists()) {
+        notify("Ingen sparad data hittades i molnet.");
+        updateCloudUI(user, "ingen sparad data.");
+        return;
+      }
+
+      const data = snap.data() || {};
+      const s = load();
+
+      if (data.bank)       s.bank       = data.bank;
+      if (data.objectives) s.objectives = data.objectives;
+      if (data.thresholds) s.thresholds = data.thresholds;
+
+      save(s);
+      renderObjectives();
+      updateObjectiveSelects();
+      renderMCQAdminLists();
+      renderImageAdminList();
+      renderDragAdminList();
+      uiSync();
+      updateStorageInfo();
+      updateCloudUI(user, "data hämtad.");
+      notify("Frågebank och delmål hämtade från molnet.");
+    } catch (e) {
+      console.error("Cloud load fail:", e);
+      notify("Kunde inte hämta från molnet.");
+      updateCloudUI(user, "fel vid hämtning.");
+    }
+  }
+
+  async function cloudLogout() {
+    const fv = getFirebaseHandles();
+    if (!fv) { updateCloudUI(null); return; }
+    try {
+      await fv.signOut(fv.auth);
+    } catch (e) {
+      console.error("Logout fail:", e);
+    }
+    updateCloudUI(null);
+  }
 
   /* === Initiering === */
   document.addEventListener('DOMContentLoaded', async () => {
@@ -2064,6 +2206,80 @@
     if (importLabel) importLabel.closest('.row')?.classList.add('import-wrap');
   })();
   </script>
+  <!-- start: Firebase init för Fångvaktaren -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+  import { 
+    getAuth, 
+    GoogleAuthProvider, 
+    signInWithPopup, 
+    onAuthStateChanged, 
+    signOut 
+  } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
+  import { 
+    getFirestore, 
+    doc, 
+    getDoc, 
+    setDoc 
+  } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js";
+
+      // Firebase molnstatus + knappar
+    if (window.fvFirebase && window.fvFirebase.onAuthStateChanged && window.fvFirebase.auth) {
+      try {
+        window.fvFirebase.onAuthStateChanged(window.fvFirebase.auth, (user) => {
+          updateCloudUI(user);
+        });
+      } catch (e) {
+        console.error("onAuthStateChanged fail:", e);
+        updateCloudUI(null);
+      }
+    } else {
+      updateCloudUI(null);
+    }
+
+    const btnCloudLogin  = document.getElementById('btnCloudLogin');
+    const btnCloudLogout = document.getElementById('btnCloudLogout');
+    const btnCloudSave   = document.getElementById('btnCloudSave');
+    const btnCloudLoad   = document.getElementById('btnCloudLoad');
+
+    if (btnCloudLogin)  btnCloudLogin.addEventListener('click', () => { ensureTeacherLogin(); });
+    if (btnCloudLogout) btnCloudLogout.addEventListener('click', () => { cloudLogout(); });
+    if (btnCloudSave)   btnCloudSave.addEventListener('click', () => { cloudSaveGame(); });
+    if (btnCloudLoad)   btnCloudLoad.addEventListener('click', () => { cloudLoadGame(); });
+
+
+  // Din Firebase-konfiguration
+  const firebaseConfig = {
+    apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
+    authDomain: "fangvaktaren-904db.firebaseapp.com",
+    projectId: "fangvaktaren-904db",
+    storageBucket: "fangvaktaren-904db.firebasestorage.app",
+    messagingSenderId: "105301219768",
+    appId: "1:105301219768:web:66b131fba86a541b78174d",
+    measurementId: "G-NXL9GSFZ77"
+  };
+
+  // Initiera Firebase
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const provider = new GoogleAuthProvider();
+  const db = getFirestore(app);
+
+  // Gör Firebase tillgängligt för spelets vanliga script (icke-module)
+  window.fvFirebase = {
+    auth,
+    provider,
+    signInWithPopup,
+    onAuthStateChanged,
+    signOut,
+    db,
+    doc,
+    getDoc,
+    setDoc
+  };
+</script>
+<!-- slut: Firebase init -->
+
 </body>
 </html>
 <!-- slut DEL 3/3 -->
