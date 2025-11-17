@@ -3233,12 +3233,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 <!-- start SEKTION 6: FIREBASE & EXPORTRESULTAT -->
 <script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getFirestore, collection, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getAuth,
+    GoogleAuthProvider,
+    signInWithPopup,
+    signOut,
+    onAuthStateChanged
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import {
+    getFirestore,
+    collection,
+    addDoc,
+    serverTimestamp
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-  // === Firebase-konfiguration (NYTT NAMN så vi inte krockar med andra snippets) ===
-  const FG_FIREBASE_CONFIG = {
+  // === Firebase-konfiguration (DIN APP) ===
+  const firebaseConfig = {
     apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
     authDomain: "fangvaktaren-904db.firebaseapp.com",
     projectId: "fangvaktaren-904db",
@@ -3248,112 +3259,171 @@ document.addEventListener('DOMContentLoaded', async () => {
     measurementId: "G-NXL9GSFZ77"
   };
 
-  // Initiera Firebase exakt en gång och spara på window
-  function initFirebaseIfNeeded() {
-    if (!window.__fgFirebase) {
-      const app = initializeApp(FG_FIREBASE_CONFIG);
-      const db = getFirestore(app);
-      const auth = getAuth(app);
-      const provider = new GoogleAuthProvider();
-      window.__fgFirebase = { app, db, auth, provider };
+  // === Init Firebase (utan dubletter) ===
+  function ensureFirebase() {
+    let app;
+    if (!getApps().length) {
+      app = initializeApp(firebaseConfig);
+    } else {
+      app = getApp();
     }
-    return window.__fgFirebase;
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+    const provider = new GoogleAuthProvider();
+    return { app, db, auth, provider };
   }
 
-  // Global helper om annan kod vill komma åt Firebase
-  window.getFirebaseHelpers = function () {
-    return initFirebaseIfNeeded();
-  };
+  const { db, auth, provider } = ensureFirebase();
 
-  document.addEventListener("DOMContentLoaded", () => {
-    const { auth } = initFirebaseIfNeeded();
+  // === UI-element för lärarpanelen (Firebase) ===
+  const statusEl  = document.getElementById("fgFirebaseStatus");
+  const btnSignIn = document.getElementById("fgFirebaseSignIn");
+  const btnSignOut = document.getElementById("fgFirebaseSignOut");
+  const btnExport = document.getElementById("fgFirebaseExport");
+  const infoEl    = document.getElementById("fgFirebaseExportInfo");
 
-    const statusEl   = document.getElementById("fgFirebaseStatus");
-    const btnSignIn  = document.getElementById("fgFirebaseSignIn");
-    const btnSignOut = document.getElementById("fgFirebaseSignOut");
-    const btnExport  = document.getElementById("fgFirebaseExport");
-    const infoEl     = document.getElementById("fgFirebaseExportInfo");
+  function setStatus(msg) {
+    if (statusEl) statusEl.textContent = msg;
+  }
 
-    if (!statusEl || !btnSignIn) {
-      console.warn("Firebase UI-element hittades inte – kontrollera att rutan med fgFirebase*-ID:n finns i HTML.");
+  if (!statusEl || !btnSignIn || !btnSignOut || !btnExport || !infoEl) {
+    console.warn("Firebase UI-element hittades inte – kontrollera att rutan med fgFirebase*-ID:n finns i HTML.");
+  }
+
+  let currentUser = null;
+
+  // === Hämta frågebank från localStorage (lärare) ===
+  const STORAGE_KEY = "FGAME_v16_ECA_Progression_DM";
+
+  function getLocalQuestionBank() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        console.warn("Ingen data hittades i localStorage för nyckeln:", STORAGE_KEY);
+        return null;
+      }
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.bank) {
+        return parsed.bank;
+      }
+      // Fallback om strukturen skulle se annorlunda ut
+      return parsed || null;
+    } catch (err) {
+      console.error("Kunde inte läsa/parse:a frågebank från localStorage:", err);
+      return null;
+    }
+  }
+
+  // === Lyssna på inloggningsstatus ===
+  if (auth) {
+    onAuthStateChanged(auth, (user) => {
+      currentUser = user || null;
+      if (user) {
+        setStatus("Inloggad som " + (user.email || "okänd användare"));
+        if (btnSignIn) btnSignIn.disabled = true;
+        if (btnSignOut) btnSignOut.disabled = false;
+        if (btnExport) btnExport.disabled = false;
+      } else {
+        setStatus("Inte inloggad.");
+        if (btnSignIn) btnSignIn.disabled = false;
+        if (btnSignOut) btnSignOut.disabled = true;
+        if (btnExport) btnExport.disabled = true;
+      }
+    });
+  }
+
+  // === Logga in med Google ===
+  if (btnSignIn && auth && provider) {
+    btnSignIn.addEventListener("click", async () => {
+      try {
+        const result = await signInWithPopup(auth, provider);
+        currentUser = result.user;
+        console.log("Login OK", currentUser);
+        setStatus("Inloggad som " + (currentUser.email || "okänd användare"));
+      } catch (err) {
+        console.error("Login error:", err);
+        setStatus("Inloggning misslyckades: " + (err?.code || ""));
+      }
+    });
+  }
+
+  // === Logga ut ===
+  if (btnSignOut && auth) {
+    btnSignOut.addEventListener("click", async () => {
+      try {
+        await signOut(auth);
+        currentUser = null;
+        setStatus("Utloggad.");
+      } catch (err) {
+        console.error("Logout error:", err);
+        setStatus("Kunde inte logga ut.");
+      }
+    });
+  }
+
+  // === Uppladdning av FRÅGEBANK till Firestore ===
+  async function uploadQuestionBankForUser(user) {
+    if (!db) {
+      console.error("Firestore ej initierat.");
+      setStatus("Fel: Firestore ej initierat.");
       return;
     }
 
-    // Håll status uppdaterad
-    onAuthStateChanged(auth, (user) => {
-      if (user) {
-        statusEl.textContent = "Inloggad som " + (user.email || user.displayName || "lärare");
-        btnSignIn.disabled = true;
-        if (btnSignOut) btnSignOut.disabled = false;
-      } else {
-        statusEl.textContent = "Inte inloggad.";
-        btnSignIn.disabled = false;
-        if (btnSignOut) btnSignOut.disabled = true;
+    const bank = getLocalQuestionBank();
+    if (!bank) {
+      setStatus("Ingen frågebank hittades att ladda upp.");
+      return;
+    }
+
+    try {
+      setStatus("Laddar upp frågebank...");
+      const docRef = await addDoc(collection(db, "fangvaktaren_banker"), {
+        ownerUid: user?.uid || null,
+        ownerEmail: user?.email || null,
+        createdAt: serverTimestamp(),
+        bank
+      });
+      console.log("Frågebank uppladdad med id:", docRef.id);
+      setStatus("Frågebank uppladdad.");
+      if (infoEl) {
+        infoEl.textContent = "Senast uppladdad: " + new Date().toLocaleString();
+      }
+    } catch (err) {
+      console.error("Uppladdning misslyckades:", err);
+      setStatus("Uppladdning misslyckades.");
+    }
+  }
+
+  async function ensureTeacherLoggedIn() {
+    if (!auth || !provider) {
+      setStatus("Auth ej initierad.");
+      throw new Error("Auth not ready");
+    }
+    if (auth.currentUser) return auth.currentUser;
+    try {
+      const result = await signInWithPopup(auth, provider);
+      return result.user;
+    } catch (err) {
+      console.error("Login fail:", err);
+      setStatus("Inloggning misslyckades.");
+      throw err;
+    }
+  }
+
+  // === Klick på "Ladda upp frågebank till Firebase" ===
+  if (btnExport) {
+    btnExport.addEventListener("click", async () => {
+      try {
+        const user = await ensureTeacherLoggedIn();
+        await uploadQuestionBankForUser(user);
+      } catch (err) {
+        // Fel redan loggat i ensureTeacherLoggedIn / uploadQuestionBankForUser
       }
     });
-
-    // Logga in med Google
-    if (btnSignIn) {
-      btnSignIn.addEventListener("click", async () => {
-        const { auth, provider } = initFirebaseIfNeeded();
-        try {
-          await signInWithPopup(auth, provider);
-          console.log("Login OK");
-        } catch (err) {
-          console.error("Login error:", err);
-          if (infoEl) infoEl.textContent = "Login error: " + (err.code || err.message || err);
-        }
-      });
-    }
-
-    // Logga ut
-    if (btnSignOut) {
-      btnSignOut.addEventListener("click", async () => {
-        const { auth } = initFirebaseIfNeeded();
-        try {
-          await signOut(auth);
-          console.log("Logout OK");
-        } catch (err) {
-          console.error("Logout error:", err);
-          if (infoEl) infoEl.textContent = "Logout error: " + (err.code || err.message || err);
-        }
-      });
-    }
-
-    // Uppladdning av frågebank (placeholder just nu)
-    if (btnExport) {
-      btnExport.addEventListener("click", async () => {
-        const { db, auth } = initFirebaseIfNeeded();
-        const user = auth.currentUser;
-
-        if (!user) {
-          if (infoEl) infoEl.textContent = "Du måste vara inloggad för att ladda upp frågebank.";
-          return;
-        }
-
-        // TODO: ersätt dummyBank med din riktiga frågebank
-        const dummyBank = {
-          createdAt: new Date().toISOString(),
-          note: "Placeholder – riktig frågebank kopplas i nästa steg."
-        };
-
-        try {
-          await addDoc(collection(db, "fangvaktaren_banker"), {
-            ownerUid: user.uid,
-            ownerEmail: user.email || null,
-            bank: dummyBank,
-            createdAt: serverTimestamp()
-          });
-          if (infoEl) infoEl.textContent = "Uppladdning klar (dummy-data). Vi kopplar riktig frågebank i nästa steg.";
-        } catch (err) {
-          console.error("Upload error:", err);
-          if (infoEl) infoEl.textContent = "Fel vid uppladdning: " + (err.code || err.message || err);
-        }
-      });
-    }
-  });
+  }
 </script>
 <!-- slut SEKTION 6: FIREBASE & EXPORTRESULTAT -->
+
 
 
 
