@@ -3232,159 +3232,130 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
 <!-- start SEKTION 6: FIREBASE & EXPORTRESULTAT -->
-<div class="card" id="fgFirebasePanel">
-  <h3>Google-inloggning &amp; uppladdning (lärare)</h3>
-
-  <div class="row">
-    <small id="fgFirebaseStatus">Inte inloggad</small>
-  </div>
-
-  <div class="row" style="gap:8px; flex-wrap:wrap;">
-    <button type="button" class="btn" id="fgFirebaseSignIn">Logga in med Google</button>
-    <button type="button" class="btn" id="fgFirebaseSignOut">Logga ut</button>
-    <button type="button" class="btn" id="fgFirebaseExport">Ladda upp frågebank till Firebase</button>
-  </div>
-
-  <div class="row">
-    <small id="fgFirebaseExportInfo"></small>
-  </div>
-</div>
-
 <script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getFirestore, collection, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
-  function $(id) {
-    return document.getElementById(id);
+  // === Firebase-konfiguration (NYTT NAMN så vi inte krockar med andra snippets) ===
+  const FG_FIREBASE_CONFIG = {
+    apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
+    authDomain: "fangvaktaren-904db.firebaseapp.com",
+    projectId: "fangvaktaren-904db",
+    storageBucket: "fangvaktaren-904db.firebasestorage.app",
+    messagingSenderId: "105301219768",
+    appId: "1:105301219768:web:66b131fba86a541b78174d",
+    measurementId: "G-NXL9GSFZ77"
+  };
+
+  // Initiera Firebase exakt en gång och spara på window
+  function initFirebaseIfNeeded() {
+    if (!window.__fgFirebase) {
+      const app = initializeApp(FG_FIREBASE_CONFIG);
+      const db = getFirestore(app);
+      const auth = getAuth(app);
+      const provider = new GoogleAuthProvider();
+      window.__fgFirebase = { app, db, auth, provider };
+    }
+    return window.__fgFirebase;
   }
 
-  const statusEl   = $("fgFirebaseStatus");
-  const btnSignIn  = $("fgFirebaseSignIn");
-  const btnSignOut = $("fgFirebaseSignOut");
-  const btnExport  = $("fgFirebaseExport");
-  const infoEl     = $("fgFirebaseExportInfo");
+  // Global helper om annan kod vill komma åt Firebase
+  window.getFirebaseHelpers = function () {
+    return initFirebaseIfNeeded();
+  };
 
-  function setStatus(text) {
-    if (statusEl) statusEl.textContent = text;
-  }
+  document.addEventListener("DOMContentLoaded", () => {
+    const { auth } = initFirebaseIfNeeded();
 
-  function setInfo(text) {
-    if (infoEl) infoEl.textContent = text;
-  }
+    const statusEl   = document.getElementById("fgFirebaseStatus");
+    const btnSignIn  = document.getElementById("fgFirebaseSignIn");
+    const btnSignOut = document.getElementById("fgFirebaseSignOut");
+    const btnExport  = document.getElementById("fgFirebaseExport");
+    const infoEl     = document.getElementById("fgFirebaseExportInfo");
 
-  function setButtonsEnabled(isSignedIn) {
-    if (btnSignIn)  btnSignIn.disabled  = isSignedIn;
-    if (btnSignOut) btnSignOut.disabled = !isSignedIn;
-    if (btnExport)  btnExport.disabled  = !isSignedIn;
-  }
-
-  setStatus("Inte inloggad");
-  setInfo("");
-  // Tills vi vet om någon är inloggad, låt alla knappar vara av
-  setButtonsEnabled(false);
-
-  // Hämtar Firebase-objekt UTAN att skapa ny app (vi förutsätter att initializeApp redan har körts i en annan sektion)
-  function getFirebaseHelpers() {
-    const auth = getAuth();
-    const db   = getFirestore();
-    const provider = new GoogleAuthProvider();
-    return { auth, db, provider };
-  }
-
-  if (btnSignIn) {
-    btnSignIn.addEventListener("click", async () => {
-      try {
-        const { auth, provider } = getFirebaseHelpers();
-        const result = await signInWithPopup(auth, provider);
-        const user = result.user;
-        setStatus("Inloggad som " + (user.email || user.displayName || "lärare"));
-        setInfo("Klar att ladda upp frågebank.");
-        setButtonsEnabled(true);
-      } catch (err) {
-        console.error("Login error:", err);
-        setStatus("Inloggning misslyckades");
-        setInfo(err.message || "");
-        setButtonsEnabled(false);
-      }
-    });
-  }
-
-  if (btnSignOut) {
-    btnSignOut.addEventListener("click", async () => {
-      try {
-        const { auth } = getFirebaseHelpers();
-        await signOut(auth);
-        setStatus("Inte inloggad");
-        setInfo("");
-        setButtonsEnabled(false);
-      } catch (err) {
-        console.error("Sign-out error:", err);
-        setStatus("Kunde inte logga ut");
-        setInfo(err.message || "");
-      }
-    });
-  }
-
-  async function exportQuestionBankToFirebase() {
-    const { auth, db } = getFirebaseHelpers();
-    const user = auth.currentUser;
-
-    if (!user) {
-      setStatus("Inte inloggad");
-      setInfo("Logga in med Google först.");
-      setButtonsEnabled(false);
+    if (!statusEl || !btnSignIn) {
+      console.warn("Firebase UI-element hittades inte – kontrollera att rutan med fgFirebase*-ID:n finns i HTML.");
       return;
     }
 
-    let bankPayload = null;
-
-    // Försök använda en global insamlingsfunktion om den finns
-    if (typeof window.fgCollectQuestionBank === "function") {
-      try {
-        bankPayload = window.fgCollectQuestionBank();
-      } catch (e) {
-        console.error("fgCollectQuestionBank fel:", e);
+    // Håll status uppdaterad
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        statusEl.textContent = "Inloggad som " + (user.email || user.displayName || "lärare");
+        btnSignIn.disabled = true;
+        if (btnSignOut) btnSignOut.disabled = false;
+      } else {
+        statusEl.textContent = "Inte inloggad.";
+        btnSignIn.disabled = false;
+        if (btnSignOut) btnSignOut.disabled = true;
       }
-    }
+    });
 
-    // Fallback – försök hitta något på window.FGAME.bank
-    if (!bankPayload && window.FGAME && window.FGAME.bank) {
-      bankPayload = window.FGAME.bank;
-    }
-
-    // Sista fallback om inget hittas
-    if (!bankPayload) {
-      bankPayload = {
-        note: "Ingen specifik frågebank-funktion hittades. Detta är ett placeholder-objekt.",
-        timestamp: new Date().toISOString()
-      };
-    }
-
-    setInfo("Laddar upp frågebank...");
-
-    try {
-      await addDoc(collection(db, "questionBanks"), {
-        teacherUid:   user.uid,
-        teacherEmail: user.email || null,
-        createdAt:    serverTimestamp(),
-        bank:         bankPayload
+    // Logga in med Google
+    if (btnSignIn) {
+      btnSignIn.addEventListener("click", async () => {
+        const { auth, provider } = initFirebaseIfNeeded();
+        try {
+          await signInWithPopup(auth, provider);
+          console.log("Login OK");
+        } catch (err) {
+          console.error("Login error:", err);
+          if (infoEl) infoEl.textContent = "Login error: " + (err.code || err.message || err);
+        }
       });
-
-      setInfo("Frågebank uppladdad ✅");
-    } catch (err) {
-      console.error("Upload error:", err);
-      setInfo("Fel vid uppladdning: " + (err.message || ""));
     }
-  }
 
-  if (btnExport) {
-    btnExport.addEventListener("click", exportQuestionBankToFirebase);
-  }
+    // Logga ut
+    if (btnSignOut) {
+      btnSignOut.addEventListener("click", async () => {
+        const { auth } = initFirebaseIfNeeded();
+        try {
+          await signOut(auth);
+          console.log("Logout OK");
+        } catch (err) {
+          console.error("Logout error:", err);
+          if (infoEl) infoEl.textContent = "Logout error: " + (err.code || err.message || err);
+        }
+      });
+    }
 
-  // Exponera funktionen globalt om vi vill kalla den från annat håll
-  window.fgFirebaseExportQuestionBank = exportQuestionBankToFirebase;
+    // Uppladdning av frågebank (placeholder just nu)
+    if (btnExport) {
+      btnExport.addEventListener("click", async () => {
+        const { db, auth } = initFirebaseIfNeeded();
+        const user = auth.currentUser;
+
+        if (!user) {
+          if (infoEl) infoEl.textContent = "Du måste vara inloggad för att ladda upp frågebank.";
+          return;
+        }
+
+        // TODO: ersätt dummyBank med din riktiga frågebank
+        const dummyBank = {
+          createdAt: new Date().toISOString(),
+          note: "Placeholder – riktig frågebank kopplas i nästa steg."
+        };
+
+        try {
+          await addDoc(collection(db, "fangvaktaren_banker"), {
+            ownerUid: user.uid,
+            ownerEmail: user.email || null,
+            bank: dummyBank,
+            createdAt: serverTimestamp()
+          });
+          if (infoEl) infoEl.textContent = "Uppladdning klar (dummy-data). Vi kopplar riktig frågebank i nästa steg.";
+        } catch (err) {
+          console.error("Upload error:", err);
+          if (infoEl) infoEl.textContent = "Fel vid uppladdning: " + (err.code || err.message || err);
+        }
+      });
+    }
+  });
 </script>
 <!-- slut SEKTION 6: FIREBASE & EXPORTRESULTAT -->
+
+
 
 
 
