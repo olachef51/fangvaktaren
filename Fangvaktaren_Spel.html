@@ -1564,7 +1564,7 @@ function ensureCloudBankUi() {
   wrapper.innerHTML = `
     <h3>☁️ Moln-banker (Firebase)</h3>
     <p class="mini">
-      Välj, skapa, spara och ladda frågebanker kopplade till ditt Google-konto.
+      Välj, skapa, spara och ladda frågebanker (flervals, bild, drag & drop) kopplade till ditt Google-konto.
     </p>
     <div class="card-row">
       <div class="field">
@@ -1629,7 +1629,7 @@ function loadCloudBanksList() {
         const bank = {
           id: doc.id,
           name: data.name || "(namnlös bank)",
-          data: data.data || { mcq: [] }
+          data: data.data || { mcq: [], img: [], drag: [] }
         };
         cloudBanks.push(bank);
         if (select) {
@@ -1668,10 +1668,13 @@ function createCloudBank() {
     .collection("banks")
     .doc();
 
+  const bankData = s.bank || {};
   const payload = {
     name: name,
     data: {
-      mcq: s.bank && Array.isArray(s.bank.mcq) ? s.bank.mcq : []
+      mcq: Array.isArray(bankData.mcq) ? bankData.mcq : [],
+      img: Array.isArray(bankData.img) ? bankData.img : [],
+      drag: Array.isArray(bankData.drag) ? bankData.drag : []
     },
     createdAt: firebase.firestore.FieldValue.serverTimestamp(),
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -1715,10 +1718,13 @@ function saveCloudBank() {
   const existing = cloudBanks.find(b => b.id === bankId);
   const name = existing ? existing.name : (select.options[select.selectedIndex] || {}).text || "Namnlös bank";
 
+  const bankData = s.bank || {};
   const payload = {
     name: name,
     data: {
-      mcq: s.bank && Array.isArray(s.bank.mcq) ? s.bank.mcq : []
+      mcq: Array.isArray(bankData.mcq) ? bankData.mcq : [],
+      img: Array.isArray(bankData.img) ? bankData.img : [],
+      drag: Array.isArray(bankData.drag) ? bankData.drag : []
     },
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   };
@@ -1767,11 +1773,18 @@ function loadCloudBankToLocal() {
       const data = doc.data() || {};
       const bankData = data.data || {};
       const mcq = Array.isArray(bankData.mcq) ? bankData.mcq : [];
+      const img = Array.isArray(bankData.img) ? bankData.img : [];
+      const drag = Array.isArray(bankData.drag) ? bankData.drag : [];
 
       const s = loadState();
-      s.bank = { mcq: mcq };
+      s.bank = {
+        mcq: mcq,
+        img: img,
+        drag: drag
+      };
       saveState(s);
       renderMcqOverview();
+      // Bildfrågor / drag & drop kan få egna översikter här om de används
       setCloudBankStatus('Banken "' + (data.name || "utan namn") + '" är laddad i spelet.');
       activeCloudBankId = bankId;
     })
@@ -1794,7 +1807,11 @@ const DEFAULT_STATE = {
   unlocked: { C: false, A: false },
   bank: {
     // { level:"E"/"C"/"A", type:"mcq", q, options[], answer, goal?, parts? }
-    mcq: []
+    mcq: [],
+    // Bildfrågor, struktur definieras där de används
+    img: [],
+    // Drag & drop-frågor, struktur definieras där de används
+    drag: []
   },
   teacherPassword: "",
   teacherEmail: "",
@@ -1821,7 +1838,17 @@ function loadState() {
     if (parsed.thresholds) s.thresholds = Object.assign({}, s.thresholds, parsed.thresholds);
     if (parsed.best) s.best = Object.assign({}, s.best, parsed.best);
     if (parsed.unlocked) s.unlocked = Object.assign({}, s.unlocked, parsed.unlocked);
-    if (parsed.bank && Array.isArray(parsed.bank.mcq)) s.bank.mcq = parsed.bank.mcq.slice();
+
+    if (parsed.bank) {
+      if (Array.isArray(parsed.bank.mcq)) s.bank.mcq = parsed.bank.mcq.slice();
+      if (Array.isArray(parsed.bank.img)) s.bank.img = parsed.bank.img.slice();
+      if (Array.isArray(parsed.bank.drag)) s.bank.drag = parsed.bank.drag.slice();
+      // Bakåtkompatibilitet om äldre version sparade bank som ren array
+      if (Array.isArray(parsed.bank) && !parsed.bank.mcq) {
+        s.bank.mcq = parsed.bank.slice();
+      }
+    }
+
     if (typeof parsed.teacherPassword === "string") s.teacherPassword = parsed.teacherPassword;
     if (typeof parsed.teacherEmail === "string") s.teacherEmail = parsed.teacherEmail;
     if (Array.isArray(parsed.goalsMap)) s.goalsMap = parsed.goalsMap.slice();
@@ -3077,7 +3104,8 @@ function refreshBankExport() {
   const s = loadState();
   const ta = $("#bankExportJson");
   if (!ta) return;
-  ta.value = JSON.stringify(s.bank.mcq || [], null, 2);
+  const bank = s.bank || { mcq: [], img: [], drag: [] };
+  ta.value = JSON.stringify(bank, null, 2);
 }
 
 function copyToClipboardFromElement(el, statusEl) {
@@ -3115,22 +3143,43 @@ function importBankJson() {
     return;
   }
   const s = loadState();
-  if (!Array.isArray(data)) {
+
+  // Tillåt både gammalt format (array med mcq) och nytt format (objekt med mcq/img/drag)
+  if (Array.isArray(data)) {
+    s.bank.mcq = data.map(item => ({
+      level: item.level || "E",
+      type: "mcq",
+      q: item.q || "",
+      options: Array.isArray(item.options) ? item.options.map(o => String(o)) : [],
+      answer: clampInt(item.answer, 0, (item.options || []).length - 1, 0),
+      goal: item.goal || null,
+      parts: item.parts || null
+    }));
+    // Bild/drag lämnas oförändrade i detta fall
+  } else if (data && typeof data === "object") {
+    const mcqData = Array.isArray(data.mcq) ? data.mcq : [];
+    const imgData = Array.isArray(data.img) ? data.img : [];
+    const dragData = Array.isArray(data.drag) ? data.drag : [];
+
+    s.bank.mcq = mcqData.map(item => ({
+      level: item.level || "E",
+      type: "mcq",
+      q: item.q || "",
+      options: Array.isArray(item.options) ? item.options.map(o => String(o)) : [],
+      answer: clampInt(item.answer, 0, (item.options || []).length - 1, 0),
+      goal: item.goal || null,
+      parts: item.parts || null
+    }));
+    s.bank.img = imgData.slice();
+    s.bank.drag = dragData.slice();
+  } else {
     if (status) {
-      status.textContent = "Förväntar en array med frågor.";
+      status.textContent = "Förväntar en array med frågor eller ett objekt med bank-data.";
       setTimeout(() => { status.textContent = ""; }, 2500);
     }
     return;
   }
-  s.bank.mcq = data.map(item => ({
-    level: item.level || "E",
-    type: "mcq",
-    q: item.q || "",
-    options: Array.isArray(item.options) ? item.options.map(o => String(o)) : [],
-    answer: clampInt(item.answer, 0, (item.options || []).length - 1, 0),
-    goal: item.goal || null,
-    parts: item.parts || null
-  }));
+
   saveState(s);
   renderMcqOverview();
   if (status) {
@@ -3299,7 +3348,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnCopyExportJsonEl) btnCopyExportJsonEl.addEventListener("click", copyExportJson);
   if (btnEmailExportJsonEl) btnEmailExportJsonEl.addEventListener("click", emailExportJson);
 
-  // Google-inloggningsknapp
+  // Google-inloggningsknapp (riktig funktion nu)
   const btnGooglePlaceholder = $("#btnGooglePlaceholder");
   if (btnGooglePlaceholder) {
     btnGooglePlaceholder.addEventListener("click", handleGoogleClick);
@@ -3313,6 +3362,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 </script>
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN -->
+
 
 
 
