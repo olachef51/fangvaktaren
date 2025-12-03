@@ -1238,150 +1238,11 @@
 "use strict";
 
 /* =========================
-   3a – Hjälpfunktioner, Firebase, State & Grunddata
+   3a – Hjälpfunktioner, State & Grunddata
    ========================= */
 
 const $ = document.querySelector.bind(document);
 const $all = document.querySelectorAll.bind(document);
-
-// Firebase-konfiguration (måste matcha ditt projekt i Firebase)
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
-  authDomain: "fangvaktaren-904db.firebaseapp.com",
-  projectId: "fangvaktaren-904db",
-  storageBucket: "fangvaktaren-904db.firebasestorage.app",
-  messagingSenderId: "105301219768",
-  appId: "1:105301219768:web:66b131fba86a541b78174d",
-  measurementId: "G-NXL9GSFZ77"
-};
-
-let firebaseAppInstance = null;
-let firebaseAuthInstance = null;
-let firebaseDbInstance = null;
-let currentTeacherUser = null;
-
-let cloudBankStatusEl = null;
-
-/* =========================
-   3a.2 – Moln-banker (Firestore)
-   ========================= */
-
-async function loadCloudBankFromCloud() {
-  if (!firebaseDbInstance || !currentTeacherUser) {
-    console.warn("Kan inte ladda moln-bank: ingen DB eller användare.");
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "☁️ Inloggad – ingen moln-bank laddad ännu.";
-    }
-    return;
-  }
-
-  try {
-    const docRef = firebaseDbInstance
-      .collection("fangvaktaren_banks")
-      .doc(currentTeacherUser.uid);
-
-    const snap = await docRef.get();
-    if (!snap.exists) {
-      console.log("Ingen moln-bank hittades, använder lokal bank.");
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Ingen moln-bank hittades – lokal bank används.";
-      }
-      return;
-    }
-
-    const data = snap.data() || {};
-    if (!data.bank) {
-      console.warn("Moln-dokument saknar 'bank'-fält.");
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Moln-datan saknar frågebank.";
-      }
-      return;
-    }
-
-    const s = loadState();
-    s.bank = Object.assign(
-      { mcq: [], img: [], drag: [] },
-      data.bank || {}
-    );
-    saveState(s);
-    syncUI();
-
-    if (cloudBankStatusEl) {
-      let tsText = "";
-      if (data.updatedAt && typeof data.updatedAt.toDate === "function") {
-        tsText = " · uppdaterad " + data.updatedAt.toDate().toLocaleString("sv-SE");
-      }
-      cloudBankStatusEl.textContent = "☁️ Moln-bank inläst" + tsText;
-    }
-
-    console.log("Moln-bank inläst:", data);
-  } catch (err) {
-    console.error("Fel vid läsning av moln-bank:", err);
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "❌ Fel vid läsning av moln-bank.";
-    }
-    alert("Kunde inte läsa frågebank från molnet.\nSe konsolen för detaljer.");
-  }
-}
-
-async function saveLocalBankToCloud() {
-  if (!firebaseDbInstance || !currentTeacherUser) {
-    alert("Du måste vara inloggad med Google för att spara i molnet.");
-    return;
-  }
-
-  try {
-    const s = loadState();
-    const docRef = firebaseDbInstance
-      .collection("fangvaktaren_banks")
-      .doc(currentTeacherUser.uid);
-
-    await docRef.set(
-      {
-        ownerUid: currentTeacherUser.uid,
-        bank: s.bank || { mcq: [], img: [], drag: [] },
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
-
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "☁️ Moln-bank sparad.";
-    }
-    console.log("Moln-bank sparad:", s.bank);
-  } catch (err) {
-    console.error("Fel vid sparande av moln-bank:", err);
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "❌ Fel vid sparande av moln-bank.";
-    }
-    alert("Kunde inte spara frågebank i molnet.\nSe konsolen för detaljer.");
-  }
-}
-
-function initCloudBankButtons() {
-  // Om du har knappar i lärarläget, t.ex.:
-  // <button id="btnSaveCloudBank">Spara till molnet</button>
-  // <button id="btnLoadCloudBank">Läs från molnet</button>
-  const btnSave = document.getElementById("btnSaveCloudBank");
-  const btnLoad = document.getElementById("btnLoadCloudBank");
-
-  cloudBankStatusEl =
-    document.getElementById("cloudBankStatus") ||
-    document.getElementById("googleStatus") ||
-    null;
-
-  if (btnSave) {
-    btnSave.addEventListener("click", () => {
-      saveLocalBankToCloud();
-    });
-  }
-
-  if (btnLoad) {
-    btnLoad.addEventListener("click", () => {
-      loadCloudBankFromCloud();
-    });
-  }
-}
 
 const STORAGE_KEY = "fangvaktaren-mobile-v1";
 
@@ -1391,6 +1252,8 @@ let currentAnswers = [];
 let currentImageDataUrl = null;
 let lastSubmission = null;
 let extraGoalSelections = { mcq: [], img: [], drag: [] };
+
+let cloudBankStatusEl = null;
 
 const defaultState = {
   student: { name: "", klass: "" },
@@ -1468,80 +1331,129 @@ function shuffle(arr) {
   return arr.slice().sort(() => Math.random() - 0.5);
 }
 
+
 /* =========================
-   3a.1 – Firebase init & Google-login
+   3a.2 – Moln-banker (Firestore)
    ========================= */
 
-function initFirebase() {
-  if (firebaseAppInstance) return;
-  try {
-    firebaseAppInstance = firebase.initializeApp(FIREBASE_CONFIG);
-    firebaseAuthInstance = firebase.auth();
-    firebaseDbInstance = firebase.firestore();
-    console.log("Firebase init OK");
-  } catch (e) {
-    console.warn("Firebase init misslyckades:", e);
-  }
-}
-function setupGoogleLogin() {
-  const btn = $("#btnGooglePlaceholder");
-  const statusEl = $("#googleStatus");
-
-  if (!btn) return;
-  if (!firebaseAuthInstance) {
-    console.warn("Firebase Auth saknas – kunde inte koppla Google-login.");
+async function loadCloudBankFromCloud() {
+  if (typeof firebaseDbInstance === "undefined" || !firebaseDbInstance || typeof currentTeacherUser === "undefined" || !currentTeacherUser) {
+    console.warn("Kan inte ladda moln-bank: ingen DB eller användare.");
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "☁️ Inte inloggad eller ingen databas.";
+    }
     return;
   }
 
-  // Håll koll på status-elementet även här
-  cloudBankStatusEl = document.getElementById("cloudBankStatus") || statusEl || null;
+  try {
+    const docRef = firebaseDbInstance
+      .collection("fangvaktaren_banks")
+      .doc(currentTeacherUser.uid);
 
-  // Reagera om användaren redan är inloggad när sidan laddas
-  firebaseAuthInstance.onAuthStateChanged(async (user) => {
-    currentTeacherUser = user || null;
-    if (user) {
-      const email = user.email || user.displayName || "lärare";
+    const snap = await docRef.get();
+    if (!snap.exists) {
+      console.log("Ingen moln-bank hittades, använder lokal bank.");
       if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email} – läser moln-bank...`;
+        cloudBankStatusEl.textContent = "☁️ Ingen moln-bank hittades. Spara först från den här enheten.";
       }
-      try {
-        await loadCloudBankFromCloud();
-      } catch (e) {
-        console.error("Fel vid auto-laddning av moln-bank:", e);
-      }
-    } else {
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Inte inloggad.";
-      }
+      return;
     }
-  });
 
-  btn.addEventListener("click", async () => {
-    try {
-      const provider = new firebase.auth.GoogleAuthProvider();
-      const result = await firebaseAuthInstance.signInWithPopup(provider);
-      currentTeacherUser = result.user || null;
-      if (cloudBankStatusEl && currentTeacherUser) {
-        const email = currentTeacherUser.email || currentTeacherUser.displayName || "lärare";
-        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email} – läser moln-bank...`;
-      }
-      console.log("Google-inloggning OK:", currentTeacherUser);
-
-      // Efter lyckad inloggning: ladda moln-bank
-      await loadCloudBankFromCloud();
-    } catch (err) {
-      console.error("Google-inloggning misslyckades:", err);
+    const data = snap.data() || {};
+    if (!data.bank) {
+      console.warn("Moln-dokument saknar 'bank'-fält.");
       if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "❌ Inloggning misslyckades – kontrollera Authorized domains i Firebase.";
+        cloudBankStatusEl.textContent = "☁️ Moln-datan saknar frågebank.";
       }
-      alert(
-        "Google-inloggning misslyckades.\n\nVanliga orsaker:\n" +
-        "- Sidan körs via file:// (kräver http/https)\n" +
-        "- Domänen är inte tillagd under Authentication → Settings → Authorized domains i Firebase.\n"
-      );
+      return;
     }
-  });
+
+    const s = loadState();
+    s.bank = Object.assign(
+      { mcq: [], img: [], drag: [] },
+      data.bank || {}
+    );
+    saveState(s);
+    syncUI();
+
+    let tsText = "";
+    if (data.updatedAt && typeof data.updatedAt.toDate === "function") {
+      tsText = " · uppdaterad " + data.updatedAt.toDate().toLocaleString("sv-SE");
+    }
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "☁️ Moln-bank inläst" + tsText;
+    }
+
+    console.log("Moln-bank inläst:", data);
+  } catch (err) {
+    console.error("Fel vid läsning av moln-bank:", err);
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "❌ Fel vid läsning av moln-bank.";
+    }
+    alert("Kunde inte läsa frågebank från molnet.\nSe konsolen för detaljer.");
+  }
 }
+
+async function saveLocalBankToCloud() {
+  if (typeof firebaseDbInstance === "undefined" || !firebaseDbInstance || typeof currentTeacherUser === "undefined" || !currentTeacherUser) {
+    alert("Du måste vara inloggad med Google för att spara i molnet.");
+    return;
+  }
+
+  try {
+    const s = loadState();
+    const nameInput = $("#inputBankName");
+    const bankName = nameInput ? (nameInput.value.trim() || null) : null;
+
+    const docRef = firebaseDbInstance
+      .collection("fangvaktaren_banks")
+      .doc(currentTeacherUser.uid);
+
+    await docRef.set(
+      {
+        ownerUid: currentTeacherUser.uid,
+        name: bankName,
+        bank: s.bank || { mcq: [], img: [], drag: [] },
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "☁️ Moln-bank sparad.";
+    }
+    console.log("Moln-bank sparad:", s.bank);
+  } catch (err) {
+    console.error("Fel vid sparande av moln-bank:", err);
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "❌ Fel vid sparande av moln-bank.";
+    }
+    alert("Kunde inte spara frågebank i molnet.\nSe konsolen för detaljer.");
+  }
+}
+
+function initCloudBankButtons() {
+  const btnSave = $("#btnSaveToCloud");
+  const btnLoad = $("#btnLoadCloudBanks");
+
+  cloudBankStatusEl =
+    $("#cloudBankStatus") ||
+    $("#googleStatus") ||
+    null;
+
+  if (btnSave) {
+    btnSave.addEventListener("click", () => {
+      saveLocalBankToCloud();
+    });
+  }
+
+  if (btnLoad) {
+    btnLoad.addEventListener("click", () => {
+      loadCloudBankFromCloud();
+    });
+  }
+}
+
 
 /* =========================
    3b – UI-Rendering & Synkronisering
@@ -1732,8 +1644,9 @@ function renderDragQuestion(q, index, host) {
   currentAnswers[index] = { mapping: {}, selected: {} };
 }
 
+
 /* =========================
-   3c – Delmålshantering (översikt)
+   3c – Delmålshantering (översikt – mest inaktiverad just nu)
    ========================= */
 
 function buildGoalInfoText(q) {
@@ -1800,6 +1713,7 @@ function renderGoalsList() {
     });
   });
 }
+
 
 /* =========================
    3d – Lärarinställningar (e-post, trösklar, lösenord)
@@ -1886,8 +1800,9 @@ function initTeacherPasswordSettings() {
   });
 }
 
+
 /* =========================
-   3e – Frågeformulär (MCQ-editor)
+   3e – Frågeformulär (inaktiverad/logisk grund – kopplas senare)
    ========================= */
 
 function initQuestionForms() {
@@ -2007,6 +1922,7 @@ function initQuestionForms() {
   }
 }
 
+
 /* =========================
    3f – Spelmekanik (Starta & Slutföra Nivå)
    ========================= */
@@ -2095,7 +2011,7 @@ function finishLevel() {
 
   const thres = s.thres || { E: 70, C: 70, A: 70 };
   const lvl = currentLevel;
-  const threshold = thres[lvl] != null ? thres[lvl] : 70;
+  const threshold = (thres && thres[lvl] != null) ? thres[lvl] : 70;
 
   if (percentage > (s.best[lvl] || 0)) {
     s.best[lvl] = percentage;
@@ -2177,8 +2093,9 @@ function finishLevel() {
   syncUI();
 }
 
+
 /* =========================
-   3g – Bildhantering
+   3g – Bildhantering (för framtida bildfrågor)
    ========================= */
 
 function handleImageUpload(e) {
@@ -2195,6 +2112,7 @@ function handleImageUpload(e) {
     reader.readAsDataURL(file);
   }
 }
+
 
 /* =========================
    3h – E-post med JSON-resultat
@@ -2232,6 +2150,7 @@ function emailResultToTeacher() {
 
   window.location.href = mailtoLink;
 }
+
 
 /* =========================
    3i – Lärarläge (gate + modal)
@@ -2312,6 +2231,7 @@ function setupTabNavigation() {
   });
 }
 
+
 /* =========================
    3j – Elevkort & knappar
    ========================= */
@@ -2335,24 +2255,76 @@ function handleSaveStudent() {
   syncUI();
 }
 
+
 /* =========================
-   3k – Initiering
+   3k – Google-login (Firebase Auth)
+   ========================= */
+
+function setupGoogleLogin() {
+  const btn = $("#btnGooglePlaceholder");
+  const statusEl = $("#googleStatus");
+
+  if (!btn) return;
+  if (typeof firebaseAuthInstance === "undefined" || !firebaseAuthInstance) {
+    console.warn("Firebase Auth saknas – kunde inte koppla Google-login.");
+    return;
+  }
+
+  cloudBankStatusEl = $("#cloudBankStatus") || statusEl || null;
+
+  firebaseAuthInstance.onAuthStateChanged(async (user) => {
+    if (typeof currentTeacherUser !== "undefined") {
+      currentTeacherUser = user || null;
+    }
+    if (user) {
+      const email = user.email || user.displayName || "lärare";
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email}.`;
+      }
+    } else {
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = "☁️ Inte inloggad.";
+      }
+    }
+  });
+
+  btn.addEventListener("click", async () => {
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      const result = await firebaseAuthInstance.signInWithPopup(provider);
+      if (typeof currentTeacherUser !== "undefined") {
+        currentTeacherUser = result.user || null;
+      }
+
+      if (currentTeacherUser && cloudBankStatusEl) {
+        const email = currentTeacherUser.email || currentTeacherUser.displayName || "lärare";
+        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email}.`;
+      }
+
+      console.log("Google-inloggning OK:", currentTeacherUser);
+    } catch (err) {
+      console.error("Google-inloggning misslyckades:", err);
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = "❌ Inloggning misslyckades. Se konsolen.";
+      }
+      alert(
+        "Google-inloggning misslyckades.\n\nVanliga orsaker:\n" +
+        "- Sidan körs via file:// (bäst är http/https)\n" +
+        "- Domänen är inte tillagd under Authentication → Settings → Authorized domains i Firebase.\n"
+      );
+    }
+  });
+}
+
+
+/* =========================
+   3l – Initiering
    ========================= */
 
 function initApp() {
-  // Initiera Firebase (för Google-login)
-  try {
-    if (typeof firebase !== "undefined") {
-      initFirebase();
-    } else {
-      console.warn("Firebase-biblioteken kunde inte hittas.");
-    }
-  } catch (e) {
-    console.warn("Fel vid initFirebase:", e);
-  }
-
   // Grunddata & state
   const s = loadState();
+  // Om banken är tom, lägg in embedded igen (säkerhet)
   if ((!s.bank.mcq || !s.bank.mcq.length) &&
       (!s.bank.img || !s.bank.img.length) &&
       (!s.bank.drag || !s.bank.drag.length)) {
@@ -2360,7 +2332,7 @@ function initApp() {
     saveState(merged);
   }
 
-   // UI
+  // UI
   initTeacherEmailSettings();
   initThresholdSettings();
   initTeacherPasswordSettings();
@@ -2369,12 +2341,9 @@ function initApp() {
   renderGoalsList();
   syncUI();
 
-  // Moln-banker (koppla ev. knappar + status-fält)
+  // Molnknappar & Google-login
   initCloudBankButtons();
-
-  // Koppla Google-login-knappen efter att Firebase är initierad
   setupGoogleLogin();
-
 
   // Elevknappar
   const btnSaveStudent = $("#btnSaveStudent");
@@ -2442,15 +2411,21 @@ function initApp() {
 
 // Start-lyssnare för nivåer & avslut
 document.addEventListener("DOMContentLoaded", () => {
-  $("#start-levelE")?.addEventListener("click", () => startLevel("E"));
-  $("#start-levelC")?.addEventListener("click", () => startLevel("C"));
-  $("#start-levelA")?.addEventListener("click", () => startLevel("A"));
-  $("#btnFinish")?.addEventListener("click", finishLevel);
+  const btnE = $("#start-levelE");
+  const btnC = $("#start-levelC");
+  const btnA = $("#start-levelA");
+  const btnFinish = $("#btnFinish");
+
+  if (btnE) btnE.addEventListener("click", () => startLevel("E"));
+  if (btnC) btnC.addEventListener("click", () => startLevel("C"));
+  if (btnA) btnA.addEventListener("click", () => startLevel("A"));
+  if (btnFinish) btnFinish.addEventListener("click", finishLevel);
 
   initApp();
 });
 </script>
 <!-- slut SEKTION 3:  -->
+
 
 
 
