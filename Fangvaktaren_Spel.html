@@ -949,6 +949,7 @@
         }
       ]
     }
+  }
   </script>
 
   <div id="teacherGate" class="gate-backdrop hidden">
@@ -1258,6 +1259,7 @@ const $ = (sel) => document.querySelector(sel);
 const $all = (sel) => document.querySelectorAll(sel);
 
 let firebaseAppInstance = null;
+let firebaseAuthInstance = null;
 let firebaseDbInstance = null;
 let currentTeacherUser = null;
 
@@ -1367,19 +1369,12 @@ function initFirebase() {
       }
       return;
     }
-
-    if (!firebase.apps || !firebase.apps.length) {
+    if (!firebase.apps.length) {
       firebase.initializeApp(FIREBASE_CONFIG);
     }
-
     firebaseAppInstance = firebase.app();
-
-    if (firebase.firestore) {
-      firebaseDbInstance = firebase.firestore();
-    } else {
-      console.warn("Firebase Firestore saknas – moln-banker inaktiveras.");
-    }
-
+    firebaseAuthInstance = firebase.auth();
+    firebaseDbInstance = firebase.firestore();
     console.log("Firebase init OK");
     setupGoogleLogin();
   } catch (e) {
@@ -1395,16 +1390,13 @@ function setupGoogleLogin() {
   const statusEl = $("#googleStatus");
   if (!btn || !statusEl) return;
 
-  if (!window.firebase || !firebase.apps || !firebase.apps.length || !firebase.auth) {
-    console.warn("Firebase Auth saknas – kunde inte koppla Google-login.");
-    statusEl.textContent = "☁️ Google-inloggning är inte aktiv (Firebase Auth saknas).";
-    btn.disabled = true;
+  if (!firebaseAuthInstance) {
+    console.warn("Firebase Auth saknas vid setupGoogleLogin.");
+    statusEl.textContent = "⚠️ Tekniskt fel: Firebase Auth saknas.";
     return;
   }
 
-  const auth = firebase.auth();
-
-  auth.onAuthStateChanged((user) => {
+  firebaseAuthInstance.onAuthStateChanged((user) => {
     currentTeacherUser = user || null;
     if (!statusEl) return;
     if (user) {
@@ -1415,9 +1407,13 @@ function setupGoogleLogin() {
   });
 
   btn.addEventListener("click", async () => {
+    if (!firebaseAuthInstance) {
+      alert("Tekniskt fel: Firebase Auth saknas.");
+      return;
+    }
     try {
       const provider = new firebase.auth.GoogleAuthProvider();
-      await auth.signInWithPopup(provider);
+      await firebaseAuthInstance.signInWithPopup(provider);
     } catch (err) {
       console.error("Google-inloggning misslyckades:", err);
       statusEl.textContent = "⚠️ Kunde inte logga in med Google. Försök igen.";
@@ -1448,7 +1444,7 @@ async function loadCloudBanksList() {
   if (!firebaseDbInstance || !currentTeacherUser) {
     const li = document.createElement("li");
     li.className = "mini";
-    li.textContent = "Du måste vara inloggad med Google för att se dina moln-banker.";
+    li.textContent = "Du måste vara inloggad med Google för att se dina moln-bankar.";
     listEl.appendChild(li);
     return;
   }
@@ -1457,19 +1453,31 @@ async function loadCloudBanksList() {
     const snap = await firebaseDbInstance
       .collection(CLOUD_COLLECTION)
       .where("ownerUid", "==", currentTeacherUser.uid)
-      .orderBy("createdAt", "desc")
       .get();
 
     if (snap.empty) {
       console.log("Ingen moln-bank hittades, använder lokal bank.");
       const li = document.createElement("li");
       li.className = "mini";
-      li.textContent = "Inga moln-banker hittades ännu.";
+      li.textContent = "Inga moln-bankar hittades ännu.";
       listEl.appendChild(li);
       return;
     }
 
-    snap.forEach((doc) => {
+    const docs = [];
+    snap.forEach((doc) => docs.push(doc));
+
+    docs.sort((a, b) => {
+      const da = a.data().createdAt && a.data().createdAt.toDate
+        ? a.data().createdAt.toDate().getTime()
+        : 0;
+      const db = b.data().createdAt && b.data().createdAt.toDate
+        ? b.data().createdAt.toDate().getTime()
+        : 0;
+      return db - da;
+    });
+
+    docs.forEach((doc) => {
       const data = doc.data() || {};
       const li = document.createElement("li");
       li.className = "list-item";
@@ -2109,7 +2117,6 @@ function syncUI() {
   const badgeC = $("#badge-levelC");
   const badgeA = $("#badge-levelA");
 
-  // Nivå 1 (E)
   if (cardE && btnE && badgeE) {
     if (hasStudent) {
       cardE.classList.remove("locked");
@@ -2126,7 +2133,6 @@ function syncUI() {
     }
   }
 
-  // Nivå 2 (C)
   if (cardC && btnC && badgeC) {
     if (s.unlocked.C) {
       cardC.classList.remove("locked");
@@ -2143,7 +2149,6 @@ function syncUI() {
     }
   }
 
-  // Nivå 3 (A)
   if (cardA && btnA && badgeA) {
     if (s.unlocked.A) {
       cardA.classList.remove("locked");
@@ -2498,11 +2503,6 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 </script>
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN -->
-
-
-
-
-
 
 
 
