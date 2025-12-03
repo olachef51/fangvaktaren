@@ -1253,7 +1253,12 @@ let currentImageDataUrl = null;
 let lastSubmission = null;
 let extraGoalSelections = { mcq: [], img: [], drag: [] };
 
+let currentTeacherUser = null;
+let firebaseAuthInstance = null;
+let firebaseDbInstance = null;
+
 let cloudBankStatusEl = null;
+let googleLoginStatusEl = null;
 
 const defaultState = {
   student: { name: "", klass: "" },
@@ -1274,7 +1279,8 @@ function mergeEmbeddedBank(state) {
   const el = document.getElementById("embedded-data");
   if (!el) return state;
   try {
-    const data = JSON.parse(el.textContent || el.innerHTML || "{}");
+    const raw = el.textContent || el.innerHTML || "{}";
+    const data = JSON.parse(raw);
     if (data && data.bank) {
       state.bank = Object.assign({ mcq: [], img: [], drag: [] }, state.bank);
       state.bank.mcq = (state.bank.mcq || []).concat(data.bank.mcq || []);
@@ -1282,7 +1288,8 @@ function mergeEmbeddedBank(state) {
       state.bank.drag = (state.bank.drag || []).concat(data.bank.drag || []);
     }
   } catch (e) {
-    console.warn("Kunde inte läsa embedded-data:", e);
+    // JSON i embedded-data är felaktig – hoppa över utan att stoppa appen
+    // console.warn("Kunde inte läsa embedded-data:", e);
   }
   return state;
 }
@@ -1337,10 +1344,10 @@ function shuffle(arr) {
    ========================= */
 
 async function loadCloudBankFromCloud() {
-  if (typeof firebaseDbInstance === "undefined" || !firebaseDbInstance || typeof currentTeacherUser === "undefined" || !currentTeacherUser) {
+  if (!firebaseDbInstance || !currentTeacherUser) {
     console.warn("Kan inte ladda moln-bank: ingen DB eller användare.");
     if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "☁️ Inte inloggad eller ingen databas.";
+      cloudBankStatusEl.textContent = "☁️ Lokal bank används (ingen moln-bank sparad ännu).";
     }
     return;
   }
@@ -1354,7 +1361,7 @@ async function loadCloudBankFromCloud() {
     if (!snap.exists) {
       console.log("Ingen moln-bank hittades, använder lokal bank.");
       if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Ingen moln-bank hittades. Spara först från den här enheten.";
+        cloudBankStatusEl.textContent = "☁️ Inloggad – ingen moln-bank sparad ännu. Lokal bank används.";
       }
       return;
     }
@@ -1363,7 +1370,7 @@ async function loadCloudBankFromCloud() {
     if (!data.bank) {
       console.warn("Moln-dokument saknar 'bank'-fält.");
       if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Moln-datan saknar frågebank.";
+        cloudBankStatusEl.textContent = "☁️ Inloggad – moln-datan saknar frågebank. Lokal bank används.";
       }
       return;
     }
@@ -1388,14 +1395,14 @@ async function loadCloudBankFromCloud() {
   } catch (err) {
     console.error("Fel vid läsning av moln-bank:", err);
     if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "❌ Fel vid läsning av moln-bank.";
+      cloudBankStatusEl.textContent = "❌ Fel vid läsning av moln-bank. Lokal bank används.";
     }
     alert("Kunde inte läsa frågebank från molnet.\nSe konsolen för detaljer.");
   }
 }
 
 async function saveLocalBankToCloud() {
-  if (typeof firebaseDbInstance === "undefined" || !firebaseDbInstance || typeof currentTeacherUser === "undefined" || !currentTeacherUser) {
+  if (!firebaseDbInstance || !currentTeacherUser) {
     alert("Du måste vara inloggad med Google för att spara i molnet.");
     return;
   }
@@ -1426,7 +1433,7 @@ async function saveLocalBankToCloud() {
   } catch (err) {
     console.error("Fel vid sparande av moln-bank:", err);
     if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "❌ Fel vid sparande av moln-bank.";
+      cloudBankStatusEl.textContent = "❌ Fel vid sparande av moln-bank. Kontrollera konsolen.";
     }
     alert("Kunde inte spara frågebank i molnet.\nSe konsolen för detaljer.");
   }
@@ -1436,10 +1443,8 @@ function initCloudBankButtons() {
   const btnSave = $("#btnSaveToCloud");
   const btnLoad = $("#btnLoadCloudBanks");
 
-  cloudBankStatusEl =
-    $("#cloudBankStatus") ||
-    $("#googleStatus") ||
-    null;
+  // Separat statusfält för moln-bank om det finns
+  cloudBankStatusEl = document.getElementById("cloudBankStatus") || cloudBankStatusEl;
 
   if (btnSave) {
     btnSave.addEventListener("click", () => {
@@ -2262,29 +2267,32 @@ function handleSaveStudent() {
 
 function setupGoogleLogin() {
   const btn = $("#btnGooglePlaceholder");
-  const statusEl = $("#googleStatus");
+  googleLoginStatusEl = $("#googleStatus") || null;
 
-  if (!btn) return;
-  if (typeof firebaseAuthInstance === "undefined" || !firebaseAuthInstance) {
+  if (!btn || !firebaseAuthInstance) {
     console.warn("Firebase Auth saknas – kunde inte koppla Google-login.");
+    if (googleLoginStatusEl) {
+      googleLoginStatusEl.textContent = "☁️ Inte inloggad.";
+    }
     return;
   }
 
-  cloudBankStatusEl = $("#cloudBankStatus") || statusEl || null;
-
   firebaseAuthInstance.onAuthStateChanged(async (user) => {
-    if (typeof currentTeacherUser !== "undefined") {
-      currentTeacherUser = user || null;
+    currentTeacherUser = user || null;
+
+    if (googleLoginStatusEl) {
+      if (user) {
+        const email = user.email || user.displayName || "lärare";
+        googleLoginStatusEl.textContent = `✅ Inloggad som ${email}.`;
+      } else {
+        googleLoginStatusEl.textContent = "☁️ Inte inloggad.";
+      }
     }
-    if (user) {
-      const email = user.email || user.displayName || "lärare";
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email}.`;
-      }
-    } else {
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Inte inloggad.";
-      }
+
+    // Försök ladda moln-bank automatiskt när man är inloggad
+    if (user && cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "☁️ Försöker läsa moln-bank ...";
+      await loadCloudBankFromCloud();
     }
   });
 
@@ -2292,20 +2300,18 @@ function setupGoogleLogin() {
     try {
       const provider = new firebase.auth.GoogleAuthProvider();
       const result = await firebaseAuthInstance.signInWithPopup(provider);
-      if (typeof currentTeacherUser !== "undefined") {
-        currentTeacherUser = result.user || null;
-      }
+      currentTeacherUser = result.user || null;
 
-      if (currentTeacherUser && cloudBankStatusEl) {
+      if (googleLoginStatusEl && currentTeacherUser) {
         const email = currentTeacherUser.email || currentTeacherUser.displayName || "lärare";
-        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email}.`;
+        googleLoginStatusEl.textContent = `✅ Inloggad som ${email}.`;
       }
 
       console.log("Google-inloggning OK:", currentTeacherUser);
     } catch (err) {
       console.error("Google-inloggning misslyckades:", err);
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "❌ Inloggning misslyckades. Se konsolen.";
+      if (googleLoginStatusEl) {
+        googleLoginStatusEl.textContent = "❌ Inloggning misslyckades. Se konsolen.";
       }
       alert(
         "Google-inloggning misslyckades.\n\nVanliga orsaker:\n" +
@@ -2425,6 +2431,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 </script>
 <!-- slut SEKTION 3:  -->
+
 
 
 
