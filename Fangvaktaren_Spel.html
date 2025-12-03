@@ -1260,6 +1260,129 @@ let firebaseAuthInstance = null;
 let firebaseDbInstance = null;
 let currentTeacherUser = null;
 
+let cloudBankStatusEl = null;
+
+/* =========================
+   3a.2 – Moln-banker (Firestore)
+   ========================= */
+
+async function loadCloudBankFromCloud() {
+  if (!firebaseDbInstance || !currentTeacherUser) {
+    console.warn("Kan inte ladda moln-bank: ingen DB eller användare.");
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "☁️ Inloggad – ingen moln-bank laddad ännu.";
+    }
+    return;
+  }
+
+  try {
+    const docRef = firebaseDbInstance
+      .collection("fangvaktaren_banks")
+      .doc(currentTeacherUser.uid);
+
+    const snap = await docRef.get();
+    if (!snap.exists) {
+      console.log("Ingen moln-bank hittades, använder lokal bank.");
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = "☁️ Ingen moln-bank hittades – lokal bank används.";
+      }
+      return;
+    }
+
+    const data = snap.data() || {};
+    if (!data.bank) {
+      console.warn("Moln-dokument saknar 'bank'-fält.");
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = "☁️ Moln-datan saknar frågebank.";
+      }
+      return;
+    }
+
+    const s = loadState();
+    s.bank = Object.assign(
+      { mcq: [], img: [], drag: [] },
+      data.bank || {}
+    );
+    saveState(s);
+    syncUI();
+
+    if (cloudBankStatusEl) {
+      let tsText = "";
+      if (data.updatedAt && typeof data.updatedAt.toDate === "function") {
+        tsText = " · uppdaterad " + data.updatedAt.toDate().toLocaleString("sv-SE");
+      }
+      cloudBankStatusEl.textContent = "☁️ Moln-bank inläst" + tsText;
+    }
+
+    console.log("Moln-bank inläst:", data);
+  } catch (err) {
+    console.error("Fel vid läsning av moln-bank:", err);
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "❌ Fel vid läsning av moln-bank.";
+    }
+    alert("Kunde inte läsa frågebank från molnet.\nSe konsolen för detaljer.");
+  }
+}
+
+async function saveLocalBankToCloud() {
+  if (!firebaseDbInstance || !currentTeacherUser) {
+    alert("Du måste vara inloggad med Google för att spara i molnet.");
+    return;
+  }
+
+  try {
+    const s = loadState();
+    const docRef = firebaseDbInstance
+      .collection("fangvaktaren_banks")
+      .doc(currentTeacherUser.uid);
+
+    await docRef.set(
+      {
+        ownerUid: currentTeacherUser.uid,
+        bank: s.bank || { mcq: [], img: [], drag: [] },
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "☁️ Moln-bank sparad.";
+    }
+    console.log("Moln-bank sparad:", s.bank);
+  } catch (err) {
+    console.error("Fel vid sparande av moln-bank:", err);
+    if (cloudBankStatusEl) {
+      cloudBankStatusEl.textContent = "❌ Fel vid sparande av moln-bank.";
+    }
+    alert("Kunde inte spara frågebank i molnet.\nSe konsolen för detaljer.");
+  }
+}
+
+function initCloudBankButtons() {
+  // Om du har knappar i lärarläget, t.ex.:
+  // <button id="btnSaveCloudBank">Spara till molnet</button>
+  // <button id="btnLoadCloudBank">Läs från molnet</button>
+  const btnSave = document.getElementById("btnSaveCloudBank");
+  const btnLoad = document.getElementById("btnLoadCloudBank");
+
+  cloudBankStatusEl =
+    document.getElementById("cloudBankStatus") ||
+    document.getElementById("googleStatus") ||
+    null;
+
+  if (btnSave) {
+    btnSave.addEventListener("click", () => {
+      saveLocalBankToCloud();
+    });
+  }
+
+  if (btnLoad) {
+    btnLoad.addEventListener("click", () => {
+      loadCloudBankFromCloud();
+    });
+  }
+}
+
 const STORAGE_KEY = "fangvaktaren-mobile-v1";
 
 let currentLevel = null;
@@ -1360,7 +1483,6 @@ function initFirebase() {
     console.warn("Firebase init misslyckades:", e);
   }
 }
-
 function setupGoogleLogin() {
   const btn = $("#btnGooglePlaceholder");
   const statusEl = $("#googleStatus");
@@ -1371,20 +1493,46 @@ function setupGoogleLogin() {
     return;
   }
 
+  // Håll koll på status-elementet även här
+  cloudBankStatusEl = document.getElementById("cloudBankStatus") || statusEl || null;
+
+  // Reagera om användaren redan är inloggad när sidan laddas
+  firebaseAuthInstance.onAuthStateChanged(async (user) => {
+    currentTeacherUser = user || null;
+    if (user) {
+      const email = user.email || user.displayName || "lärare";
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email} – läser moln-bank...`;
+      }
+      try {
+        await loadCloudBankFromCloud();
+      } catch (e) {
+        console.error("Fel vid auto-laddning av moln-bank:", e);
+      }
+    } else {
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = "☁️ Inte inloggad.";
+      }
+    }
+  });
+
   btn.addEventListener("click", async () => {
     try {
       const provider = new firebase.auth.GoogleAuthProvider();
       const result = await firebaseAuthInstance.signInWithPopup(provider);
       currentTeacherUser = result.user || null;
-      if (statusEl && currentTeacherUser) {
+      if (cloudBankStatusEl && currentTeacherUser) {
         const email = currentTeacherUser.email || currentTeacherUser.displayName || "lärare";
-        statusEl.textContent = `☁️ Inloggad som ${email}`;
+        cloudBankStatusEl.textContent = `☁️ Inloggad som ${email} – läser moln-bank...`;
       }
       console.log("Google-inloggning OK:", currentTeacherUser);
+
+      // Efter lyckad inloggning: ladda moln-bank
+      await loadCloudBankFromCloud();
     } catch (err) {
       console.error("Google-inloggning misslyckades:", err);
-      if (statusEl) {
-        statusEl.textContent = "❌ Inloggning misslyckades – kontrollera Authorized domains i Firebase.";
+      if (cloudBankStatusEl) {
+        cloudBankStatusEl.textContent = "❌ Inloggning misslyckades – kontrollera Authorized domains i Firebase.";
       }
       alert(
         "Google-inloggning misslyckades.\n\nVanliga orsaker:\n" +
@@ -2212,7 +2360,7 @@ function initApp() {
     saveState(merged);
   }
 
-  // UI
+   // UI
   initTeacherEmailSettings();
   initThresholdSettings();
   initTeacherPasswordSettings();
@@ -2221,8 +2369,12 @@ function initApp() {
   renderGoalsList();
   syncUI();
 
+  // Moln-banker (koppla ev. knappar + status-fält)
+  initCloudBankButtons();
+
   // Koppla Google-login-knappen efter att Firebase är initierad
   setupGoogleLogin();
+
 
   // Elevknappar
   const btnSaveStudent = $("#btnSaveStudent");
