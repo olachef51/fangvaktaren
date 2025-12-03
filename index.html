@@ -1233,32 +1233,39 @@
 
 
 
-<!-- start SEKTION 3:  -->
+<!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN -->
 <script>
 "use strict";
 
 /* =========================
-   3a – Hjälpfunktioner, State & Grunddata
+   3a – Konstanter & grundstate
    ========================= */
 
-const $ = document.querySelector.bind(document);
-const $all = document.querySelectorAll.bind(document);
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
+  authDomain: "fangvaktaren-904db.firebaseapp.com",
+  projectId: "fangvaktaren-904db",
+  storageBucket: "fangvaktaren-904db.firebasestorage.app",
+  messagingSenderId: "105301219768",
+  appId: "1:105301219768:web:66b131fba86a541b78174d",
+  measurementId: "G-NXL9GSFZ77"
+};
 
-const STORAGE_KEY = "fangvaktaren-mobile-v1";
+const STORAGE_KEY = "fangvaktaren-v17";
+const CLOUD_COLLECTION = "fangvaktaren_banks";
+
+const $ = (sel) => document.querySelector(sel);
+const $all = (sel) => document.querySelectorAll(sel);
+
+let firebaseAppInstance = null;
+let firebaseAuthInstance = null;
+let firebaseDbInstance = null;
+let currentTeacherUser = null;
 
 let currentLevel = null;
 let currentQuestions = [];
 let currentAnswers = [];
-let currentImageDataUrl = null;
 let lastSubmission = null;
-let extraGoalSelections = { mcq: [], img: [], drag: [] };
-
-let currentTeacherUser = null;
-let firebaseAuthInstance = null;
-let firebaseDbInstance = null;
-
-let cloudBankStatusEl = null;
-let googleLoginStatusEl = null;
 
 const defaultState = {
   student: { name: "", klass: "" },
@@ -1268,12 +1275,20 @@ const defaultState = {
   teacherPassword: null,
   teacherEmail: "",
   goalsMap: [],
-  bank: { mcq: [], img: [], drag: [] }
+  bank: {
+    mcq: [],
+    img: [],
+    drag: []
+  }
 };
 
 function deepCloneDefault() {
   return JSON.parse(JSON.stringify(defaultState));
 }
+
+/* =========================
+   3b – State-hantering & embedded-data
+   ========================= */
 
 function mergeEmbeddedBank(state) {
   const el = document.getElementById("embedded-data");
@@ -1282,14 +1297,13 @@ function mergeEmbeddedBank(state) {
     const raw = el.textContent || el.innerHTML || "{}";
     const data = JSON.parse(raw);
     if (data && data.bank) {
-      state.bank = Object.assign({ mcq: [], img: [], drag: [] }, state.bank);
+      state.bank = Object.assign({ mcq: [], img: [], drag: [] }, state.bank || {});
       state.bank.mcq = (state.bank.mcq || []).concat(data.bank.mcq || []);
       state.bank.img = (state.bank.img || []).concat(data.bank.img || []);
       state.bank.drag = (state.bank.drag || []).concat(data.bank.drag || []);
     }
   } catch (e) {
-    // JSON i embedded-data är felaktig – hoppa över utan att stoppa appen
-    // console.warn("Kunde inte läsa embedded-data:", e);
+    console.warn("Kunde inte läsa embedded-data:", e);
   }
   return state;
 }
@@ -1310,13 +1324,15 @@ function loadState() {
     saveState(s);
   }
 
-  // Säkerställ struktur
   s.student = Object.assign({ name: "", klass: "" }, s.student || {});
   s.best = Object.assign({ E: 0, C: 0, A: 0 }, s.best || {});
   s.unlocked = Object.assign({ E: false, C: false, A: false }, s.unlocked || {});
   s.thres = Object.assign({ E: 70, C: 70, A: 70 }, s.thres || {});
   s.bank = Object.assign({ mcq: [], img: [], drag: [] }, s.bank || {});
-  s.goalsMap = s.goalsMap || [];
+  if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
+  if (!Array.isArray(s.bank.img)) s.bank.img = [];
+  if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
+  if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
   return s;
 }
 
@@ -1338,362 +1354,273 @@ function shuffle(arr) {
   return arr.slice().sort(() => Math.random() - 0.5);
 }
 
-
 /* =========================
-   3a.2 – Moln-banker (Firestore)
+   3c – Firebase init & Google-inloggning
    ========================= */
 
-async function loadCloudBankFromCloud() {
-  if (!firebaseDbInstance || !currentTeacherUser) {
-    console.warn("Kan inte ladda moln-bank: ingen DB eller användare.");
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "☁️ Lokal bank används (ingen moln-bank sparad ännu).";
+function initFirebase() {
+  try {
+    if (!window.firebase) {
+      console.warn("Firebase-bibliotek kunde inte hittas.");
+      return;
     }
+    if (!firebase.apps.length) {
+      firebase.initializeApp(FIREBASE_CONFIG);
+    }
+    firebaseAppInstance = firebase.app();
+    firebaseAuthInstance = firebase.auth();
+    firebaseDbInstance = firebase.firestore();
+    console.log("Firebase init OK");
+  } catch (e) {
+    console.error("Firebase init misslyckades:", e);
+  }
+}
+
+function setupGoogleLogin() {
+  const btn = $("#btnGooglePlaceholder");
+  const statusEl = $("#googleStatus");
+  if (!btn || !statusEl) return;
+
+  if (!firebaseAuthInstance) {
+    console.warn("Firebase Auth saknas – kunde inte koppla Google-login.");
+    statusEl.textContent = "⚠️ Tekniskt fel: Firebase Auth saknas. Ladda om sidan eller kontrollera internet.";
+    return;
+  }
+
+  firebaseAuthInstance.onAuthStateChanged((user) => {
+    currentTeacherUser = user || null;
+    if (!statusEl) return;
+    if (user) {
+      statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
+    } else {
+      statusEl.textContent = "☁️ Inte inloggad – klicka för att logga in med Google.";
+    }
+  });
+
+  btn.addEventListener("click", async () => {
+    if (!firebaseAuthInstance) {
+      alert("Tekniskt fel: Firebase Auth saknas.");
+      return;
+    }
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await firebaseAuthInstance.signInWithPopup(provider);
+    } catch (err) {
+      console.error("Google-inloggning misslyckades:", err);
+      statusEl.textContent = "⚠️ Kunde inte logga in med Google. Försök igen.";
+    }
+  });
+}
+
+/* =========================
+   3d – Moln-banker (Firestore)
+   ========================= */
+
+function getBankFromState() {
+  const s = loadState();
+  return Object.assign({ mcq: [], img: [], drag: [] }, s.bank || {});
+}
+
+function setBankInState(bank) {
+  const s = loadState();
+  s.bank = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
+  saveState(s);
+}
+
+async function loadCloudBanksList() {
+  const listEl = $("#cloudBankList");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  if (!firebaseDbInstance || !currentTeacherUser) {
+    const li = document.createElement("li");
+    li.className = "mini";
+    li.textContent = "Du måste vara inloggad med Google för att se dina moln-banker.";
+    listEl.appendChild(li);
     return;
   }
 
   try {
-    const docRef = firebaseDbInstance
-      .collection("fangvaktaren_banks")
-      .doc(currentTeacherUser.uid);
+    const snap = await firebaseDbInstance
+      .collection(CLOUD_COLLECTION)
+      .where("ownerUid", "==", currentTeacherUser.uid)
+      .orderBy("createdAt", "desc")
+      .get();
 
-    const snap = await docRef.get();
-    if (!snap.exists) {
+    if (snap.empty) {
       console.log("Ingen moln-bank hittades, använder lokal bank.");
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Inloggad – ingen moln-bank sparad ännu. Lokal bank används.";
-      }
+      const li = document.createElement("li");
+      li.className = "mini";
+      li.textContent = "Inga moln-banker hittades ännu.";
+      listEl.appendChild(li);
       return;
     }
 
-    const data = snap.data() || {};
-    if (!data.bank) {
-      console.warn("Moln-dokument saknar 'bank'-fält.");
-      if (cloudBankStatusEl) {
-        cloudBankStatusEl.textContent = "☁️ Inloggad – moln-datan saknar frågebank. Lokal bank används.";
-      }
-      return;
-    }
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+      const li = document.createElement("li");
+      li.className = "list-item";
 
-    const s = loadState();
-    s.bank = Object.assign(
-      { mcq: [], img: [], drag: [] },
-      data.bank || {}
-    );
-    saveState(s);
-    syncUI();
+      const main = document.createElement("div");
+      main.className = "list-main";
 
-    let tsText = "";
-    if (data.updatedAt && typeof data.updatedAt.toDate === "function") {
-      tsText = " · uppdaterad " + data.updatedAt.toDate().toLocaleString("sv-SE");
-    }
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "☁️ Moln-bank inläst" + tsText;
-    }
+      const title = document.createElement("div");
+      title.className = "q-text";
+      title.textContent = data.name || "Namnlös bank";
 
-    console.log("Moln-bank inläst:", data);
-  } catch (err) {
-    console.error("Fel vid läsning av moln-bank:", err);
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "❌ Fel vid läsning av moln-bank. Lokal bank används.";
-    }
-    alert("Kunde inte läsa frågebank från molnet.\nSe konsolen för detaljer.");
-  }
-}
+      const meta = document.createElement("div");
+      meta.className = "q-meta";
+      const ts = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : null;
+      meta.textContent = ts
+        ? `Skapad: ${ts.toLocaleString("sv-SE")}`
+        : "Skapad: okänt datum";
 
-async function saveLocalBankToCloud() {
-  if (!firebaseDbInstance || !currentTeacherUser) {
-    alert("Du måste vara inloggad med Google för att spara i molnet.");
-    return;
-  }
+      main.appendChild(title);
+      main.appendChild(meta);
 
-  try {
-    const s = loadState();
-    const nameInput = $("#inputBankName");
-    const bankName = nameInput ? (nameInput.value.trim() || null) : null;
+      const actions = document.createElement("div");
+      const btn = document.createElement("button");
+      btn.className = "btn btn-sm";
+      btn.textContent = "Aktivera denna bank";
+      btn.addEventListener("click", () => {
+        setBankInState(data.bank || { mcq: [], img: [], drag: [] });
+        alert("Moln-bank aktiverad. Dina frågor är nu laddade i spelet.");
+        renderMcqList();
+        syncUI();
+      });
+      actions.appendChild(btn);
 
-    const docRef = firebaseDbInstance
-      .collection("fangvaktaren_banks")
-      .doc(currentTeacherUser.uid);
-
-    await docRef.set(
-      {
-        ownerUid: currentTeacherUser.uid,
-        name: bankName,
-        bank: s.bank || { mcq: [], img: [], drag: [] },
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
-
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "☁️ Moln-bank sparad.";
-    }
-    console.log("Moln-bank sparad:", s.bank);
-  } catch (err) {
-    console.error("Fel vid sparande av moln-bank:", err);
-    if (cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "❌ Fel vid sparande av moln-bank. Kontrollera konsolen.";
-    }
-    alert("Kunde inte spara frågebank i molnet.\nSe konsolen för detaljer.");
-  }
-}
-
-function initCloudBankButtons() {
-  const btnSave = $("#btnSaveToCloud");
-  const btnLoad = $("#btnLoadCloudBanks");
-
-  // Separat statusfält för moln-bank om det finns
-  cloudBankStatusEl = document.getElementById("cloudBankStatus") || cloudBankStatusEl;
-
-  if (btnSave) {
-    btnSave.addEventListener("click", () => {
-      saveLocalBankToCloud();
+      li.appendChild(main);
+      li.appendChild(actions);
+      listEl.appendChild(li);
     });
+  } catch (e) {
+    console.error("Kunde inte ladda moln-banker:", e);
+    const li = document.createElement("li");
+    li.className = "mini";
+    li.textContent = "Fel vid laddning av moln-banker. Se konsolen för detaljer.";
+    listEl.appendChild(li);
   }
+}
+
+function setupCloudBankUI() {
+  const btnLoad = $("#btnLoadCloudBanks");
+  const btnSave = $("#btnSaveToCloud");
+  const btnExport = $("#btnExportBank");
+  const fileImport = $("#fileImport");
 
   if (btnLoad) {
     btnLoad.addEventListener("click", () => {
-      loadCloudBankFromCloud();
+      loadCloudBanksList();
+    });
+  }
+
+  if (btnSave) {
+    btnSave.addEventListener("click", async () => {
+      if (!firebaseDbInstance || !currentTeacherUser) {
+        alert("Du måste vara inloggad med Google för att spara till molnet.");
+        return;
+      }
+      const nameInput = $("#inputBankName");
+      const name = (nameInput && nameInput.value.trim()) || "Min frågebank";
+      const bank = getBankFromState();
+
+      try {
+        await firebaseDbInstance.collection(CLOUD_COLLECTION).add({
+          ownerUid: currentTeacherUser.uid,
+          ownerEmail: currentTeacherUser.email || null,
+          name,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          bank
+        });
+        alert("Frågebank sparad till molnet.");
+        if (nameInput) nameInput.value = name;
+      } catch (e) {
+        console.error("Kunde inte spara bank till molnet:", e);
+        alert("Det gick inte att spara bank till molnet. Se konsolen för detaljer.");
+      }
+    });
+  }
+
+  if (btnExport) {
+    btnExport.addEventListener("click", () => {
+      const bank = getBankFromState();
+      const blob = new Blob([JSON.stringify(bank, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "fangvaktaren_bank.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  if (fileImport) {
+    fileImport.addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function () {
+        try {
+          const imported = JSON.parse(reader.result);
+          setBankInState(imported);
+          renderMcqList();
+          syncUI();
+          alert("Frågebank importerad.");
+        } catch (err) {
+          console.error("Fel vid import av JSON-bank:", err);
+          alert("Kunde inte läsa JSON-filen. Kontrollera formatet.");
+        }
+      };
+      reader.readAsText(file, "utf-8");
     });
   }
 }
 
-
 /* =========================
-   3b – UI-Rendering & Synkronisering
+   3e – Delmål & delbitar (goalsMap)
    ========================= */
 
-function syncUI() {
+function populateGoalSelect() {
+  const sel = $("#mcqGoalPart");
+  if (!sel) return;
   const s = loadState();
-  const isPlaying = !!currentLevel;
-  const resultPanel = $("#result");
-  const isResultVisible = resultPanel && !resultPanel.classList.contains("hidden");
+  const goals = s.goalsMap || [];
 
-  const n = $("#studentName");
-  const k = $("#studentClass");
-  if (n) n.value = s.student.name || "";
-  if (k) k.value = s.student.klass || "";
+  sel.innerHTML = "";
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = "Ingen koppling";
+  sel.appendChild(def);
 
-  const statusEl = $("#studentSaved");
-  if (statusEl) {
-    if (s.student.name && s.student.klass) {
-      statusEl.textContent = `Sparad: ${s.student.name} (${s.student.klass})`;
-    } else {
-      statusEl.textContent = "Ej sparad elev";
-    }
-  }
-
-  const bestE = $("#best-levelE");
-  const bestC = $("#best-levelC");
-  const bestA = $("#best-levelA");
-  if (bestE) bestE.textContent = s.best.E || 0;
-  if (bestC) bestC.textContent = s.best.C || 0;
-  if (bestA) bestA.textContent = s.best.A || 0;
-
-  const thE = $("#thres-levelE");
-  const thC = $("#thres-levelC");
-  const thA = $("#thres-levelA");
-  if (thE) thE.textContent = s.thres.E;
-  if (thC) thC.textContent = s.thres.C;
-  if (thA) thA.textContent = s.thres.A;
-
-  const hasStudent = !!(s.student.name && s.student.klass);
-
-  const cardE = $("#card-levelE");
-  const cardC = $("#card-levelC");
-  const cardA = $("#card-levelA");
-  const btnE = $("#start-levelE");
-  const btnC = $("#start-levelC");
-  const btnA = $("#start-levelA");
-  const badgeE = $("#badge-levelE");
-  const badgeC = $("#badge-levelC");
-  const badgeA = $("#badge-levelA");
-
-  // Nivå 1 – låst tills elev sparats
-  if (cardE && btnE && badgeE) {
-    if (hasStudent) {
-      cardE.classList.remove("locked");
-      btnE.disabled = false;
-      badgeE.textContent = "Redo";
-      badgeE.classList.remove("badge-lock");
-      badgeE.classList.add("badge-ok");
-    } else {
-      cardE.classList.add("locked");
-      btnE.disabled = true;
-      badgeE.textContent = "Låst";
-      badgeE.classList.remove("badge-ok");
-      badgeE.classList.add("badge-lock");
-    }
-  }
-
-  // Nivå 2
-  if (cardC && btnC && badgeC) {
-    if (s.unlocked.C) {
-      cardC.classList.remove("locked");
-      btnC.disabled = false;
-      badgeC.textContent = "Upplåst";
-      badgeC.classList.remove("badge-lock");
-      badgeC.classList.add("badge-warn");
-    } else {
-      cardC.classList.add("locked");
-      btnC.disabled = true;
-      badgeC.textContent = "Låst";
-      badgeC.classList.remove("badge-warn");
-      badgeC.classList.add("badge-lock");
-    }
-  }
-
-  // Nivå 3
-  if (cardA && btnA && badgeA) {
-    if (s.unlocked.A) {
-      cardA.classList.remove("locked");
-      btnA.disabled = false;
-      badgeA.textContent = "Upplåst";
-      badgeA.classList.remove("badge-lock");
-      badgeA.classList.add("badge-warn");
-    } else {
-      cardA.classList.add("locked");
-      btnA.disabled = true;
-      badgeA.textContent = "Låst";
-      badgeA.classList.remove("badge-warn");
-      badgeA.classList.add("badge-lock");
-    }
-  }
-
-  const studentCard = $("#studentCard");
-  if (studentCard) {
-    studentCard.classList.toggle("hidden", isPlaying || isResultVisible);
-  }
-
-  const who = $("#whoPlays");
-  if (who) {
-    if (s.student.name && s.student.klass) {
-      who.textContent = `${s.student.name} (${s.student.klass})`;
-    } else {
-      who.textContent = "Ingen elev vald.";
-    }
-  }
-}
-
-function renderQuestion(q, index, host) {
-  const type = q.type || "mcq";
-  const item = document.createElement("div");
-  item.className = "question";
-  item.setAttribute("data-q-index", String(index));
-  item.innerHTML = `<div class="question-title">Fråga ${index + 1} (Nivå ${q.level || "E"})</div>`;
-
-  if (type === "img") {
-    renderImgQuestion(q, index, item);
-  } else if (type === "drag") {
-    renderDragQuestion(q, index, item);
-  } else {
-    renderMcqQuestion(q, index, item);
-  }
-
-  host.appendChild(item);
-}
-
-function renderMcqQuestion(q, index, host) {
-  host.innerHTML += `<div class="q-text">${q.q || ""}</div>`;
-  const optionsHost = document.createElement("div");
-  optionsHost.className = "options-container";
-
-  (q.options || []).forEach((opt, optIdx) => {
-    const btn = document.createElement("button");
-    btn.className = "btn btn-option btn-sm";
-    btn.textContent = opt;
-    btn.setAttribute("data-option-index", String(optIdx));
-    btn.addEventListener("click", (e) => handleMcqAnswer(e.target, index, optIdx));
-    optionsHost.appendChild(btn);
+  goals.forEach((g) => {
+    const opt = document.createElement("option");
+    opt.value = String(g.id);
+    opt.textContent = `${g.goal || "-"} (Delbitar: ${g.parts || "-"})`;
+    sel.appendChild(opt);
   });
-  host.appendChild(optionsHost);
-}
-
-function handleMcqAnswer(btn, qIndex, optIndex) {
-  currentAnswers[qIndex] = optIndex;
-  const parent = btn.closest(".options-container");
-  if (parent) {
-    parent.querySelectorAll(".btn-option").forEach(b => {
-      b.classList.remove("active");
-    });
-  }
-  btn.classList.add("active");
-}
-
-function renderImgQuestion(q, index, host) {
-  host.innerHTML += `<div class="q-text">${q.q || ""}</div>`;
-  host.innerHTML += `<img src="${q.imgDataUrl || ''}" style="max-width:100%; max-height:200px; margin: 10px 0; border-radius: 4px;" alt="Bildfråga" />`;
-
-  const optionsHost = document.createElement("div");
-  optionsHost.className = "options-container";
-
-  (q.options || []).forEach((opt, optIdx) => {
-    const btn = document.createElement("button");
-    btn.className = "btn btn-option btn-sm";
-    btn.textContent = opt;
-    btn.setAttribute("data-option-index", String(optIdx));
-    btn.addEventListener("click", (e) => handleMcqAnswer(e.target, index, optIdx));
-    optionsHost.appendChild(btn);
-  });
-  host.appendChild(optionsHost);
-}
-
-function renderDragQuestion(q, index, host) {
-  host.innerHTML += `<div class="q-text">${q.text || q.q || ""}</div>`;
-  const dragHost = document.createElement("div");
-  dragHost.className = "drag-drop-container";
-  dragHost.textContent = "Drag & Drop UI (ej implementerad ännu).";
-  host.appendChild(dragHost);
-
-  currentAnswers[index] = { mapping: {}, selected: {} };
-}
-
-
-/* =========================
-   3c – Delmålshantering (översikt – mest inaktiverad just nu)
-   ========================= */
-
-function buildGoalInfoText(q) {
-  const chunks = [];
-
-  if (q.goal || q.parts) {
-    let txt = "Delmål: " + (q.goal || "-");
-    if (q.parts) {
-      txt += " (Delbitar: " + q.parts + ")";
-    }
-    chunks.push(txt);
-  }
-
-  if (q.goalExtra || q.partsExtra) {
-    let txt = "Delmål: " + (q.goalExtra || "-");
-    if (q.partsExtra) {
-      txt += " (Delbitar: " + q.partsExtra + ")";
-    }
-    chunks.push(txt);
-  }
-
-  if (!chunks.length) {
-    return '<span class="goal-tag goal-tag-none">Ingen koppling till delmål</span>';
-  }
-
-  return chunks
-    .map(t => '<span class="goal-tag">' + t.replace(/</g,"&lt;").replace(/>/g,"&gt;") + '</span>')
-    .join(" ");
 }
 
 function renderGoalsList() {
   const host = $("#goalsList");
   if (!host) return;
-  host.innerHTML = "";
 
   const s = loadState();
-  if (!s.goalsMap || s.goalsMap.length === 0) {
-    host.innerHTML = '<li class="mini">Inga sparade kopplingar ännu.</li>';
+  const list = s.goalsMap || [];
+
+  host.innerHTML = "";
+  if (!list.length) {
+    const li = document.createElement("li");
+    li.className = "mini";
+    li.textContent = "Inga sparade delmål ännu.";
+    host.appendChild(li);
+    populateGoalSelect();
     return;
   }
 
-  s.goalsMap.forEach(g => {
+  list.forEach((g) => {
     const li = document.createElement("li");
     li.className = "list-item";
     li.innerHTML = `
@@ -1708,107 +1635,156 @@ function renderGoalsList() {
     host.appendChild(li);
   });
 
-  host.querySelectorAll("button[data-del-goal-id]").forEach(btn => {
+  host.querySelectorAll("button[data-del-goal-id]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = btn.getAttribute("data-del-goal-id");
       const s2 = loadState();
-      s2.goalsMap = (s2.goalsMap || []).filter(g => String(g.id) !== id);
+      s2.goalsMap = (s2.goalsMap || []).filter((g) => String(g.id) !== id);
       saveState(s2);
       renderGoalsList();
     });
   });
+
+  populateGoalSelect();
 }
 
+function initGoalsMap() {
+  const inputGoal = $("#inputGoalSingle");
+  const inputPart = $("#inputPartSingle");
+  const btnAdd = $("#btnAddGoalPart");
+  const btnSave = $("#btnSaveGoalsMap");
+  const btnClear = $("#btnClearGoalsMap");
+  const statusEl = $("#goalsStatus");
 
-/* =========================
-   3d – Lärarinställningar (e-post, trösklar, lösenord)
-   ========================= */
-
-function initTeacherEmailSettings() {
-  const btn = $("#btnSaveTeacherEmail");
-  const input = $("#inputTeacherEmail");
-  const status = $("#teacherEmailStatus");
-  const s = loadState();
-
-  if (input) {
-    input.value = s.teacherEmail || "";
-  }
-  if (status && s.teacherEmail) {
-    status.textContent = `Sparad adress: ${s.teacherEmail}`;
-  }
-
-  if (btn && input) {
-    btn.addEventListener("click", () => {
-      const s2 = loadState();
-      s2.teacherEmail = input.value.trim();
-      saveState(s2);
-      if (status) {
-        status.textContent = s2.teacherEmail
-          ? `Sparad adress: ${s2.teacherEmail}`
-          : "Ingen e-post sparad.";
+  if (btnAdd) {
+    btnAdd.addEventListener("click", () => {
+      const goalText = (inputGoal && inputGoal.value.trim()) || "";
+      const partsText = (inputPart && inputPart.value.trim()) || "";
+      if (!goalText || !partsText) {
+        if (statusEl) statusEl.textContent = "Skriv både delmål och delbit.";
+        return;
       }
+      const s = loadState();
+      if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
+      s.goalsMap.push({
+        id: Date.now(),
+        goal: goalText,
+        parts: partsText
+      });
+      saveState(s);
+      if (inputGoal) inputGoal.value = "";
+      if (inputPart) inputPart.value = "";
+      if (statusEl) statusEl.textContent = "Delbit tillagd (glöm inte att spara).";
+      renderGoalsList();
     });
   }
+
+  if (btnSave) {
+    btnSave.addEventListener("click", () => {
+      const s = loadState();
+      saveState(s);
+      if (statusEl) statusEl.textContent = "Delmål & delbitar sparade.";
+    });
+  }
+
+  if (btnClear) {
+    btnClear.addEventListener("click", () => {
+      if (!confirm("Ta bort alla delmål och delbitar?")) return;
+      const s = loadState();
+      s.goalsMap = [];
+      saveState(s);
+      if (statusEl) statusEl.textContent = "Alla delmål borttagna.";
+      renderGoalsList();
+    });
+  }
+
+  renderGoalsList();
 }
 
-function initThresholdSettings() {
-  const inputE = $("#inputThresE");
-  const inputC = $("#inputThresC");
-  const inputA = $("#inputThresA");
-  const btn = $("#btnSaveThresholds");
+/* =========================
+   3f – Flervalsfrågor (MCQ)
+   ========================= */
+
+function buildGoalInfoText(q) {
+  const chunks = [];
+  if (q.goal || q.parts) {
+    let txt = "Delmål: " + (q.goal || "-");
+    if (q.parts) txt += " (Delbitar: " + q.parts + ")";
+    chunks.push(txt);
+  }
+  if (q.goalExtra || q.partsExtra) {
+    let txt2 = "Delmål: " + (q.goalExtra || "-");
+    if (q.partsExtra) txt2 += " (Delbitar: " + q.partsExtra + ")";
+    chunks.push(txt2);
+  }
+  if (!chunks.length) {
+    return '<span class="goal-tag goal-tag-none">Ingen koppling till delmål</span>';
+  }
+  return chunks
+    .map((t) => {
+      const safe = t.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return `<span class="goal-tag">${safe}</span>`;
+    })
+    .join(" ");
+}
+
+function renderMcqList() {
+  const listEl = $("#mcqList");
+  const countEl = $("#mcqCount");
+  if (!listEl) return;
+
   const s = loadState();
+  const list = (s.bank && s.bank.mcq) || [];
 
-  if (inputE) inputE.value = s.thres.E;
-  if (inputC) inputC.value = s.thres.C;
-  if (inputA) inputA.value = s.thres.A;
+  listEl.innerHTML = "";
+  if (countEl) countEl.textContent = String(list.length);
 
-  if (btn) {
+  if (!list.length) {
+    const li = document.createElement("li");
+    li.className = "mini";
+    li.textContent = "Inga frågor i banken ännu.";
+    listEl.appendChild(li);
+    return;
+  }
+
+  list.forEach((q, idx) => {
+    const li = document.createElement("li");
+    li.className = "list-item";
+
+    const lvl = q.level || "E";
+    let tagClass = "level-e";
+    if (lvl === "C") tagClass = "level-c";
+    else if (lvl === "A") tagClass = "level-a";
+
+    const goalInfo = buildGoalInfoText(q);
+
+    li.innerHTML = `
+      <div class="list-main">
+        <div class="q-text">
+          [${idx + 1}] ${q.q || ""} 
+          <span class="level-tag ${tagClass}">${lvl}</span>
+        </div>
+        <div class="q-meta">${goalInfo}</div>
+      </div>
+      <div>
+        <button class="btn btn-sm btn-danger" data-del-index="${idx}">🗑️</button>
+      </div>
+    `;
+    listEl.appendChild(li);
+  });
+
+  listEl.querySelectorAll("button[data-del-index]").forEach((btn) => {
     btn.addEventListener("click", () => {
+      const index = Number(btn.getAttribute("data-del-index"));
       const s2 = loadState();
-      if (inputE) s2.thres.E = clampInt(inputE.value, 0, 100);
-      if (inputC) s2.thres.C = clampInt(inputC.value, 0, 100);
-      if (inputA) s2.thres.A = clampInt(inputA.value, 0, 100);
+      if (!Array.isArray(s2.bank.mcq) || index < 0 || index >= s2.bank.mcq.length) return;
+      s2.bank.mcq.splice(index, 1);
       saveState(s2);
+      renderMcqList();
       syncUI();
     });
-  }
-}
-
-function initTeacherPasswordSettings() {
-  const btnChange = $("#btnChangeTeacherPassword");
-  const inputOld = $("#inputOldPassword");
-  const inputNew = $("#inputNewPassword");
-  const inputNew2 = $("#inputNewPasswordRepeat");
-  const status = $("#passwordStatus");
-
-  if (!btnChange) return;
-
-  btnChange.addEventListener("click", () => {
-    const s = loadState();
-    const oldPwd = (inputOld && inputOld.value) || "";
-    const newPwd = (inputNew && inputNew.value) || "";
-    const newPwd2 = (inputNew2 && inputNew2.value) || "";
-
-    if (!newPwd || newPwd !== newPwd2) {
-      if (status) status.textContent = "Nytt lösenord matchar inte. Försök igen.";
-      return;
-    }
-
-    if (s.teacherPassword && s.teacherPassword !== oldPwd) {
-      if (status) status.textContent = "Fel nuvarande lösenord.";
-      return;
-    }
-
-    s.teacherPassword = newPwd;
-    saveState(s);
-    if (status) status.textContent = "Lärarlösenord uppdaterat.";
   });
 }
-
-
-/* =========================
-   3e – Frågeformulär (inaktiverad/logisk grund – kopplas senare)
-   ========================= */
 
 function initQuestionForms() {
   const mcqLevel = $("#mcqLevel");
@@ -1820,60 +1796,16 @@ function initQuestionForms() {
   const mcqAnswer = $("#mcqAnswer");
   const btnAdd = $("#btnMcqAdd");
   const btnClear = $("#btnMcqClear");
-  const mcqCount = $("#mcqCount");
-  const mcqList = $("#mcqList");
+  const mcqGoalPart = $("#mcqGoalPart");
 
-  if (!btnAdd || !mcqLevel || !mcqQuestion || !mcqOpt0 || !mcqOpt1 || !mcqAnswer || !mcqList || !mcqCount) {
+  if (!btnAdd || !mcqLevel || !mcqQuestion || !mcqOpt0 || !mcqOpt1 || !mcqAnswer) {
     return;
   }
 
-  function renderMcqList() {
-    const s = loadState();
-    const list = s.bank.mcq || [];
-    mcqList.innerHTML = "";
-    mcqCount.textContent = String(list.length);
-
-    list.forEach((q, idx) => {
-      const li = document.createElement("li");
-      li.className = "list-item";
-      const lvl = q.level || "E";
-      let tagClass = "level-e";
-      if (lvl === "C") tagClass = "level-c";
-      if (lvl === "A") tagClass = "level-a";
-
-      const goalInfo = buildGoalInfoText(q);
-
-      li.innerHTML = `
-        <div class="list-main">
-          <div class="q-text">
-            [${idx + 1}] ${q.q || ""} <span class="level-tag ${tagClass}">${lvl}</span>
-          </div>
-          <div class="q-meta">${goalInfo}</div>
-        </div>
-        <div>
-          <button class="btn btn-sm btn-danger" data-del-index="${idx}">🗑️</button>
-        </div>
-      `;
-      mcqList.appendChild(li);
-    });
-
-    mcqList.querySelectorAll("button[data-del-index]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const index = Number(btn.getAttribute("data-del-index"));
-        const s2 = loadState();
-        if (!s2.bank.mcq || index < 0 || index >= s2.bank.mcq.length) return;
-        s2.bank.mcq.splice(index, 1);
-        saveState(s2);
-        renderMcqList();
-      });
-    });
-  }
-
-  renderMcqList();
+  mcqAnswer.value = "0";
 
   btnAdd.addEventListener("click", () => {
     const s = loadState();
-
     const level = mcqLevel.value || "E";
     const text = mcqQuestion.value.trim();
     const opts = [
@@ -1881,31 +1813,37 @@ function initQuestionForms() {
       mcqOpt1.value.trim(),
       mcqOpt2 ? mcqOpt2.value.trim() : "",
       mcqOpt3 ? mcqOpt3.value.trim() : ""
-    ];
-    const answerIndex = clampInt(mcqAnswer.value, 0, 3);
+    ].filter((o) => o.length > 0);
 
-    const filteredOpts = opts.filter(o => o.length > 0);
-
-    if (!text || filteredOpts.length < 2) {
+    if (!text || opts.length < 2) {
       alert("Skriv en fråga och minst två svarsalternativ.");
       return;
+    }
+
+    let answerIndex = clampInt(mcqAnswer.value, 0, opts.length - 1);
+    if (answerIndex >= opts.length) answerIndex = 0;
+
+    let linkedGoal = null;
+    const goals = s.goalsMap || [];
+    if (mcqGoalPart && mcqGoalPart.value) {
+      linkedGoal = goals.find((g) => String(g.id) === mcqGoalPart.value) || null;
     }
 
     const newQ = {
       type: "mcq",
       level,
       q: text,
-      options: filteredOpts,
+      options: opts,
       answer: answerIndex,
-      goal: null,
-      parts: null,
+      goal: linkedGoal ? linkedGoal.goal : null,
+      parts: linkedGoal ? linkedGoal.parts : null,
       goalExtra: null,
       partsExtra: null
     };
 
+    if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
     s.bank.mcq.push(newQ);
     saveState(s);
-    renderMcqList();
 
     mcqQuestion.value = "";
     mcqOpt0.value = "";
@@ -1913,6 +1851,10 @@ function initQuestionForms() {
     if (mcqOpt2) mcqOpt2.value = "";
     if (mcqOpt3) mcqOpt3.value = "";
     mcqAnswer.value = "0";
+    if (mcqGoalPart) mcqGoalPart.value = "";
+
+    renderMcqList();
+    syncUI();
   });
 
   if (btnClear) {
@@ -1923,242 +1865,99 @@ function initQuestionForms() {
       if (mcqOpt2) mcqOpt2.value = "";
       if (mcqOpt3) mcqOpt3.value = "";
       mcqAnswer.value = "0";
+      if (mcqGoalPart) mcqGoalPart.value = "";
+    });
+  }
+
+  renderMcqList();
+  populateGoalSelect();
+}
+
+/* =========================
+   3g – Lärarläge: lösenord, e-post, nivågränser
+   ========================= */
+
+function initTeacherPasswordSettings() {
+  const statusEl = $("#passwordStatus");
+  const btnChange = $("#btnChangeTeacherPassword");
+  const inputOld = $("#inputOldPassword");
+  const inputNew = $("#inputNewPassword");
+  const inputNewRepeat = $("#inputNewPasswordRepeat");
+
+  if (!btnChange) return;
+
+  btnChange.addEventListener("click", () => {
+    const s = loadState();
+    const current = s.teacherPassword;
+    const oldVal = (inputOld && inputOld.value) || "";
+    const newVal = (inputNew && inputNew.value) || "";
+    const repeatVal = (inputNewRepeat && inputNewRepeat.value) || "";
+
+    if (!newVal || !repeatVal) {
+      if (statusEl) statusEl.textContent = "Nytt lösenord får inte vara tomt.";
+      return;
+    }
+    if (newVal !== repeatVal) {
+      if (statusEl) statusEl.textContent = "Nya lösenorden matchar inte.";
+      return;
+    }
+    if (current && oldVal !== current) {
+      if (statusEl) statusEl.textContent = "Nuvarande lösenord stämmer inte.";
+      return;
+    }
+    s.teacherPassword = newVal;
+    saveState(s);
+    if (statusEl) statusEl.textContent = "Lärarlösenord uppdaterat.";
+    if (inputOld) inputOld.value = "";
+    if (inputNew) inputNew.value = "";
+    if (inputNewRepeat) inputNewRepeat.value = "";
+  });
+}
+
+function initTeacherEmailSettings() {
+  const inputEmail = $("#inputTeacherEmail");
+  const btnSave = $("#btnSaveTeacherEmail");
+  const statusEl = $("#teacherEmailStatus");
+  const s = loadState();
+
+  if (inputEmail) inputEmail.value = s.teacherEmail || "";
+
+  if (btnSave) {
+    btnSave.addEventListener("click", () => {
+      const val = (inputEmail && inputEmail.value.trim()) || "";
+      const s2 = loadState();
+      s2.teacherEmail = val;
+      saveState(s2);
+      if (statusEl) statusEl.textContent = val ? "E-postadress sparad." : "E-postadress rensad.";
     });
   }
 }
 
-
-/* =========================
-   3f – Spelmekanik (Starta & Slutföra Nivå)
-   ========================= */
-
-function ensureStudentSet() {
-  const s = loadState();
-  return !!(s.student.name && s.student.klass);
-}
-
-function startLevel(level) {
+function initThresholdSettings() {
+  const inputE = $("#inputThresE");
+  const inputC = $("#inputThresC");
+  const inputA = $("#inputThresA");
+  const btnSave = $("#btnSaveThresholds");
   const s = loadState();
 
-  if (!ensureStudentSet()) {
-    alert("Fyll i elevens namn och klass och spara eleven först.");
-    return;
-  }
+  if (inputE) inputE.value = s.thres.E;
+  if (inputC) inputC.value = s.thres.C;
+  if (inputA) inputA.value = s.thres.A;
 
-  const pool = []
-    .concat(s.bank.mcq || [])
-    .concat(s.bank.img || [])
-    .concat(s.bank.drag || [])
-    .filter(q => (q.level || "E") === level);
-
-  if (!pool.length) {
-    alert("Det finns inga frågor för den här nivån ännu.");
-    return;
-  }
-
-  const numQuestions = Math.min(5, pool.length);
-  currentQuestions = shuffle(pool).slice(0, numQuestions);
-  currentAnswers = new Array(currentQuestions.length).fill(null);
-  currentLevel = level;
-
-  const playSection = $("#play");
-  const resultSection = $("#result");
-  if (playSection) playSection.classList.remove("hidden");
-  if (resultSection) resultSection.classList.add("hidden");
-
-  const studentCard = $("#studentCard");
-  if (studentCard) studentCard.classList.add("hidden");
-
-  const s2 = loadState();
-  const who = $("#whoPlays");
-  if (who) {
-    who.textContent = `${s2.student.name || "-"} (${s2.student.klass || "-"})`;
-  }
-
-  const title = $("#play-title");
-  if (title) {
-    if (level === "E") title.textContent = "Nivå 1 – E";
-    else if (level === "C") title.textContent = "Nivå 2 – C";
-    else if (level === "A") title.textContent = "Nivå 3 – A";
-    else title.textContent = "Aktiv nivå";
-  }
-
-  const host = $("#questions");
-  if (host) {
-    host.innerHTML = "";
-    currentQuestions.forEach((q, idx) => renderQuestion(q, idx, host));
+  if (btnSave) {
+    btnSave.addEventListener("click", () => {
+      const s2 = loadState();
+      if (inputE) s2.thres.E = clampInt(inputE.value, 0, 100);
+      if (inputC) s2.thres.C = clampInt(inputC.value, 0, 100);
+      if (inputA) s2.thres.A = clampInt(inputA.value, 0, 100);
+      saveState(s2);
+      syncUI();
+    });
   }
 }
-
-function finishLevel() {
-  if (!currentQuestions.length || !currentLevel) return;
-
-  const s = loadState();
-  let correctCount = 0;
-
-  currentQuestions.forEach((q, index) => {
-    const type = q.type || "mcq";
-    const selected = currentAnswers[index];
-    let isCorrect = false;
-
-    if ((type === "mcq" || type === "img") && selected != null) {
-      const correctIndex = (typeof q.answer === "number") ? q.answer : q.correct;
-      if (selected === correctIndex) {
-        isCorrect = true;
-      }
-    }
-
-    if (isCorrect) correctCount++;
-  });
-
-  const total = currentQuestions.length;
-  const percentage = total > 0 ? Math.round((correctCount / total) * 100) : 0;
-
-  const thres = s.thres || { E: 70, C: 70, A: 70 };
-  const lvl = currentLevel;
-  const threshold = (thres && thres[lvl] != null) ? thres[lvl] : 70;
-
-  if (percentage > (s.best[lvl] || 0)) {
-    s.best[lvl] = percentage;
-  }
-
-  if (lvl === "E" && percentage >= threshold) s.unlocked.C = true;
-  if (lvl === "C" && percentage >= threshold) s.unlocked.A = true;
-
-  saveState(s);
-
-  lastSubmission = {
-    level: lvl,
-    studentName: s.student.name,
-    studentClass: s.student.klass,
-    timestamp: new Date().toISOString(),
-    score: percentage,
-    correct: correctCount,
-    total: total,
-    answers: currentAnswers.slice(),
-    questions: currentQuestions.map(q => ({
-      q: q.q,
-      type: q.type || "mcq",
-      level: q.level || lvl,
-      answer: (typeof q.answer === "number") ? q.answer : q.correct,
-      goal: q.goal || null,
-      parts: q.parts || null
-    }))
-  };
-
-  const playSection = $("#play");
-  const resultSection = $("#result");
-  if (playSection) playSection.classList.add("hidden");
-  if (resultSection) resultSection.classList.remove("hidden");
-
-  const scoreText = $("#scoreText");
-  if (scoreText) {
-    scoreText.innerHTML = `${percentage}%<span> resultat</span>`;
-  }
-
-  const scoreDetail = $("#scoreDetail");
-  if (scoreDetail) {
-    scoreDetail.textContent = `${correctCount}/${total} poäng`;
-  }
-
-  const resName = $("#resName");
-  const resClass = $("#resClass");
-  if (resName) resName.textContent = s.student.name || "-";
-  if (resClass) resClass.textContent = s.student.klass || "-";
-
-  const passBadge = $("#passBadge");
-  if (passBadge) {
-    const passed = percentage >= threshold;
-    if (passed) {
-      passBadge.classList.remove("badge-fail");
-      passBadge.classList.add("badge-pass");
-      passBadge.textContent = "Godkänd nivå";
-    } else {
-      passBadge.classList.remove("badge-pass");
-      passBadge.classList.add("badge-fail");
-      passBadge.textContent = "Inte godkänd ännu";
-    }
-  }
-
-  const unlockText = $("#unlockText");
-  if (unlockText) {
-    let txt = "";
-    if (lvl === "E" && s.unlocked.C) {
-      txt = "Nivå 2 (C) är nu upplåst.";
-    } else if (lvl === "C" && s.unlocked.A) {
-      txt = "Nivå 3 (A) är nu upplåst.";
-    }
-    unlockText.textContent = txt;
-  }
-
-  currentLevel = null;
-  currentQuestions = [];
-  currentAnswers = [];
-
-  syncUI();
-}
-
 
 /* =========================
-   3g – Bildhantering (för framtida bildfrågor)
-   ========================= */
-
-function handleImageUpload(e) {
-  const file = e.target.files[0];
-  if (file) {
-    const reader = new FileReader();
-    reader.onloadend = function () {
-      currentImageDataUrl = reader.result;
-      const preview = $("#imagePreview");
-      if (preview) {
-        preview.innerHTML = `<img src="${currentImageDataUrl}" style="max-width:100%; max-height:100px; border-radius:4px; display:block;" alt="Bildförhandsvisning" />`;
-      }
-    };
-    reader.readAsDataURL(file);
-  }
-}
-
-
-/* =========================
-   3h – E-post med JSON-resultat
-   ========================= */
-
-function emailResultToTeacher() {
-  if (!lastSubmission) {
-    alert("Det finns inget resultat att skicka. Spela en nivå först.");
-    return;
-  }
-
-  const s = loadState();
-  const teacherEmail = s.teacherEmail || ($("#inputTeacherEmail") && $("#inputTeacherEmail").value.trim()) || "";
-
-  if (!teacherEmail) {
-    alert("Ingen lärar-e-post är sparad. Gå till lärarläget och fyll i 'Lärarens e-post'.");
-    return;
-  }
-
-  const jsonText = JSON.stringify(lastSubmission, null, 2);
-  const subject = `Fångvaktaren – resultat ${lastSubmission.studentName || "Elev"} (${lastSubmission.studentClass || ""})`;
-  const body =
-    `Hej!\n\n` +
-    `Här kommer resultat från Fångvaktaren.\n\n` +
-    `Nivå: ${lastSubmission.level}\n` +
-    `Resultat: ${lastSubmission.score}% (${lastSubmission.correct}/${lastSubmission.total} rätt)\n` +
-    `Datum: ${new Date(lastSubmission.timestamp).toLocaleString("sv-SE")}\n\n` +
-    `JSON-data (för elevkort):\n${jsonText}\n\n` +
-    `Vänliga hälsningar\n${lastSubmission.studentName || "Elev"}`;
-
-  const mailtoLink =
-    `mailto:${encodeURIComponent(teacherEmail)}?` +
-    `subject=${encodeURIComponent(subject)}&` +
-    `body=${encodeURIComponent(body)}`;
-
-  window.location.href = mailtoLink;
-}
-
-
-/* =========================
-   3i – Lärarläge (gate + modal)
+   3h – Lärarläge: gate, modalfönster & flikar
    ========================= */
 
 function openTeacherGate() {
@@ -2194,194 +1993,456 @@ function closeTeacherModal() {
 
 function handleTeacherConfirm() {
   const input = $("#teacherPasswordInput");
-  const text = $("#teacherGateText");
-  if (!input || !text) return;
-
-  const pwd = input.value;
+  if (!input) return;
+  const value = input.value;
   const s = loadState();
 
   if (!s.teacherPassword) {
-    s.teacherPassword = pwd;
+    s.teacherPassword = value;
     saveState(s);
     closeTeacherGate();
     openTeacherModal();
     return;
   }
 
-  if (pwd === s.teacherPassword) {
+  if (value === s.teacherPassword) {
     closeTeacherGate();
     openTeacherModal();
   } else {
-    text.textContent = "Fel lösenord, försök igen.";
+    alert("Fel lärarlösenord.");
   }
 }
 
 function setupTabNavigation() {
-  const tabButtons = $all(".tab-btn");
-  const tabPanels = $all(".tab-panel");
-  if (!tabButtons.length || !tabPanels.length) return;
+  const tabs = $all(".tab-btn");
+  const panels = $all(".tab-panel");
 
-  tabButtons.forEach(btn => {
-    btn.addEventListener("click", () => {
-      const target = btn.getAttribute("data-tab");
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const target = tab.getAttribute("data-tab");
+      tabs.forEach((t) => t.classList.remove("active"));
+      panels.forEach((p) => p.classList.add("hidden"));
 
-      tabButtons.forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-
-      tabPanels.forEach(panel => {
-        const panelId = panel.getAttribute("data-panel");
-        panel.classList.toggle("hidden", panelId !== target);
-      });
+      tab.classList.add("active");
+      const panel = document.querySelector(`.tab-panel[data-panel="${target}"]`);
+      if (panel) panel.classList.remove("hidden");
     });
   });
 }
 
-
 /* =========================
-   3j – Elevkort & knappar
+   3i – Elevdata & UI-sync
    ========================= */
+
+function ensureStudentSet() {
+  const s = loadState();
+  if (!s.student.name || !s.student.klass) {
+    alert("Skriv in namn och klass och spara eleven först.");
+    return false;
+  }
+  return true;
+}
 
 function handleSaveStudent() {
   const nameInput = $("#studentName");
   const classInput = $("#studentClass");
-  if (!nameInput || !classInput) return;
-
-  const name = nameInput.value.trim();
-  const klass = classInput.value.trim();
-
-  if (!name || !klass) {
-    alert("Fyll i både namn och klass innan du sparar.");
-    return;
-  }
-
   const s = loadState();
-  s.student = { name, klass };
+
+  s.student.name = (nameInput && nameInput.value.trim()) || "";
+  s.student.klass = (classInput && classInput.value.trim()) || "";
   saveState(s);
   syncUI();
 }
 
+function syncUI() {
+  const s = loadState();
+  const hasStudent = !!(s.student.name && s.student.klass);
+
+  const nameInput = $("#studentName");
+  const classInput = $("#studentClass");
+  if (nameInput) nameInput.value = s.student.name || "";
+  if (classInput) classInput.value = s.student.klass || "";
+
+  const studentSaved = $("#studentSaved");
+  if (studentSaved) {
+    if (hasStudent) {
+      studentSaved.textContent = `Sparad: ${s.student.name} (${s.student.klass})`;
+    } else {
+      studentSaved.textContent = "Ej sparad elev";
+    }
+  }
+
+  const bestE = $("#best-levelE");
+  const bestC = $("#best-levelC");
+  const bestA = $("#best-levelA");
+  if (bestE) bestE.textContent = s.best.E || 0;
+  if (bestC) bestC.textContent = s.best.C || 0;
+  if (bestA) bestA.textContent = s.best.A || 0;
+
+  const thresE = $("#thres-levelE");
+  const thresC = $("#thres-levelC");
+  const thresA = $("#thres-levelA");
+  if (thresE) thresE.textContent = s.thres.E;
+  if (thresC) thresC.textContent = s.thres.C;
+  if (thresA) thresA.textContent = s.thres.A;
+
+  const cardE = $("#card-levelE");
+  const cardC = $("#card-levelC");
+  const cardA = $("#card-levelA");
+  const btnE = $("#start-levelE");
+  const btnC = $("#start-levelC");
+  const btnA = $("#start-levelA");
+  const badgeE = $("#badge-levelE");
+  const badgeC = $("#badge-levelC");
+  const badgeA = $("#badge-levelA");
+
+  // Nivå 1 (E)
+  if (cardE && btnE && badgeE) {
+    if (hasStudent) {
+      cardE.classList.remove("locked");
+      btnE.disabled = false;
+      badgeE.textContent = "Starta";
+      badgeE.classList.remove("badge-lock");
+      badgeE.classList.add("badge-ok");
+    } else {
+      cardE.classList.add("locked");
+      btnE.disabled = true;
+      badgeE.textContent = "Låst";
+      badgeE.classList.remove("badge-ok");
+      badgeE.classList.add("badge-lock");
+    }
+  }
+
+  // Nivå 2 (C)
+  if (cardC && btnC && badgeC) {
+    if (s.unlocked.C) {
+      cardC.classList.remove("locked");
+      btnC.disabled = false;
+      badgeC.textContent = "Upplåst";
+      badgeC.classList.remove("badge-lock");
+      badgeC.classList.add("badge-ok");
+    } else {
+      cardC.classList.add("locked");
+      btnC.disabled = true;
+      badgeC.textContent = "Låst";
+      badgeC.classList.remove("badge-ok");
+      badgeC.classList.add("badge-lock");
+    }
+  }
+
+  // Nivå 3 (A)
+  if (cardA && btnA && badgeA) {
+    if (s.unlocked.A) {
+      cardA.classList.remove("locked");
+      btnA.disabled = false;
+      badgeA.textContent = "Upplåst";
+      badgeA.classList.remove("badge-lock");
+      badgeA.classList.add("badge-ok");
+    } else {
+      cardA.classList.add("locked");
+      btnA.disabled = true;
+      badgeA.textContent = "Låst";
+      badgeA.classList.remove("badge-ok");
+      badgeA.classList.add("badge-lock");
+    }
+  }
+
+  const who = $("#whoPlays");
+  if (who) {
+    who.textContent = hasStudent
+      ? `${s.student.name} (${s.student.klass})`
+      : "Ingen elev vald.";
+  }
+
+  const playSection = $("#play");
+  const resultSection = $("#result");
+  const studentCard = $("#studentCard");
+
+  const isPlaying = !!currentLevel;
+  const isResultVisible = resultSection && !resultSection.classList.contains("hidden");
+
+  if (studentCard) {
+    studentCard.classList.toggle("hidden", isPlaying || isResultVisible);
+  }
+}
 
 /* =========================
-   3k – Google-login (Firebase Auth)
+   3j – Spel-logik (nivåer & frågor)
    ========================= */
 
-function setupGoogleLogin() {
-  const btn = $("#btnGooglePlaceholder");
-  googleLoginStatusEl = $("#googleStatus") || null;
+function renderQuestionItem(q, index, host) {
+  const container = document.createElement("div");
+  container.className = "question";
 
-  if (!btn || !firebaseAuthInstance) {
-    console.warn("Firebase Auth saknas – kunde inte koppla Google-login.");
-    if (googleLoginStatusEl) {
-      googleLoginStatusEl.textContent = "☁️ Inte inloggad.";
-    }
+  const header = document.createElement("div");
+  header.textContent = `Fråga ${index + 1} (${q.level || "E"})`;
+  container.appendChild(header);
+
+  if (q.type === "img" && q.imgDataUrl) {
+    const img = document.createElement("img");
+    img.src = q.imgDataUrl;
+    img.alt = "Bildfråga";
+    container.appendChild(img);
+  }
+
+  const textDiv = document.createElement("div");
+  textDiv.className = "q-text";
+  textDiv.textContent = q.q || q.text || "";
+  container.appendChild(textDiv);
+
+  if (q.type === "drag") {
+    const placeholder = document.createElement("div");
+    placeholder.className = "mini";
+    placeholder.textContent = "Drag & Drop-frågor stöds ännu inte i spel-läget.";
+    container.appendChild(placeholder);
+  } else {
+    const optionsList = document.createElement("div");
+    optionsList.className = "options-list";
+    (q.options || []).forEach((opt, optIndex) => {
+      const label = document.createElement("label");
+      label.className = "option-label";
+
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = `q-${index}`;
+      input.value = String(optIndex);
+      input.addEventListener("change", () => {
+        currentAnswers[index] = optIndex;
+      });
+
+      const span = document.createElement("span");
+      span.textContent = opt;
+
+      label.appendChild(input);
+      label.appendChild(span);
+      optionsList.appendChild(label);
+    });
+    container.appendChild(optionsList);
+  }
+
+  host.appendChild(container);
+}
+
+function startLevel(level) {
+  if (!ensureStudentSet()) return;
+
+  const s = loadState();
+  const allQuestions = []
+    .concat(s.bank.mcq || [])
+    .concat(s.bank.img || [])
+    .concat(s.bank.drag || []);
+
+  const pool = allQuestions.filter((q) => (q.level || "E") === level);
+  if (!pool.length) {
+    alert("Det finns inga frågor på denna nivå ännu.");
     return;
   }
 
-  firebaseAuthInstance.onAuthStateChanged(async (user) => {
-    currentTeacherUser = user || null;
+  currentLevel = level;
+  currentQuestions = shuffle(pool);
+  currentAnswers = new Array(currentQuestions.length).fill(null);
 
-    if (googleLoginStatusEl) {
-      if (user) {
-        const email = user.email || user.displayName || "lärare";
-        googleLoginStatusEl.textContent = `✅ Inloggad som ${email}.`;
-      } else {
-        googleLoginStatusEl.textContent = "☁️ Inte inloggad.";
-      }
-    }
+  const playSection = $("#play");
+  const resultSection = $("#result");
+  const questionsHost = $("#questions");
 
-    // Försök ladda moln-bank automatiskt när man är inloggad
-    if (user && cloudBankStatusEl) {
-      cloudBankStatusEl.textContent = "☁️ Försöker läsa moln-bank ...";
-      await loadCloudBankFromCloud();
-    }
-  });
+  if (resultSection) resultSection.classList.add("hidden");
+  if (playSection) playSection.classList.remove("hidden");
+  if (questionsHost) {
+    questionsHost.innerHTML = "";
+    currentQuestions.forEach((q, idx) => renderQuestionItem(q, idx, questionsHost));
+  }
 
-  btn.addEventListener("click", async () => {
-    try {
-      const provider = new firebase.auth.GoogleAuthProvider();
-      const result = await firebaseAuthInstance.signInWithPopup(provider);
-      currentTeacherUser = result.user || null;
+  const title = $("#play-title");
+  const who = $("#whoPlays");
+  if (title) {
+    if (level === "E") title.textContent = "Nivå 1 – Grundnivå (E)";
+    else if (level === "C") title.textContent = "Nivå 2 – Mellannivå (C)";
+    else title.textContent = "Nivå 3 – Avancerad (A)";
+  }
+  if (who) {
+    who.textContent = `${s.student.name} (${s.student.klass})`;
+  }
 
-      if (googleLoginStatusEl && currentTeacherUser) {
-        const email = currentTeacherUser.email || currentTeacherUser.displayName || "lärare";
-        googleLoginStatusEl.textContent = `✅ Inloggad som ${email}.`;
-      }
-
-      console.log("Google-inloggning OK:", currentTeacherUser);
-    } catch (err) {
-      console.error("Google-inloggning misslyckades:", err);
-      if (googleLoginStatusEl) {
-        googleLoginStatusEl.textContent = "❌ Inloggning misslyckades. Se konsolen.";
-      }
-      alert(
-        "Google-inloggning misslyckades.\n\nVanliga orsaker:\n" +
-        "- Sidan körs via file:// (bäst är http/https)\n" +
-        "- Domänen är inte tillagd under Authentication → Settings → Authorized domains i Firebase.\n"
-      );
-    }
-  });
+  syncUI();
 }
 
+function finishLevel() {
+  if (!currentLevel || !currentQuestions.length) {
+    alert("Ingen nivå är aktiv.");
+    return;
+  }
+
+  const s = loadState();
+  let correctCount = 0;
+  currentQuestions.forEach((q, index) => {
+    const ansIndex = currentAnswers[index];
+    if (ansIndex == null) return;
+    const correctIndex = typeof q.answer === "number" ? q.answer : q.correct;
+    if (ansIndex === correctIndex) correctCount++;
+  });
+
+  const total = currentQuestions.length;
+  const percentage = total ? Math.round((correctCount / total) * 100) : 0;
+  const lvl = currentLevel;
+  const threshold = (s.thres && s.thres[lvl] != null) ? s.thres[lvl] : 70;
+
+  if (percentage > (s.best && s.best[lvl] || 0)) {
+    s.best[lvl] = percentage;
+  }
+
+  if (lvl === "E" && percentage >= threshold) s.unlocked.C = true;
+  if (lvl === "C" && percentage >= threshold) s.unlocked.A = true;
+
+  saveState(s);
+
+  lastSubmission = {
+    level: lvl,
+    studentName: s.student.name,
+    studentClass: s.student.klass,
+    timestamp: new Date().toISOString(),
+    score: percentage,
+    correct: correctCount,
+    total,
+    answers: currentAnswers.slice(),
+    questions: currentQuestions.map((q) => ({
+      q: q.q || q.text || "",
+      type: q.type || "mcq",
+      level: q.level || lvl,
+      answer: typeof q.answer === "number" ? q.answer : q.correct,
+      goal: q.goal || null,
+      parts: q.parts || null
+    }))
+  };
+
+  const playSection = $("#play");
+  const resultSection = $("#result");
+  if (playSection) playSection.classList.add("hidden");
+  if (resultSection) resultSection.classList.remove("hidden");
+
+  const scoreText = $("#scoreText");
+  const scoreDetail = $("#scoreDetail");
+  const resName = $("#resName");
+  const resClass = $("#resClass");
+  const passBadge = $("#passBadge");
+  const unlockText = $("#unlockText");
+
+  if (scoreText) scoreText.innerHTML = `${percentage}%<span> resultat</span>`;
+  if (scoreDetail) scoreDetail.textContent = `${correctCount}/${total} poäng`;
+  if (resName) resName.textContent = s.student.name || "-";
+  if (resClass) resClass.textContent = s.student.klass || "-";
+
+  if (passBadge) {
+    const passed = percentage >= threshold;
+    if (passed) {
+      passBadge.className = "badge-pass";
+      passBadge.textContent = "Godkänd nivå";
+    } else {
+      passBadge.className = "badge-fail";
+      passBadge.textContent = "Inte godkänd ännu";
+    }
+  }
+
+  if (unlockText) {
+    let txt = "";
+    if (lvl === "E" && s.unlocked.C) txt = "Nivå 2 (C) är nu upplåst.";
+    else if (lvl === "C" && s.unlocked.A) txt = "Nivå 3 (A) är nu upplåst.";
+    unlockText.textContent = txt;
+  }
+
+  currentLevel = null;
+  currentQuestions = [];
+  currentAnswers = [];
+
+  syncUI();
+}
+
+/* =========================
+   3k – E-postinlämning
+   ========================= */
+
+function emailResultToTeacher() {
+  if (!lastSubmission) {
+    alert("Det finns inget resultat att skicka. Spela en nivå först.");
+    return;
+  }
+  const s = loadState();
+  const inputEmail = $("#inputTeacherEmail");
+  const teacherEmail =
+    s.teacherEmail ||
+    (inputEmail && inputEmail.value.trim()) ||
+    "";
+
+  if (!teacherEmail) {
+    alert("Ingen lärar-e-post är sparad. Gå till Inställningar och fyll i 'Lärarens e-post'.");
+    return;
+  }
+
+  const jsonText = JSON.stringify(lastSubmission, null, 2);
+  const subject = `Fångvaktaren – resultat ${lastSubmission.studentName || "Elev"} (${lastSubmission.studentClass || ""})`;
+  const body =
+    `Hej!\n\n` +
+    `Här kommer resultat från Fångvaktaren.\n\n` +
+    `Nivå: ${lastSubmission.level}\n` +
+    `Resultat: ${lastSubmission.score}% (${lastSubmission.correct}/${lastSubmission.total} rätt)\n` +
+    `Datum: ${new Date(lastSubmission.timestamp).toLocaleString("sv-SE")}\n\n` +
+    `JSON-data (för elevkort):\n` +
+    `${jsonText}\n\n` +
+    `Vänliga hälsningar\n` +
+    `${lastSubmission.studentName || "Elev"}`;
+
+  const mailtoLink =
+    `mailto:${encodeURIComponent(teacherEmail)}` +
+    `?subject=${encodeURIComponent(subject)}` +
+    `&body=${encodeURIComponent(body)}`;
+
+  window.location.href = mailtoLink;
+}
 
 /* =========================
    3l – Initiering
    ========================= */
 
 function initApp() {
-  // Grunddata & state
+  // Säkerställ att embedded-data är inläst första gången
   const s = loadState();
-  // Om banken är tom, lägg in embedded igen (säkerhet)
-  if ((!s.bank.mcq || !s.bank.mcq.length) &&
-      (!s.bank.img || !s.bank.img.length) &&
-      (!s.bank.drag || !s.bank.drag.length)) {
+  if (!s.bank.mcq.length && !s.bank.img.length && !s.bank.drag.length) {
     const merged = mergeEmbeddedBank(s);
     saveState(merged);
   }
 
-  // UI
   initTeacherEmailSettings();
   initThresholdSettings();
   initTeacherPasswordSettings();
+  initGoalsMap();
   initQuestionForms();
   setupTabNavigation();
-  renderGoalsList();
+  setupGoogleLogin();
+  setupCloudBankUI();
   syncUI();
 
-  // Molnknappar & Google-login
-  initCloudBankButtons();
-  setupGoogleLogin();
-
-  // Elevknappar
   const btnSaveStudent = $("#btnSaveStudent");
-  if (btnSaveStudent) {
-    btnSaveStudent.addEventListener("click", handleSaveStudent);
-  }
+  if (btnSaveStudent) btnSaveStudent.addEventListener("click", handleSaveStudent);
 
   const btnTeacherMode = $("#btnTeacherMode");
-  if (btnTeacherMode) {
-    btnTeacherMode.addEventListener("click", openTeacherGate);
-  }
+  if (btnTeacherMode) btnTeacherMode.addEventListener("click", openTeacherGate);
 
   const btnTeacherCancel = $("#btnTeacherCancel");
-  if (btnTeacherCancel) {
-    btnTeacherCancel.addEventListener("click", closeTeacherGate);
-  }
+  if (btnTeacherCancel) btnTeacherCancel.addEventListener("click", closeTeacherGate);
 
   const btnTeacherConfirm = $("#btnTeacherConfirm");
-  if (btnTeacherConfirm) {
-    btnTeacherConfirm.addEventListener("click", handleTeacherConfirm);
-  }
+  if (btnTeacherConfirm) btnTeacherConfirm.addEventListener("click", handleTeacherConfirm);
 
   const btnCloseTeacher = $("#btnCloseTeacher");
-  if (btnCloseTeacher) {
-    btnCloseTeacher.addEventListener("click", closeTeacherModal);
-  }
+  if (btnCloseTeacher) btnCloseTeacher.addEventListener("click", closeTeacherModal);
 
   const btnBack = $("#btnBack");
   if (btnBack) {
     btnBack.addEventListener("click", () => {
-      const resultSection = $("#result");
-      if (resultSection) resultSection.classList.add("hidden");
+      const result = $("#result");
+      const play = $("#play");
+      if (result) result.classList.add("hidden");
+      if (play) play.classList.add("hidden");
       const studentCard = $("#studentCard");
       if (studentCard) studentCard.classList.remove("hidden");
       syncUI();
@@ -2394,10 +2455,10 @@ function initApp() {
       currentLevel = null;
       currentQuestions = [];
       currentAnswers = [];
-      const playSection = $("#play");
-      const resultSection = $("#result");
-      if (playSection) playSection.classList.add("hidden");
-      if (resultSection) resultSection.classList.add("hidden");
+      const play = $("#play");
+      const result = $("#result");
+      if (play) play.classList.add("hidden");
+      if (result) result.classList.add("hidden");
       const studentCard = $("#studentCard");
       if (studentCard) studentCard.classList.remove("hidden");
       syncUI();
@@ -2409,28 +2470,24 @@ function initApp() {
     btnSubmitGame.addEventListener("click", emailResultToTeacher);
   }
 
-  const imgUpload = $("#newImgUpload");
-  if (imgUpload) {
-    imgUpload.addEventListener("change", handleImageUpload);
-  }
+  const btnStartE = $("#start-levelE");
+  const btnStartC = $("#start-levelC");
+  const btnStartA = $("#start-levelA");
+  if (btnStartE) btnStartE.addEventListener("click", () => startLevel("E"));
+  if (btnStartC) btnStartC.addEventListener("click", () => startLevel("C"));
+  if (btnStartA) btnStartA.addEventListener("click", () => startLevel("A"));
+
+  const btnFinish = $("#btnFinish");
+  if (btnFinish) btnFinish.addEventListener("click", finishLevel);
 }
 
-// Start-lyssnare för nivåer & avslut
 document.addEventListener("DOMContentLoaded", () => {
-  const btnE = $("#start-levelE");
-  const btnC = $("#start-levelC");
-  const btnA = $("#start-levelA");
-  const btnFinish = $("#btnFinish");
-
-  if (btnE) btnE.addEventListener("click", () => startLevel("E"));
-  if (btnC) btnC.addEventListener("click", () => startLevel("C"));
-  if (btnA) btnA.addEventListener("click", () => startLevel("A"));
-  if (btnFinish) btnFinish.addEventListener("click", finishLevel);
-
+  initFirebase();
   initApp();
 });
 </script>
-<!-- slut SEKTION 3:  -->
+<!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN -->
+
 
 
 
