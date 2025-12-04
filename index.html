@@ -1262,7 +1262,7 @@ const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
   authDomain: "fangvaktaren-904db.firebaseapp.com",
   projectId: "fangvaktaren-904db",
-  storageBucket: "fangvaktaren-904db.firebaseapp.com",
+  storageBucket: "fangvaktaren-904db.firebasestorage.app",
   messagingSenderId: "105301219768",
   appId: "1:105301219768:web:66b131fba86a541b78174d",
   measurementId: "G-NXL9GSFZ77"
@@ -1270,7 +1270,7 @@ const FIREBASE_CONFIG = {
 
 const STORAGE_KEY = "fangvaktaren-v17";
 
-// 🔁 NYTT: vi använder teachers/{uid}/banks i stället för fangvaktaren_banks
+// 🔁 använder teachers/{uid}/banks
 const CLOUD_ROOT_COLLECTION = "teachers";
 const CLOUD_BANKS_SUBCOLLECTION = "banks";
 
@@ -1395,7 +1395,7 @@ function initFirebase() {
     firebaseAuthInstance = firebase.auth();
     firebaseDbInstance = firebase.firestore();
     console.log("Firebase init OK");
-    setupGoogleLogin(); // kör först när auth finns
+    setupGoogleLogin();
   } catch (e) {
     console.error("Firebase init misslyckades:", e);
     if (statusEl) {
@@ -1420,8 +1420,10 @@ function setupGoogleLogin() {
     if (!statusEl) return;
     if (user) {
       statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
+      console.log("[DEBUG] Inloggad UID:", user.uid);
     } else {
       statusEl.textContent = "☁️ Inte inloggad – klicka för att logga in med Google.";
+      console.log("[DEBUG] Inte inloggad.");
     }
   });
 
@@ -1449,7 +1451,50 @@ function getBankFromState() {
   return Object.assign({ mcq: [], img: [], drag: [] }, s.bank || {});
 }
 
-// 🔁 NYTT: sätter både bank OCH goalsMap från molnet
+// 🔍 Normalisera bank-data från Firestore oavsett hur den ser ut
+function normalizeBankFromDoc(data) {
+  if (!data || typeof data !== "object") {
+    return { mcq: [], img: [], drag: [] };
+  }
+
+  // 1) Nytt format: data.bank.mcq/img/drag
+  if (
+    data.bank &&
+    (Array.isArray(data.bank.mcq) || Array.isArray(data.bank.img) || Array.isArray(data.bank.drag))
+  ) {
+    return {
+      mcq: data.bank.mcq || [],
+      img: data.bank.img || [],
+      drag: data.bank.drag || []
+    };
+  }
+
+  // 2) Bank direkt i roten: data.mcq/img/drag
+  if (
+    Array.isArray(data.mcq) ||
+    Array.isArray(data.img) ||
+    Array.isArray(data.drag)
+  ) {
+    return {
+      mcq: data.mcq || [],
+      img: data.img || [],
+      drag: data.drag || []
+    };
+  }
+
+  // 3) Gamla format med "questions" – behandla som mcq
+  if (Array.isArray(data.questions)) {
+    return {
+      mcq: data.questions,
+      img: [],
+      drag: []
+    };
+  }
+
+  // 4) Sista utväg: tom bank
+  return { mcq: [], img: [], drag: [] };
+}
+
 function setBankAndGoalsInState(bank, goalsMap) {
   const s = loadState();
   s.bank = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
@@ -1457,13 +1502,19 @@ function setBankAndGoalsInState(bank, goalsMap) {
     s.goalsMap = goalsMap.slice();
   }
   saveState(s);
+  console.log("[DEBUG] State efter setBankAndGoalsInState:", {
+    mcq: s.bank.mcq.length,
+    img: s.bank.img.length,
+    drag: s.bank.drag.length,
+    goalsMap: s.goalsMap.length
+  });
 }
 
 function setBankInState(bank) {
   setBankAndGoalsInState(bank, null);
 }
 
-// 🔁 NYTT: läs banker från teachers/{uid}/banks och ta med goalsMap
+// Läs banker från teachers/{uid}/banks
 async function loadCloudBanksList() {
   const listEl = $("#cloudBankList");
   if (!listEl) return;
@@ -1478,6 +1529,7 @@ async function loadCloudBanksList() {
   }
 
   try {
+    console.log("[DEBUG] Hämtar banker från path:", CLOUD_ROOT_COLLECTION, "/", currentTeacherUser.uid, "/", CLOUD_BANKS_SUBCOLLECTION);
     const snap = await firebaseDbInstance
       .collection(CLOUD_ROOT_COLLECTION)
       .doc(currentTeacherUser.uid)
@@ -1494,16 +1546,11 @@ async function loadCloudBanksList() {
       return;
     }
 
-    snap.forEach((doc) => {
-      const data = doc.data() || {};
+    snap.forEach((docSnap) => {
+      const data = docSnap.data() || {};
+      console.log("[DEBUG] Doc data från Firestore:", docSnap.id, data);
 
-      // Stöder både nytt och ev. gammalt format
-      const bankFromDoc = data.bank || {
-        mcq: data.mcq || [],
-        img: data.img || [],
-        drag: data.drag || []
-      };
-
+      const normalizedBank = normalizeBankFromDoc(data);
       const goalsFromDoc = Array.isArray(data.goalsMap)
         ? data.goalsMap
         : (data.bank && Array.isArray(data.bank.goalsMap) ? data.bank.goalsMap : []);
@@ -1521,7 +1568,7 @@ async function loadCloudBanksList() {
       const meta = document.createElement("div");
       meta.className = "q-meta";
       const ts = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : null;
-      const countMcq = Array.isArray(bankFromDoc.mcq) ? bankFromDoc.mcq.length : 0;
+      const countMcq = Array.isArray(normalizedBank.mcq) ? normalizedBank.mcq.length : 0;
       meta.textContent = (ts
         ? `Skapad: ${ts.toLocaleString("sv-SE")}`
         : "Skapad: okänt datum") + ` · MCQ: ${countMcq}`;
@@ -1534,11 +1581,17 @@ async function loadCloudBanksList() {
       btn.className = "btn btn-sm";
       btn.textContent = "Aktivera denna bank";
       btn.addEventListener("click", () => {
-        setBankAndGoalsInState(bankFromDoc, goalsFromDoc);
-        alert("Moln-bank aktiverad. Dina frågor är nu laddade i spelet.");
+        console.log("[DEBUG] Aktiverar moln-bank", docSnap.id, {
+          mcq: normalizedBank.mcq.length,
+          img: normalizedBank.img.length,
+          drag: normalizedBank.drag.length,
+          goalsMap: goalsFromDoc.length
+        });
+        setBankAndGoalsInState(normalizedBank, goalsFromDoc);
         renderMcqList();
         renderGoalsList();
         syncUI();
+        alert("Moln-bank aktiverad. Dina frågor är nu laddade i spelet.");
       });
       actions.appendChild(btn);
 
@@ -1579,6 +1632,14 @@ function setupCloudBankUI() {
       const sFull = loadState();
 
       try {
+        console.log("[DEBUG] Sparar bank till molnet:", {
+          name,
+          mcq: bank.mcq.length,
+          img: bank.img.length,
+          drag: bank.drag.length,
+          goalsMap: (sFull.goalsMap || []).length
+        });
+
         await firebaseDbInstance
           .collection(CLOUD_ROOT_COLLECTION)
           .doc(currentTeacherUser.uid)
@@ -1793,6 +1854,8 @@ function renderMcqList() {
 
   const s = loadState();
   const list = (s.bank && s.bank.mcq) || [];
+
+  console.log("[DEBUG] renderMcqList – antal MCQ i state:", list.length);
 
   listEl.innerHTML = "";
   if (countEl) countEl.textContent = String(list.length);
@@ -2293,6 +2356,7 @@ function startLevel(level) {
   const pool = allQuestions.filter((q) => (q.level || "E") === level);
   if (!pool.length) {
     alert("Det finns inga frågor på denna nivå ännu.");
+    console.log("[DEBUG] startLevel – inga frågor hittade för nivå", level, "i bank:", allQuestions.length);
     return;
   }
 
