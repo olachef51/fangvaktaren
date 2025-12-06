@@ -2766,7 +2766,7 @@ function finishLevel() {
 
 
 
-<!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (e-post, återställning & initiering) -->
+<!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (e-post & initiering) -->
 <script>
 /* =========================
    5a – E-postinlämning
@@ -2814,112 +2814,45 @@ function emailResultToTeacher() {
 }
 
 /* =========================
-   5b – Rensa elevdata & nollställning
+   5b – Visa aktuellt lärarlösenord
    ========================= */
 
-// Rensar bara elevens namn, klass, bästa nivåer, upplåsning och progression – behåller frågebank & lärarinställningar
-function clearStudentData() {
-  if (!confirm("Rensa elevdata (namn, klass, progression) på denna enhet? Detta påverkar inte frågebanker eller lärarinställningar.")) {
-    return;
-  }
-
-  const s = loadState();
-
-  s.student = { name: "", klass: "" };
-  s.best = { E: 0, C: 0, A: 0 };
-  s.unlocked = { E: false, C: false, A: false };
-  s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} };
-
-  saveState(s);
-  syncUI();
-  alert("Elevdata (namn, klass, progression) är nu rensad på denna enhet.");
-}
-
-// Tar bort ALL lokal speldata (inkl. elev, progression, frågebank, mål) och laddar om sidan
-function resetGameState() {
-  if (!confirm("Nollställa hela spelet på denna enhet?\n\nDetta tar bort all lokal data (elev, progression, delmål, frågebanker). Är du säker?")) {
-    return;
-  }
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-  } catch (e) {
-    console.warn("Kunde inte ta bort STORAGE_KEY:", e);
-  }
-  location.reload();
-}
-
-// Skapar ett kort med knappar i Inställningar-fliken i lärarläget (om det inte redan finns)
-function ensureResetCardInSettings() {
-  const settingsPanel = document.querySelector('.tab-panel[data-panel="settings"]');
-  if (!settingsPanel) return;
-
-  // Skapa bara en gång
-  if (document.getElementById("resetCard")) return;
-
-  const card = document.createElement("div");
-  card.className = "card";
-  card.id = "resetCard";
-  card.innerHTML = `
-    <h3>Återställning & elevdata</h3>
-    <p class="mini">
-      Dessa åtgärder påverkar bara denna enhet (denna webbläsare).
-    </p>
-    <div class="card-row" style="gap:8px;flex-wrap:wrap;">
-      <button id="btnClearStudentData" class="btn btn-sm btn-danger" type="button">
-        🧹 Rensa elevdata (namn, klass, progression)
-      </button>
-      <button id="btnResetGameState" class="btn btn-sm btn-danger" type="button">
-        ♻️ Nollställ hela spelet (lokal data)
-      </button>
-    </div>
-    <p class="mini" style="margin-top:6px;">
-      Använd <strong>Rensa elevdata</strong> när en ny elev ska spela på denna enhet.<br>
-      Använd <strong>Nollställ spelet</strong> om all lokal speldata behöver tas bort helt.
-    </p>
-  `;
-
-  settingsPanel.appendChild(card);
-
-  const btnClear = document.getElementById("btnClearStudentData");
-  if (btnClear) {
-    btnClear.addEventListener("click", clearStudentData);
-  }
-
-  const btnReset = document.getElementById("btnResetGameState");
-  if (btnReset) {
-    btnReset.addEventListener("click", resetGameState);
-  }
-}
-
-/* =========================
-   5c – Visa aktuellt lärarlösenord
-   ========================= */
-
-// Visar nuvarande lärarlösenord i statusrutan (endast lokalt, från localStorage)
+// Visar nuvarande lärarlösenord i statusrutan (lokalt, från localStorage)
 function showTeacherPasswordInStatus() {
   const s = loadState();
   const statusEl = $("#passwordStatus");
-  if (statusEl && s.teacherPassword) {
+  if (!statusEl) return;
+
+  if (s.teacherPassword) {
     statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
+  } else {
+    statusEl.textContent = "Inget lärarlösenord sparat.";
   }
 }
 
 /* =========================
-   5d – Initiering
+   5c – Initiering & eventkoppling
    ========================= */
 
 function initApp() {
-  const s = loadState();
-  if (!s.bank.mcq.length && !s.bank.img.length && !s.bank.drag.length) {
-    const merged = mergeEmbeddedBank(s);
-    saveState(merged);
+  // 1. Säkerställ att vi har en bank (lokal eller inbäddad)
+  let s = loadState();
+  const hasLocalQuestions =
+    (s.bank.mcq && s.bank.mcq.length) ||
+    (s.bank.img && s.bank.img.length) ||
+    (s.bank.drag && s.bank.drag.length);
+
+  if (!hasLocalQuestions) {
+    s = mergeEmbeddedBank();
   }
 
+  // 2. Initiera inställnings-delar (lärarläge)
   initTeacherEmailSettings();
   initThresholdSettings();
   initTeacherPasswordSettings();
   showTeacherPasswordInStatus();
 
+  // 3. Initiera mål / editor-delar (lärarflikar)
   initGoalsMap();
   initQuestionForms();
   initImageQuestionsEditor();
@@ -2927,26 +2860,39 @@ function initApp() {
   setupTabNavigation();
   setupCloudBankUI();
 
-  // 🔁 Lägg in återställnings-kortet i Inställningar-fliken
-  ensureResetCardInSettings();
-
+  // 4. Synka grund-UI (nivåkort, elevruta etc.)
   syncUI();
 
-  const btnSaveStudent = $("#btnSaveStudent");
-  if (btnSaveStudent) btnSaveStudent.addEventListener("click", handleSaveStudent);
+  // 5. KOPPLA KNAPPAR & HÄNDELSER
 
+  // Elevdata
+  const btnSaveStudent = $("#btnSaveStudent");
+  if (btnSaveStudent) {
+    btnSaveStudent.addEventListener("click", handleSaveStudent);
+  }
+
+  // Lärarläge – öppna/stäng gate & panel
   const btnTeacherMode = $("#btnTeacherMode");
-  if (btnTeacherMode) btnTeacherMode.addEventListener("click", openTeacherGate);
+  if (btnTeacherMode) {
+    btnTeacherMode.addEventListener("click", openTeacherGate);
+  }
 
   const btnTeacherCancel = $("#btnTeacherCancel");
-  if (btnTeacherCancel) btnTeacherCancel.addEventListener("click", closeTeacherGate);
+  if (btnTeacherCancel) {
+    btnTeacherCancel.addEventListener("click", closeTeacherGate);
+  }
 
   const btnTeacherConfirm = $("#btnTeacherConfirm");
-  if (btnTeacherConfirm) btnTeacherConfirm.addEventListener("click", handleTeacherConfirm);
+  if (btnTeacherConfirm) {
+    btnTeacherConfirm.addEventListener("click", handleTeacherConfirm);
+  }
 
   const btnCloseTeacher = $("#btnCloseTeacher");
-  if (btnCloseTeacher) btnCloseTeacher.addEventListener("click", closeTeacherModal);
+  if (btnCloseTeacher) {
+    btnCloseTeacher.addEventListener("click", closeTeacherModal);
+  }
 
+  // Navigering mellan spel/resultat/elevkort
   const btnBack = $("#btnBack");
   if (btnBack) {
     btnBack.addEventListener("click", () => {
@@ -2976,11 +2922,13 @@ function initApp() {
     });
   }
 
+  // Inlämning av spel (e-post)
   const btnSubmitGame = $("#btnSubmitGame");
   if (btnSubmitGame) {
     btnSubmitGame.addEventListener("click", emailResultToTeacher);
   }
 
+  // Starta nivåer
   const btnStartE = $("#start-levelE");
   const btnStartC = $("#start-levelC");
   const btnStartA = $("#start-levelA");
@@ -2988,17 +2936,20 @@ function initApp() {
   if (btnStartC) btnStartC.addEventListener("click", () => startLevel("C"));
   if (btnStartA) btnStartA.addEventListener("click", () => startLevel("A"));
 
+  // Avsluta nivå
   const btnFinish = $("#btnFinish");
-  if (btnFinish) btnFinish.addEventListener("click", finishLevel);
+  if (btnFinish) {
+    btnFinish.addEventListener("click", finishLevel);
+  }
 }
 
+// Starta allt när sidan är laddad
 document.addEventListener("DOMContentLoaded", () => {
-  initFirebase();
-  initApp();
+  initFirebase();  // från SEKTION 3
+  initApp();       // ovan
 });
 </script>
-<!-- slut SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (e-post, återställning & initiering) -->
-
+<!-- slut SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (e-post & initiering) -->
 
 
 
