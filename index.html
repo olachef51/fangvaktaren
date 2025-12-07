@@ -1731,6 +1731,8 @@ Gurka
 
 <!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
 
+<!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
+
 <!-- start SEKTION 3A: BAS, STATE, FIREBASE & MOLN-BANKER -->
 <script>
 "use strict";
@@ -1982,16 +1984,21 @@ function normalizeBankFromDoc(data) {
     return { mcq: [], img: [], drag: [] };
   }
 
+  console.log("[normalizeBankFromDoc] rå data-nycklar:", Object.keys(data));
+
   // 1) Nytt format: data.bank.mcq/img/drag
   if (
     data.bank &&
     (Array.isArray(data.bank.mcq) || Array.isArray(data.bank.img) || Array.isArray(data.bank.drag))
   ) {
-    return {
+    const bank = {
       mcq: data.bank.mcq || [],
       img: data.bank.img || [],
       drag: data.bank.drag || []
     };
+    console.log("[normalizeBankFromDoc] använder data.bank.* med längder:",
+      bank.mcq.length, bank.img.length, bank.drag.length);
+    return bank;
   }
 
   // 2) Bank direkt i roten: data.mcq/img/drag
@@ -2000,22 +2007,79 @@ function normalizeBankFromDoc(data) {
     Array.isArray(data.img) ||
     Array.isArray(data.drag)
   ) {
-    return {
+    const bank = {
       mcq: data.mcq || [],
       img: data.img || [],
       drag: data.drag || []
     };
+    console.log("[normalizeBankFromDoc] använder data.* direkt med längder:",
+      bank.mcq.length, bank.img.length, bank.drag.length);
+    return bank;
   }
 
   // 3) Gamla format med "questions" – behandla som mcq
   if (Array.isArray(data.questions)) {
-    return {
+    const bank = {
       mcq: data.questions,
       img: [],
       drag: []
     };
+    console.log("[normalizeBankFromDoc] använder data.questions som mcq, längd:", bank.mcq.length);
+    return bank;
   }
 
+  // 4) Försök hitta bank inuti en under-nod, t.ex. data.payload.bank eller liknande
+  for (const key of Object.keys(data)) {
+    const nested = data[key];
+    if (!nested || typeof nested !== "object") continue;
+
+    // 4a) nested.bank.mcq/img/drag
+    if (
+      nested.bank &&
+      (Array.isArray(nested.bank.mcq) ||
+        Array.isArray(nested.bank.img) ||
+        Array.isArray(nested.bank.drag))
+    ) {
+      const bank = {
+        mcq: nested.bank.mcq || [],
+        img: nested.bank.img || [],
+        drag: nested.bank.drag || []
+      };
+      console.log("[normalizeBankFromDoc] hittade bank under data." + key + ".bank med längder:",
+        bank.mcq.length, bank.img.length, bank.drag.length);
+      return bank;
+    }
+
+    // 4b) nested.mcq/img/drag direkt
+    if (
+      Array.isArray(nested.mcq) ||
+      Array.isArray(nested.img) ||
+      Array.isArray(nested.drag)
+    ) {
+      const bank = {
+        mcq: nested.mcq || [],
+        img: nested.img || [],
+        drag: nested.drag || []
+      };
+      console.log("[normalizeBankFromDoc] hittade bank under data." + key + ".* med längder:",
+        bank.mcq.length, bank.img.length, bank.drag.length);
+      return bank;
+    }
+
+    // 4c) nested.questions → mcq
+    if (Array.isArray(nested.questions)) {
+      const bank = {
+        mcq: nested.questions,
+        img: [],
+        drag: []
+      };
+      console.log("[normalizeBankFromDoc] hittade questions under data." + key +
+        " som mcq, längd:", bank.mcq.length);
+      return bank;
+    }
+  }
+
+  console.log("[normalizeBankFromDoc] inget igenkänt format – returnerar tom bank.");
   return { mcq: [], img: [], drag: [] };
 }
 
@@ -2068,7 +2132,10 @@ function setBankInState(bank) {
 // Läs banker från teachers/{uid}/banks
 async function loadCloudBanksList() {
   const listEl = $("#cloudBankList");
-  if (!listEl) return;
+  if (!listEl) {
+    console.warn("Hittar inget element med id='cloudBankList' – kan inte visa moln-banker.");
+    return;
+  }
   listEl.innerHTML = "";
 
   if (!firebaseDbInstance || !currentTeacherUser) {
@@ -2076,16 +2143,21 @@ async function loadCloudBanksList() {
     li.className = "mini";
     li.textContent = "Du måste vara inloggad med Google för att se dina moln-banker.";
     listEl.appendChild(li);
+    console.warn("loadCloudBanksList: ingen db eller ingen inloggad användare.");
     return;
   }
 
   try {
+    console.log("🔍 loadCloudBanksList startar för användare:", currentTeacherUser.uid);
     const snap = await firebaseDbInstance
       .collection(CLOUD_ROOT_COLLECTION)
       .doc(currentTeacherUser.uid)
       .collection(CLOUD_BANKS_SUBCOLLECTION)
       .orderBy("createdAt", "desc")
       .get();
+
+    console.log("📊 loadCloudBanksList: antal docs i teachers/" +
+      currentTeacherUser.uid + "/banks:", snap.size);
 
     if (snap.empty) {
       const li = document.createElement("li");
@@ -2097,7 +2169,14 @@ async function loadCloudBanksList() {
 
     snap.forEach((docSnap) => {
       const data = docSnap.data() || {};
+      console.log("📄 Moln-bank doc:", docSnap.id, data);
       const normalizedBank = normalizeBankFromDoc(data);
+      console.log("✅ Normaliserad bank för", docSnap.id, {
+        mcq: normalizedBank.mcq.length,
+        img: normalizedBank.img.length,
+        drag: normalizedBank.drag.length
+      });
+
       const goalsFromDoc = Array.isArray(data.goalsMap)
         ? data.goalsMap
         : (data.bank && Array.isArray(data.bank.goalsMap) ? data.bank.goalsMap : []);
@@ -2265,6 +2344,7 @@ function setupCloudBankUI() {
 }
 </script>
 <!-- slut SEKTION 3A: BAS, STATE, FIREBASE & MOLN-BANKER -->
+
 
 <!-- start SEKTION 3B: FRÅGEEDITORER, LÄRARLÄGE & NAVIGATION -->
 <script>
