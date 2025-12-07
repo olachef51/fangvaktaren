@@ -3838,6 +3838,418 @@ document.addEventListener("DOMContentLoaded", function () {
 </script>
 <!-- slut SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK -->
 
+<!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
+<script>
+/* =========================
+   3n – Spara elevresultat till Firestore vid inlämning
+   ========================= */
+
+async function saveCurrentResultToFirestore() {
+  try {
+    if (!window.firebase || !firebaseDbInstance) {
+      console.warn("saveCurrentResultToFirestore: Firebase är inte redo.");
+      return;
+    }
+
+    if (typeof getQueryParam !== "function") {
+      console.warn("saveCurrentResultToFirestore: getQueryParam saknas.");
+      return;
+    }
+
+    const sharedBankId =
+      getQueryParam("sharedBank") ||
+      getQueryParam("sb") ||
+      getQueryParam("bank");
+
+    if (!sharedBankId) {
+      console.log("saveCurrentResultToFirestore: ingen sharedBank-id i URL – sparar inget resultat.");
+      return;
+    }
+
+    const s = loadState();
+    const studentName = (s.student && s.student.name) || "";
+    const studentClass = (s.student && s.student.klass) || "";
+
+    if (!studentName || !studentClass) {
+      console.log("saveCurrentResultToFirestore: saknar elevnamn/klass – sparar inget resultat.");
+      return;
+    }
+
+    const scoreTextEl = document.getElementById("scoreText");
+    const scoreDetailEl = document.getElementById("scoreDetail");
+    let resultText = scoreTextEl ? scoreTextEl.textContent || "" : "";
+    let detailText = scoreDetailEl ? scoreDetailEl.textContent || "" : "";
+
+    let percent = null;
+    let correct = null;
+    let total = null;
+
+    if (scoreDetailEl && detailText) {
+      const m = detailText.match(/(\d+)\s*\/\s*(\d+)/);
+      if (m) {
+        correct = parseInt(m[1], 10);
+        total = parseInt(m[2], 10);
+        if (!isNaN(correct) && !isNaN(total) && total > 0) {
+          percent = Math.round((correct * 100) / total);
+        }
+      }
+    }
+
+    if (percent == null && resultText) {
+      const m2 = resultText.match(/(\d+)\s*%/);
+      if (m2) {
+        percent = parseInt(m2[1], 10);
+        if (isNaN(percent)) percent = null;
+      }
+    }
+
+    const level = typeof currentLevel !== "undefined" && currentLevel
+      ? currentLevel
+      : null;
+
+    const resultDoc = {
+      studentName,
+      studentClass,
+      level: level,
+      percent: percent,
+      correct: correct,
+      total: total,
+      resultText: resultText,
+      detailText: detailText,
+      totalPoints: (s.progression && s.progression.totalPoints) || 0,
+      bestE: (s.best && s.best.E) || 0,
+      bestC: (s.best && s.best.C) || 0,
+      bestA: (s.best && s.best.A) || 0,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+
+    console.log("saveCurrentResultToFirestore: sparar resultat", resultDoc);
+
+    await firebaseDbInstance
+      .collection("sharedBanks")
+      .doc(sharedBankId)
+      .collection("results")
+      .add(resultDoc);
+
+    console.log("saveCurrentResultToFirestore: resultat sparat.");
+  } catch (err) {
+    console.error("saveCurrentResultToFirestore: fel vid sparande av resultat:", err);
+  }
+}
+
+/* =========================
+   3n.1 – Koppla på knappen ”Lämna in spel för poäng”
+   ========================= */
+
+function setupSubmitGameToFirestore() {
+  const btnSubmit = document.getElementById("btnSubmitGame");
+  if (!btnSubmit) return;
+
+  btnSubmit.addEventListener("click", function () {
+    try {
+      saveCurrentResultToFirestore();
+    } catch (e) {
+      console.error("setupSubmitGameToFirestore: fel vid klick-hantering:", e);
+    }
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  setupSubmitGameToFirestore();
+});
+</script>
+<!-- slut SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
+
+
+<!-- start SEKTION 3X: INLÄMNING & HIGHSCORE (FIREBASE) -->
+<script>
+/* ============================================
+   3X – Inlämning till Firebase + Highscore
+   (ingen designändring, använder befintligt UI)
+   ============================================ */
+
+// Enkel cache för ägare (lärare) per shared-bank-id
+let sharedBankOwnerCache = {};
+
+/**
+ * Hämtar teacherUid för en viss bankId via sharedBanks/{bankId}.
+ * Cachar resultatet så det bara läses en gång per bank.
+ */
+async function getOwnerUidForBank(bankId) {
+  if (!bankId) return null;
+  if (sharedBankOwnerCache[bankId]) {
+    return sharedBankOwnerCache[bankId];
+  }
+  if (!firebaseDbInstance) {
+    console.warn("[3X] Ingen firebaseDbInstance – kan inte hämta ownerUid.");
+    return null;
+  }
+  try {
+    const docRef = firebaseDbInstance.collection("sharedBanks").doc(bankId);
+    const snap = await docRef.get();
+    if (!snap.exists) {
+      console.warn("[3X] sharedBanks/" + bankId + " finns inte.");
+      return null;
+    }
+    const data = snap.data() || {};
+    const ownerUid = data.teacherUid || data.ownerUid || null;
+    if (!ownerUid) {
+      console.warn("[3X] sharedBank saknar teacherUid/ownerUid.", data);
+      return null;
+    }
+    sharedBankOwnerCache[bankId] = ownerUid;
+    return ownerUid;
+  } catch (e) {
+    console.warn("[3X] Fel vid läsning av sharedBanks/" + bankId, e);
+    return null;
+  }
+}
+
+/**
+ * Plockar ut aktuell inlämningsdata från DOM + state.
+ * – Elevens namn & klass
+ * – Bank-id (från URL/state)
+ * – Totalprocent (från resultat-rutan)
+ */
+function buildSubmissionPayloadFromUI() {
+  const s = typeof loadState === "function" ? loadState() : {};
+
+  // Elevnamn & klass – försök först från resultatpanel, annars från fälten högst upp
+  const resNameEl = document.getElementById("resName");
+  const resClassEl = document.getElementById("resClass");
+  const studentNameEl = document.getElementById("studentName");
+  const studentClassEl = document.getElementById("studentClass");
+
+  const studentName =
+    (resNameEl && resNameEl.textContent && resNameEl.textContent.trim() !== "-" && resNameEl.textContent.trim()) ||
+    (studentNameEl && studentNameEl.value && studentNameEl.value.trim()) ||
+    "";
+
+  const studentClass =
+    (resClassEl && resClassEl.textContent && resClassEl.textContent.trim() !== "-" && resClassEl.textContent.trim()) ||
+    (studentClassEl && studentClassEl.value && studentClassEl.value.trim()) ||
+    "";
+
+  // Resultatprocent från resultat-rutan
+  const scoreTextEl = document.getElementById("scoreText");
+  let totalPercent = null;
+  if (scoreTextEl && scoreTextEl.textContent) {
+    const match = scoreTextEl.textContent.match(/(\d+)\s*%/);
+    if (match) {
+      totalPercent = parseInt(match[1], 10);
+    }
+  }
+
+  // Bank-id: försök state, annars URL-parameter (elevlänk)
+  let activeBankId = (s && (s.activeBankId || s.activeSharedBankId)) || null;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const qBank = params.get("bank");
+    if (!activeBankId && qBank) {
+      activeBankId = qBank;
+    }
+  } catch (e) {
+    console.warn("[3X] Kunde inte läsa URL-parametrar:", e);
+  }
+
+  // Banknamn om det finns i state (bra för läraröversikt)
+  const activeBankName = (s && (s.activeBankName || s.activeBankTitle)) || "";
+
+  if (!studentName || !studentClass || totalPercent === null) {
+    console.warn("[3X] Ofullständig inlämningsdata:", {
+      studentName,
+      studentClass,
+      totalPercent,
+      activeBankId
+    });
+  }
+
+  return {
+    studentName,
+    studentClass,
+    totalPercent,
+    activeBankId,
+    activeBankName
+  };
+}
+
+/**
+ * Sparar inlämning under teachers/{ownerUid}/submissions i Firestore.
+ * Detta ger varje lärare en egen elevbank.
+ */
+async function saveSubmissionToFirestore() {
+  if (!firebaseDbInstance) {
+    console.warn("[3X] Ingen firebaseDbInstance – hoppar över inlämning till molnet.");
+    return;
+  }
+
+  const payload = buildSubmissionPayloadFromUI();
+  const { studentName, studentClass, totalPercent, activeBankId, activeBankName } = payload;
+
+  // Grundkoll så vi slipper skräp
+  if (!studentName || !studentClass || totalPercent === null) {
+    console.warn("[3X] Sparar inte inlämning – saknar namn/klass/poäng.", payload);
+    return;
+  }
+
+  // Hämta teacherUid för banken. Om ingen bankId → vi sparar inte.
+  if (!activeBankId) {
+    console.warn("[3X] Ingen activeBankId – spelet körs troligen med inbyggd bank. Hoppar över moln-inlämning.");
+    return;
+  }
+
+  const ownerUid = await getOwnerUidForBank(activeBankId);
+  if (!ownerUid) {
+    console.warn("[3X] Hittade ingen teacherUid för bank " + activeBankId + " – sparar inte inlämning.");
+    return;
+  }
+
+  const submissionsRef = firebaseDbInstance
+    .collection("teachers")
+    .doc(ownerUid)
+    .collection("submissions");
+
+  const submissionDoc = {
+    bankId: activeBankId,
+    bankName: activeBankName || null,
+    teacherUid: ownerUid,
+    studentName,
+    studentClass,
+    totalPercent,
+    // Lite extra metadata
+    userAgent: navigator.userAgent || "",
+    submittedAt: (firebase.firestore && firebase.firestore.FieldValue && firebase.firestore.FieldValue.serverTimestamp())
+      || new Date()
+  };
+
+  try {
+    await submissionsRef.add(submissionDoc);
+    console.log("[3X] Inlämning sparad till Firestore:", submissionDoc);
+  } catch (e) {
+    console.warn("[3X] Fel vid sparande av inlämning:", e);
+  }
+}
+
+/**
+ * Laddar högsta poäng (highscore) för aktuell bank från Firestore
+ * och visar i befintliga rutan #highscoreSummary (ingen ny layout).
+ */
+async function refreshHighscoreFromFirestore() {
+  if (!firebaseDbInstance) {
+    console.warn("[3X] Ingen firebaseDbInstance – hoppar över highscore-laddning.");
+    return;
+  }
+
+  const s = typeof loadState === "function" ? loadState() : {};
+  let activeBankId = (s && (s.activeBankId || s.activeSharedBankId)) || null;
+
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const qBank = params.get("bank");
+    if (!activeBankId && qBank) {
+      activeBankId = qBank;
+    }
+  } catch (e) {
+    console.warn("[3X] Kunde inte läsa URL för highscore:", e);
+  }
+
+  if (!activeBankId) {
+    // Inget bank-id – då finns ingen gemensam highscore att hämta.
+    return;
+  }
+
+  const ownerUid = await getOwnerUidForBank(activeBankId);
+  if (!ownerUid) {
+    console.warn("[3X] Ingen ownerUid för bank " + activeBankId + " – hoppar över highscore.");
+    return;
+  }
+
+  try {
+    const submissionsRef = firebaseDbInstance
+      .collection("teachers")
+      .doc(ownerUid)
+      .collection("submissions");
+
+    // Hämta ALLA för denna bank, plocka bästa i klienten (slipper indexproblem)
+    const snap = await submissionsRef.where("bankId", "==", activeBankId).get();
+
+    let best = null;
+    snap.forEach((doc) => {
+      const d = doc.data() || {};
+      if (typeof d.totalPercent !== "number") return;
+      if (!best || d.totalPercent > best.totalPercent) {
+        best = {
+          id: doc.id,
+          studentName: d.studentName || "",
+          studentClass: d.studentClass || "",
+          totalPercent: d.totalPercent
+        };
+      }
+    });
+
+    const el = document.getElementById("highscoreSummary");
+    if (!el) {
+      return;
+    }
+
+    if (!best) {
+      // Ingen inlämning ännu – låt befintlig text vara eller visa enkel fallback.
+      if (!el.textContent || el.textContent.trim() === "") {
+        el.textContent = "Ingen highscore ännu.";
+      }
+      return;
+    }
+
+    // Ingen layoutändring – bara text i befintlig ruta.
+    const name = best.studentName || "Okänd elev";
+    const cls = best.studentClass ? " (" + best.studentClass + ")" : "";
+    el.textContent = "Bästa resultat (denna bank): " + name + cls + " – " + best.totalPercent + " %";
+  } catch (e) {
+    console.warn("[3X] Fel vid laddning av highscore:", e);
+  }
+}
+
+/**
+ * Hookar in på befintliga ”Lämna in spel för poäng”-knappen.
+ * Vi låter originalkoden göra sitt först, och sedan kör vi moln-inlämning + highscore.
+ */
+document.addEventListener("DOMContentLoaded", function () {
+  const btnSubmit = document.getElementById("btnSubmitGame");
+  if (!btnSubmit) {
+    console.warn("[3X] Hittar inte #btnSubmitGame – kan inte koppla inlämning.");
+    return;
+  }
+
+  btnSubmit.addEventListener("click", function () {
+    // Vänta till nästa ”tick” så att original-logiken hinner uppdatera resultat-rutan.
+    setTimeout(function () {
+      // Kör inlämning → Firestore
+      if (typeof saveSubmissionToFirestore === "function") {
+        saveSubmissionToFirestore().catch(function (e) {
+          console.warn("[3X] Fel i saveSubmissionToFirestore:", e);
+        });
+      }
+      // Ladda om highscore för denna bank
+      if (typeof refreshHighscoreFromFirestore === "function") {
+        refreshHighscoreFromFirestore().catch(function (e) {
+          console.warn("[3X] Fel i refreshHighscoreFromFirestore:", e);
+        });
+      }
+    }, 0);
+  });
+
+  // För säkerhets skull: försök ladda highscore direkt vid start
+  // (t.ex. om någon redan lämnat in tidigare).
+  try {
+    refreshHighscoreFromFirestore();
+  } catch (e) {
+    console.warn("[3X] Initial highscore-laddning gav fel:", e);
+  }
+});
+</script>
+<!-- slut SEKTION 3X: INLÄMNING & HIGHSCORE (FIREBASE) -->
+
+
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
 
 
