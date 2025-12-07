@@ -1702,6 +1702,30 @@ Gurka
                 </div>
               </div>
 
+              <!-- NYTT KORT: Gör publik frågebank / elevlänk -->
+              <div class="card">
+                <h3>🌐 Gör publik frågebank</h3>
+                <p class="mini">
+                  Skapa en elevlänk som automatiskt laddar denna frågebank när eleverna öppnar spelet.
+                </p>
+                <div class="card-row" style="margin-top:8px;flex-direction:column;gap:8px;">
+                  <button id="btnPublishSharedBank" class="btn btn-sm" type="button">
+                    🌐 Skapa elevlänk
+                  </button>
+                  <div class="field">
+                    <label class="small-label" for="sharedBankLinkOutput">Elevlänk</label>
+                    <input
+                      id="sharedBankLinkOutput"
+                      class="input"
+                      type="text"
+                      readonly
+                      placeholder="Länken visas här när den har skapats..."
+                    />
+                  </div>
+                  <p id="sharedBankStatus" class="mini"></p>
+                </div>
+              </div>
+
               <div class="card card-full-width">
                 <h3>Export / Import av frågebank (JSON)</h3>
                 <p class="mini">
@@ -1731,8 +1755,6 @@ Gurka
 
 <!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
 
-<!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
-
 <!-- start SEKTION 3A: BAS, STATE, FIREBASE & MOLN-BANKER -->
 <script>
 "use strict";
@@ -1756,6 +1778,9 @@ const STORAGE_KEY = "fangvaktaren-v17";
 // 🔁 använder teachers/{uid}/banks
 const CLOUD_ROOT_COLLECTION = "teachers";
 const CLOUD_BANKS_SUBCOLLECTION = "banks";
+
+// 🌐 ny: publik collection för auto-load till elever
+const SHARED_BANKS_COLLECTION = "sharedBanks";
 
 const $ = (sel) => document.querySelector(sel);
 const $all = (sel) => document.querySelectorAll(sel);
@@ -1912,6 +1937,8 @@ function initFirebase() {
     firebaseDbInstance = firebase.firestore();
     console.log("Firebase init OK");
     setupGoogleLogin();
+    // 🌐 auto-load av publik bank till elever (om URL har ?bank=... eller ?sb=...)
+    autoLoadSharedBank();
   } catch (e) {
     console.error("Firebase init misslyckades:", e);
     if (statusEl) {
@@ -2129,6 +2156,77 @@ function setBankInState(bank) {
   setBankAndGoalsInState(bank, null);
 }
 
+// =========================
+// 3d.1 – Hjälpare för URL-parametrar
+// =========================
+function getQueryParam(name) {
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    return params.get(name);
+  } catch (e) {
+    console.warn("getQueryParam fel:", e);
+    return null;
+  }
+}
+
+// =========================
+// 3d.2 – Auto-load av publik bank för elever
+// =========================
+async function autoLoadSharedBank() {
+  if (!firebaseDbInstance) {
+    console.warn("autoLoadSharedBank: firebaseDbInstance saknas.");
+    return;
+  }
+
+  const bankId =
+    getQueryParam("bank") ||
+    getQueryParam("sb") ||
+    getQueryParam("sharedBank");
+
+  if (!bankId) {
+    console.log("autoLoadSharedBank: ingen bank-param i URL – hoppar över.");
+    return;
+  }
+
+  try {
+    console.log("🌐 autoLoadSharedBank: försöker ladda", SHARED_BANKS_COLLECTION + "/" + bankId);
+
+    const docSnap = await firebaseDbInstance
+      .collection(SHARED_BANKS_COLLECTION)
+      .doc(bankId)
+      .get();
+
+    if (!docSnap.exists) {
+      console.warn("autoLoadSharedBank: hittade ingen shared-bank med id", bankId);
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    console.log("autoLoadSharedBank: doc-data:", data);
+
+    const normalizedBank = normalizeBankFromDoc(data);
+    const goalsFromDoc = Array.isArray(data.goalsMap)
+      ? data.goalsMap
+      : (data.bank && Array.isArray(data.bank.goalsMap) ? data.bank.goalsMap : []);
+
+    setBankAndGoalsInState(normalizedBank, goalsFromDoc);
+
+    if (typeof renderMcqList === "function") renderMcqList();
+    if (typeof renderImgList === "function") renderImgList();
+    if (typeof renderDragList === "function") renderDragList();
+    if (typeof renderGoalsList === "function") renderGoalsList();
+    if (typeof syncUI === "function") syncUI();
+
+    console.log("✅ autoLoadSharedBank: shared-bank laddad & aktiverad.");
+  } catch (err) {
+    console.error("autoLoadSharedBank: fel vid laddning av shared-bank:", err);
+  }
+}
+
+// =========================
+// 3d.3 – Lärarens moln-banker (teachers/{uid}/banks)
+// =========================
+
 // Läs banker från teachers/{uid}/banks
 async function loadCloudBanksList() {
   const listEl = $("#cloudBankList");
@@ -2212,13 +2310,11 @@ async function loadCloudBanksList() {
       btnActivate.textContent = "Aktivera denna bank";
       btnActivate.addEventListener("click", () => {
         setBankAndGoalsInState(normalizedBank, goalsFromDoc);
-        renderMcqList();
-        renderImgList();
-        renderDragList();
-        renderGoalsList();
-        if (typeof syncUI === "function") {
-          syncUI();
-        }
+        if (typeof renderMcqList === "function") renderMcqList();
+        if (typeof renderImgList === "function") renderImgList();
+        if (typeof renderDragList === "function") renderDragList();
+        if (typeof renderGoalsList === "function") renderGoalsList();
+        if (typeof syncUI === "function") syncUI();
         alert("Moln-bank aktiverad. Dina frågor är nu laddade i spelet.");
       });
       actions.appendChild(btnActivate);
@@ -2262,6 +2358,9 @@ function setupCloudBankUI() {
   const btnSave = $("#btnSaveToCloud");
   const btnExport = $("#btnExportBank");
   const fileImport = $("#fileImport");
+  const btnPublish = $("#btnPublishSharedBank");
+  const sharedLinkOutput = $("#sharedBankLinkOutput");
+  const sharedStatus = $("#sharedBankStatus");
 
   if (btnLoad) {
     btnLoad.addEventListener("click", () => {
@@ -2326,12 +2425,10 @@ function setupCloudBankUI() {
         try {
           const imported = JSON.parse(reader.result);
           setBankInState(imported);
-          renderMcqList();
-          renderImgList();
-          renderDragList();
-          if (typeof syncUI === "function") {
-            syncUI();
-          }
+          if (typeof renderMcqList === "function") renderMcqList();
+          if (typeof renderImgList === "function") renderImgList();
+          if (typeof renderDragList === "function") renderDragList();
+          if (typeof syncUI === "function") syncUI();
           alert("Frågebank importerad.");
         } catch (err) {
           console.error("Fel vid import av JSON-bank:", err);
@@ -2341,9 +2438,59 @@ function setupCloudBankUI() {
       reader.readAsText(file, "utf-8");
     });
   }
+
+  // 🌐 Nytt: Gör publik / skapa elevlänk (sharedBanks)
+  if (btnPublish) {
+    btnPublish.addEventListener("click", async () => {
+      if (!firebaseDbInstance) {
+        alert("Tekniskt fel: Firebase-databas saknas.");
+        return;
+      }
+      const bank = getBankFromState();
+      const sFull = loadState();
+
+      try {
+        const nameInput = $("#inputBankName");
+        const friendlyName =
+          (nameInput && nameInput.value.trim()) || "Publik frågebank";
+
+        const docRef = await firebaseDbInstance
+          .collection(SHARED_BANKS_COLLECTION)
+          .add({
+            name: friendlyName,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            ownerUid: currentTeacherUser ? currentTeacherUser.uid : null,
+            ownerEmail: currentTeacherUser ? (currentTeacherUser.email || null) : null,
+            bank,
+            goalsMap: sFull.goalsMap || []
+          });
+
+        const baseUrl = window.location.origin + window.location.pathname;
+        const link = `${baseUrl}?bank=${docRef.id}`;
+
+        if (sharedLinkOutput) {
+          sharedLinkOutput.value = link;
+        }
+        if (sharedStatus) {
+          sharedStatus.textContent = "Elevlänk skapad. Kopiera länken och skicka till eleverna.";
+        } else {
+          alert("Elevlänk skapad:\n" + link);
+        }
+      } catch (err) {
+        console.error("Kunde inte skapa publik bank:", err);
+        if (sharedStatus) {
+          sharedStatus.textContent =
+            "Kunde inte skapa publik bank. Se konsolen för detaljer.";
+        } else {
+          alert("Kunde inte skapa publik bank. Se konsolen för detaljer.");
+        }
+      }
+    });
+  }
 }
 </script>
 <!-- slut SEKTION 3A: BAS, STATE, FIREBASE & MOLN-BANKER -->
+
 
 
 <!-- start SEKTION 3B: FRÅGEEDITORER, LÄRARLÄGE & NAVIGATION -->
@@ -3593,6 +3740,103 @@ function updateBankStatusUI() {
 </script>
 <!-- slut SEKTION 3B: FRÅGEEDITORER, LÄRARLÄGE & NAVIGATION -->
 
+<!-- start SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK -->
+<script>
+/* =========================
+   3m – Publicera frågebank som elevlänk (sharedBanks)
+   ========================= */
+
+async function publishCurrentBankAsShared() {
+  const statusEl = document.getElementById("sharedBankStatus");
+  const linkOutput = document.getElementById("sharedBankLinkOutput");
+  const nameInput = document.getElementById("inputBankName");
+
+  function setStatus(msg) {
+    if (statusEl) statusEl.textContent = msg;
+  }
+
+  try {
+    if (!window.firebase || !firebaseDbInstance || !firebaseAuthInstance) {
+      setStatus("Firebase är inte redo. Logga in med Google och försök igen.");
+      return;
+    }
+
+    const user = firebaseAuthInstance.currentUser;
+    if (!user) {
+      setStatus("Du måste vara inloggad med Google för att skapa en elevlänk.");
+      return;
+    }
+
+    const s = loadState();
+    const bank = s.bank || {};
+    const hasMcq = Array.isArray(bank.mcq) && bank.mcq.length > 0;
+    const hasImg = Array.isArray(bank.img) && bank.img.length > 0;
+    const hasDrag = Array.isArray(bank.drag) && bank.drag.length > 0;
+
+    if (!hasMcq && !hasImg && !hasDrag) {
+      setStatus("Det finns inga frågor i den aktuella banken att publicera.");
+      return;
+    }
+
+    const bankName =
+      (nameInput && nameInput.value.trim()) ||
+      "Frågebank utan namn";
+
+    setStatus("Publicerar frågebank...");
+
+    const db = firebaseDbInstance;
+    const sharedCol = db.collection("sharedBanks");
+
+    const payload = {
+      ownerUid: user.uid,
+      ownerEmail: user.email || null,
+      name: bankName,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      bank: bank
+    };
+
+    const docRef = await sharedCol.add(payload);
+    const sharedId = docRef.id;
+
+    const baseUrl = window.location.origin + window.location.pathname;
+    const shareUrl = baseUrl + "?sharedBank=" + encodeURIComponent(sharedId);
+
+    if (linkOutput) {
+      linkOutput.value = shareUrl;
+      try {
+        linkOutput.focus();
+        linkOutput.select();
+      } catch (_) {
+        // ignore focus/select errors
+      }
+    }
+
+    setStatus("Elevlänk skapad. Kopiera länken och skicka till eleverna.");
+  } catch (err) {
+    console.error("Fel vid publicering av frågebank:", err);
+    const statusMsg =
+      err && err.message
+        ? "Fel vid publicering: " + err.message
+        : "Fel vid publicering. Se konsolen för detaljer.";
+    const statusEl = document.getElementById("sharedBankStatus");
+    if (statusEl) statusEl.textContent = statusMsg;
+  }
+}
+
+function setupPublishSharedBank() {
+  const btnPublish = document.getElementById("btnPublishSharedBank");
+  if (!btnPublish) return;
+
+  btnPublish.addEventListener("click", function () {
+    publishCurrentBankAsShared();
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  setupPublishSharedBank();
+});
+</script>
+<!-- slut SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK -->
 
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
 
