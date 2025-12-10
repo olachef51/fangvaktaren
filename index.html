@@ -4205,7 +4205,7 @@ async function saveCurrentResultToFirestore() {
       return;
     }
 
-    // Vilken bank är aktiv? (elevlänk, t.ex. ...?bank=XYZ)
+    // 1) Vilken bank är aktiv? (elevlänk, t.ex. ...?bank=XYZ)
     const sharedBankId =
       getQueryParam("sharedBank") ||
       getQueryParam("sb") ||
@@ -4216,7 +4216,7 @@ async function saveCurrentResultToFirestore() {
       return;
     }
 
-    // Läs state för elevens namn, klass och progression
+    // 2) Läs state för elevens namn, klass och progression
     const s = loadState();
     const studentName = (s.student && s.student.name) || "";
     const studentClass = (s.student && s.student.klass) || "";
@@ -4227,24 +4227,30 @@ async function saveCurrentResultToFirestore() {
       return;
     }
 
-    // Läs av resultatrutan i UI
-    const scoreTextEl = document.getElementById("scoreText");
-    const scoreDetailEl = document.getElementById("scoreDetail");
-    let resultText = scoreTextEl ? scoreTextEl.textContent || "" : "";
-    let detailText = scoreDetailEl ? scoreDetailEl.textContent || "" : "";
-
+    // 3) Försök hämta resultat från lastSubmission först (mer robust än att läsa text)
+    let level = null;
     let percent = null;
     let correct = null;
     let total = null;
 
-    if (scoreDetailEl && detailText) {
+    if (typeof lastSubmission === "object" && lastSubmission !== null) {
+      if (lastSubmission.level) level = lastSubmission.level;
+      if (typeof lastSubmission.percent === "number") percent = lastSubmission.percent;
+      if (typeof lastSubmission.correct === "number") correct = lastSubmission.correct;
+      if (typeof lastSubmission.total === "number") total = lastSubmission.total;
+    }
+
+    // Om något saknas, fall back till DOM-läsning
+    const scoreTextEl = document.getElementById("scoreText");
+    const scoreDetailEl = document.getElementById("scoreDetail");
+    const resultText = scoreTextEl ? (scoreTextEl.textContent || "") : "";
+    const detailText = scoreDetailEl ? (scoreDetailEl.textContent || "") : "";
+
+    if ((correct == null || total == null) && detailText) {
       const m = detailText.match(/(\d+)\s*\/\s*(\d+)/);
       if (m) {
         correct = parseInt(m[1], 10);
         total = parseInt(m[2], 10);
-        if (!isNaN(correct) && !isNaN(total) && total > 0) {
-          percent = Math.round((correct * 100) / total);
-        }
       }
     }
 
@@ -4256,21 +4262,26 @@ async function saveCurrentResultToFirestore() {
       }
     }
 
-    // Vilken nivå spelade eleven?
-    let level = null;
-    if (typeof currentLevel !== "undefined" && currentLevel) {
-      level = currentLevel;
-    } else if (resultText) {
-      // fallback: försök läsa "nivå X" ur texten om det finns
-      const m3 = resultText.match(/nivå\s*([ECA])/i);
-      if (m3) {
-        level = m3[1].toUpperCase();
+    // Om vi fortfarande saknar level, försök ta från currentLevel eller texten
+    if (!level) {
+      if (typeof currentLevel !== "undefined" && currentLevel) {
+        level = currentLevel;
+      } else if (resultText) {
+        const m3 = resultText.match(/nivå\s*([ECA])/i);
+        if (m3) level = m3[1].toUpperCase();
       }
     }
 
-    // =========================
-    // Uppdatera poäng & bästa resultat i state
-    // =========================
+    // Om vi har procent men saknar korrekt/total, försök uppskatta via antal frågor
+    if (percent != null && (correct == null || total == null)) {
+      const numQuestions = Array.isArray(currentQuestions) ? currentQuestions.length : null;
+      if (numQuestions && numQuestions > 0) {
+        total = numQuestions;
+        correct = Math.round((percent / 100) * numQuestions);
+      }
+    }
+
+    // 4) Uppdatera poäng & bästa resultat i state (om vi har något att räkna på)
     if (!s.progression || typeof s.progression !== "object") {
       s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} };
     }
@@ -4278,20 +4289,21 @@ async function saveCurrentResultToFirestore() {
       s.best = { E: 0, C: 0, A: 0 };
     }
 
-    if (correct != null && total != null && level) {
-      const pointsPerQuestion = level === "E" ? 1 : level === "C" ? 2 : 3;
+    if (correct != null && !isNaN(correct) && level) {
+      const lvl = String(level).toUpperCase();
+      const pointsPerQuestion = lvl === "E" ? 1 : (lvl === "C" ? 2 : 3);
       const addPoints = correct * pointsPerQuestion;
-
       s.progression.totalPoints = (s.progression.totalPoints || 0) + addPoints;
     }
 
     if (percent != null && level) {
-      if (level === "E" && percent > (s.best.E || 0)) s.best.E = percent;
-      if (level === "C" && percent > (s.best.C || 0)) s.best.C = percent;
-      if (level === "A" && percent > (s.best.A || 0)) s.best.A = percent;
+      const lvl = String(level).toUpperCase();
+      if (lvl === "E" && percent > (s.best.E || 0)) s.best.E = percent;
+      if (lvl === "C" && percent > (s.best.C || 0)) s.best.C = percent;
+      if (lvl === "A" && percent > (s.best.A || 0)) s.best.A = percent;
     }
 
-    // Spara tillbaka state lokalt så att nivå-kort och poängruta uppdateras
+    // Spara tillbaka state lokalt så att nivå-kort och poängruta kan visa rätt värden
     saveState(s);
     if (typeof syncUI === "function") {
       try {
@@ -4301,16 +4313,15 @@ async function saveCurrentResultToFirestore() {
       }
     }
 
-    // =========================
-    // Bygg dokumentet som ska in i Firestore
-    // =========================
+    // 5) Bygg dokumentet som ska in i Firestore
     const resultDoc = {
       studentName,
       studentClass,
-      level: level,
-      percent: percent,
-      correct: correct,
-      total: total,
+      level: level || null,
+      percent: percent != null ? percent : null,
+      scorePercent: percent != null ? percent : null, // för highscore (3X) som använder scorePercent
+      correct: correct != null ? correct : null,
+      total: total != null ? total : null,
       resultText: resultText,
       detailText: detailText,
       totalPoints: (s.progression && s.progression.totalPoints) || 0,
@@ -4330,7 +4341,11 @@ async function saveCurrentResultToFirestore() {
 
     console.log("saveCurrentResultToFirestore: resultat sparat.");
 
-    // Om highscore-funktionen (3X) finns, försök uppdatera highscore-listan direkt
+    // Tipsa 3X-highscore om aktiv bank, så den kan användas i lärarläget
+    if (!window.activeSharedBankId) {
+      window.activeSharedBankId = sharedBankId;
+    }
+
     if (typeof refreshHighscoreFromFirestore === "function") {
       try {
         refreshHighscoreFromFirestore(sharedBankId);
@@ -4349,34 +4364,126 @@ async function saveCurrentResultToFirestore() {
 
 
 <script>
-// start SEKTION 3X: FIRESTORE-INLÄMNING & LÄRAR-HIGHSCORELISTA
+// start SEKTION 3X: FIRESTORE-INLÄMNING, LÄRAR-HIGHSCORELISTA & ELEVPROGRESSION
 
 // Resultat lagras per frågebank i en egen subkollektion
 const RESULTS_COLLECTION_NAME = "results";
 
 /**
- * Hitta aktiv bankId för highscore:
- *  1) explicit param
- *  2) window.activeSharedBankId
- *  3) URL-param (sharedBank / sb / bank)
+ * Hjälpfunktion – ta fram aktiv bankId för inlämning / highscore / elevlista
+ * 1) aktiv shared bank från URL (elevlänk)
+ * 2) annars aktiv moln-bank (läraren har laddat bank i modal)
  */
-function getBankIdForHighscore(explicitId) {
-  if (explicitId) return explicitId;
-  if (typeof window !== "undefined" && window.activeSharedBankId) {
-    return window.activeSharedBankId;
-  }
-  if (typeof getQueryParam === "function") {
-    return (
-      getQueryParam("sharedBank") ||
-      getQueryParam("sb") ||
-      getQueryParam("bank")
-    );
-  }
+function getActiveBankIdForResults() {
+  if (window.activeSharedBankId) return window.activeSharedBankId;
+  if (window.activeCloudBankId) return window.activeCloudBankId;
   return null;
 }
 
 /**
+ * Spara elevens senaste resultat till Firestore under:
+ *  sharedBanks/{bankId}/results/{autoId}
+ *
+ * Den här används inte direkt nu (saveCurrentResultToFirestore i 3D används),
+ * men finns kvar om vi vill anropa den mer manuellt senare.
+ */
+function saveCurrentResultToFirestoreV3X(resultObj) {
+  if (!firebaseDbInstance) {
+    console.warn("saveCurrentResultToFirestoreV3X: ingen firebaseDbInstance – avbryter.");
+    return;
+  }
+
+  const bankId = getActiveBankIdForResults();
+  if (!bankId) {
+    console.warn("saveCurrentResultToFirestoreV3X: ingen aktiv bankId – avbryter.");
+    return;
+  }
+
+  const resultsRef = firebaseDbInstance
+    .collection("sharedBanks")
+    .doc(bankId)
+    .collection(RESULTS_COLLECTION_NAME);
+
+  const payload = {
+    ...resultObj,
+    bankId,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+
+  console.log("saveCurrentResultToFirestoreV3X: sparar resultat", payload);
+
+  return resultsRef
+    .add(payload)
+    .then(() => {
+      console.log("saveCurrentResultToFirestoreV3X: resultat sparat.");
+      // Uppdatera highscore-listan efter varje inlämning
+      refreshHighscoreFromFirestore(bankId);
+      console.log("[3X] Inlämning sparad till Firestore:", payload);
+    })
+    .catch((err) => {
+      console.error("saveCurrentResultToFirestoreV3X: fel vid sparande:", err);
+    });
+}
+
+/**
+ * Läs highscore från Firestore för aktuell bank
+ * och uppdatera lärarens highscore-lista i Elevprogression-fliken.
+ */
+function refreshHighscoreFromFirestore(optionalBankId) {
+  if (!firebaseDbInstance) {
+    console.warn("[3X] Ingen firebaseDbInstance – hoppar över highscore-laddning.");
+    return;
+  }
+
+  const bankId = optionalBankId || getActiveBankIdForResults();
+  if (!bankId) {
+    console.warn("[3X] Ingen bankId – hoppar över highscore-laddning.");
+    return;
+  }
+
+  const resultsRef = firebaseDbInstance
+    .collection("sharedBanks")
+    .doc(bankId)
+    .collection(RESULTS_COLLECTION_NAME);
+
+  resultsRef
+    .orderBy("scorePercent", "desc")
+    .orderBy("createdAt", "asc")
+    .limit(20)
+    .get()
+    .then((snapshot) => {
+      const entries = [];
+      snapshot.forEach((doc) => {
+        const d = doc.data() || {};
+        entries.push({
+          name: d.studentName || d.name || "",
+          className: d.studentClass || d.class || "",
+          level: d.levelId || d.level || "",
+          score:
+            typeof d.scorePercent === "number"
+              ? d.scorePercent
+              : typeof d.percent === "number"
+              ? d.percent
+              : 0,
+          createdAt:
+            d.createdAt && typeof d.createdAt.toDate === "function"
+              ? d.createdAt.toDate()
+              : null
+        });
+      });
+
+      console.log("[3X] Highscore-inläsning klar, poster:", entries.length);
+      updateHighscoreUI(entries);
+    })
+    .catch((err) => {
+      console.error("[3X] Fel vid highscore-laddning:", err);
+    });
+}
+
+/**
  * Säkerställ att det finns en highscore-ruta i Elevprogression-fliken.
+ * Vi återanvänder befintliga klasser (progress-box, goals-list, mini)
+ * så layouten följer nuvarande design.
  */
 function ensureHighscoreBox() {
   const grid = document.querySelector(".progress-grid");
@@ -4409,6 +4516,7 @@ function ensureHighscoreBox() {
 
 /**
  * Uppdatera själva lärar-vyn för highscore-listan.
+ * Visar topp 20 resultat för aktuell frågebank.
  */
 function updateHighscoreUI(entries) {
   try {
@@ -4440,8 +4548,12 @@ function updateHighscoreUI(entries) {
       const score =
         typeof e.score === "number" ? e.score.toFixed(0) : String(e.score || 0);
       const level = e.level || "?";
+      const dateStr =
+        e.createdAt instanceof Date
+          ? " – " + e.createdAt.toLocaleString("sv-SE")
+          : "";
 
-      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}`;
+      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}${dateStr}`;
       list.appendChild(li);
     });
   } catch (err) {
@@ -4449,19 +4561,73 @@ function updateHighscoreUI(entries) {
   }
 }
 
+/* =====================================================
+   ELEVLISTA I ELEVPROGRESSION-FLIKEN
+   ===================================================== */
+
 /**
- * Läs highscore från Firestore för aktuell bank
- * och uppdatera lärarens highscore-lista i Elevprogression-fliken.
+ * Skapar en separat ruta i Elevprogression-fliken för:
+ *  - Knapp: "Uppdatera elevprogression"
+ *  - Lista över alla inlämningar (elevens namn, klass, procent, nivå)
+ *  - Detaljruta för markerad elev
  */
-function refreshHighscoreFromFirestore(optionalBankId) {
-  if (!firebaseDbInstance || !window.firebase) {
-    console.warn("[3X] Ingen firebaseDbInstance – hoppar över highscore-laddning.");
+function ensureProgressionBox() {
+  const grid = document.querySelector(".progress-grid");
+  if (!grid) return null;
+
+  let box = document.getElementById("progressStudentsBox");
+  if (box) return box;
+
+  box = document.createElement("div");
+  box.id = "progressStudentsBox";
+  box.className = "progress-box";
+
+  const title = document.createElement("h4");
+  title.textContent = "Elevprogression (inlämnade resultat)";
+
+  const btn = document.createElement("button");
+  btn.id = "btnRefreshProgression";
+  btn.className = "btn btn-sm";
+  btn.textContent = "Uppdatera elevprogression";
+
+  const list = document.createElement("ul");
+  list.id = "teacherStudentList";
+  list.className = "goals-list mini";
+
+  const li = document.createElement("li");
+  li.textContent = "Inga inlämningar sparade ännu.";
+  list.appendChild(li);
+
+  const detail = document.createElement("div");
+  detail.id = "progressStudentDetail";
+  detail.className = "mini";
+  detail.style.marginTop = "8px";
+  detail.textContent = "Välj en elev i listan för att se detaljer.";
+
+  box.appendChild(title);
+  box.appendChild(btn);
+  box.appendChild(list);
+  box.appendChild(detail);
+
+  grid.appendChild(box);
+
+  return box;
+}
+
+/**
+ * Läser alla resultat för aktuell frågebank från Firestore
+ * och skickar dem vidare till UI-funktionen nedan.
+ */
+function refreshElevProgressionFromFirestore(optionalBankId) {
+  if (!firebaseDbInstance) {
+    console.warn("[3X] Ingen firebaseDbInstance – hoppar över elevprogression-laddning.");
     return;
   }
 
-  const bankId = getBankIdForHighscore(optionalBankId);
+  const bankId = optionalBankId || getActiveBankIdForResults();
   if (!bankId) {
-    console.warn("[3X] Ingen bankId – hoppar över highscore-laddning.");
+    console.warn("[3X] Ingen bankId – kan inte läsa elevprogression.");
+    alert("Ingen aktiv frågebank hittades. Öppna elevlänken eller aktivera en moln-bank först.");
     return;
   }
 
@@ -4470,27 +4636,50 @@ function refreshHighscoreFromFirestore(optionalBankId) {
     .doc(bankId)
     .collection(RESULTS_COLLECTION_NAME);
 
+  // Senaste 100 inlämningar, nyast först
   resultsRef
-    .orderBy("percent", "desc")
-    .orderBy("createdAt", "asc")
-    .limit(20)
+    .orderBy("createdAt", "desc")
+    .limit(100)
     .get()
     .then((snapshot) => {
       const entries = [];
       snapshot.forEach((doc) => {
         const d = doc.data() || {};
-        const scoreValue =
-          typeof d.percent === "number"
-            ? d.percent
-            : typeof d.scorePercent === "number"
-            ? d.scorePercent
-            : 0;
-
         entries.push({
+          id: doc.id,
           name: d.studentName || d.name || "",
           className: d.studentClass || d.class || "",
-          level: d.level || d.levelId || "",
-          score: scoreValue,
+          level: d.levelId || d.level || "",
+          score:
+            typeof d.scorePercent === "number"
+              ? d.scorePercent
+              : typeof d.percent === "number"
+              ? d.percent
+              : null,
+          correct:
+            typeof d.correct === "number"
+              ? d.correct
+              : null,
+          total:
+            typeof d.total === "number"
+              ? d.total
+              : null,
+          totalPoints:
+            typeof d.totalPoints === "number"
+              ? d.totalPoints
+              : null,
+          bestE:
+            d.bestE != null
+              ? d.bestE
+              : null,
+          bestC:
+            d.bestC != null
+              ? d.bestC
+              : null,
+          bestA:
+            d.bestA != null
+              ? d.bestA
+              : null,
           createdAt:
             d.createdAt && typeof d.createdAt.toDate === "function"
               ? d.createdAt.toDate()
@@ -4498,16 +4687,128 @@ function refreshHighscoreFromFirestore(optionalBankId) {
         });
       });
 
-      console.log("[3X] Highscore-inläsning klar, poster:", entries.length);
-      updateHighscoreUI(entries);
+      console.log("[3X] Elevprogression-inläsning klar, poster:", entries.length);
+      updateElevProgressionUI(entries);
     })
     .catch((err) => {
-      console.error("[3X] Fel vid highscore-laddning:", err);
+      console.error("[3X] Fel vid elevprogression-laddning:", err);
+      alert("Fel vid laddning av elevprogression. Se konsolen för detaljer.");
     });
 }
 
-// slut SEKTION 3X: FIRESTORE-INLÄMNING & LÄRAR-HIGHSCORELISTA
+/**
+ * Bygger elevlistan + detaljrutan i Elevprogression-fliken.
+ * Klick på en rad i listan visar detaljer för just den inlämningen.
+ */
+function updateElevProgressionUI(entries) {
+  try {
+    const box = ensureProgressionBox();
+    if (!box) return;
+
+    const list = document.getElementById("teacherStudentList");
+    const detail = document.getElementById("progressStudentDetail");
+    if (!list || !detail) return;
+
+    list.innerHTML = "";
+
+    if (!entries || !entries.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga inlämningar sparade ännu.";
+      list.appendChild(li);
+      detail.textContent = "Välj en elev i listan för att se detaljer.";
+      return;
+    }
+
+    detail.textContent = "Klicka på en rad i listan för att se detaljer.";
+
+    entries.forEach((e) => {
+      const li = document.createElement("li");
+
+      const name = e.name || "-";
+      const cls = e.className || "-";
+      const level = e.level || "?";
+      const scoreText =
+        typeof e.score === "number"
+          ? e.score.toFixed(0) + "%"
+          : "okänd %";
+
+      const dateStr =
+        e.createdAt instanceof Date
+          ? e.createdAt.toLocaleString("sv-SE")
+          : "okänt datum";
+
+      li.textContent = `${name} (${cls}) – ${scoreText} på nivå ${level} – ${dateStr}`;
+
+      li.addEventListener("click", () => {
+        // Visa detaljer för vald elevinlämning
+        const lines = [];
+
+        lines.push(`Elev: ${name}`);
+        lines.push(`Klass: ${cls}`);
+        lines.push(`Nivå: ${level}`);
+
+        if (e.correct != null && e.total != null) {
+          lines.push(`Rätt: ${e.correct} av ${e.total}`);
+        }
+
+        if (typeof e.score === "number") {
+          lines.push(`Procent: ${e.score.toFixed(0)} %`);
+        }
+
+        if (typeof e.totalPoints === "number") {
+          lines.push(`Totala poäng (alla spel): ${e.totalPoints}`);
+        }
+
+        if (e.bestE != null || e.bestC != null || e.bestA != null) {
+          lines.push(
+            `Bästa resultat per nivå – E: ${e.bestE != null ? e.bestE + " %" : "-"}, ` +
+            `C: ${e.bestC != null ? e.bestC + " %" : "-"}, ` +
+            `A: ${e.bestA != null ? e.bestA + " %" : "-"}`
+          );
+        }
+
+        if (e.createdAt instanceof Date) {
+          lines.push(`Inlämnad: ${e.createdAt.toLocaleString("sv-SE")}`);
+        }
+
+        detail.textContent = lines.join("\n");
+      });
+
+      list.appendChild(li);
+    });
+  } catch (err) {
+    console.error("[3X] Fel vid uppdatering av elevprogression-UI:", err);
+  }
+}
+
+/* =====================================================
+   Initialisering för highscore + elevprogression
+   ===================================================== */
+
+document.addEventListener("DOMContentLoaded", function () {
+  try {
+    ensureHighscoreBox();
+  } catch (e) {
+    console.warn("[3X] ensureHighscoreBox gav fel:", e);
+  }
+
+  try {
+    ensureProgressionBox();
+  } catch (e) {
+    console.warn("[3X] ensureProgressionBox gav fel:", e);
+  }
+
+  const btnRefresh = document.getElementById("btnRefreshProgression");
+  if (btnRefresh) {
+    btnRefresh.addEventListener("click", function () {
+      refreshElevProgressionFromFirestore();
+    });
+  }
+});
+
+// slut SEKTION 3X: FIRESTORE-INLÄMNING, LÄRAR-HIGHSCORELISTA & ELEVPROGRESSION
 </script>
+
 
 
 </script>
