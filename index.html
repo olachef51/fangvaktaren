@@ -4186,60 +4186,58 @@ document.addEventListener("DOMContentLoaded", function () {
 </script>
 <!-- slut SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK -->
 
-<!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
+<!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING + POÄNG) -->
 <script>
 /* =========================
-   3D – Spara elevresultat till Firestore vid inlämning
+   3n – Spara elevresultat till Firestore vid inlämning
+   + uppdatera poäng & bästa resultat i state
    ========================= */
 
 async function saveCurrentResultToFirestore() {
   try {
     if (!window.firebase || !firebaseDbInstance) {
       console.warn("saveCurrentResultToFirestore: Firebase är inte redo.");
-      alert("Tekniskt fel: resultatet kunde inte sparas (Firebase saknas).");
       return;
     }
 
     if (typeof getQueryParam !== "function") {
       console.warn("saveCurrentResultToFirestore: getQueryParam saknas.");
-      alert("Tekniskt fel: resultatet kunde inte sparas (URL-parameter-fel).");
       return;
     }
 
-    // BankId från elevlänk – används både direkt här och av 3X-highscore
-    const bankId =
+    // Vilken bank är aktiv? (elevlänk, t.ex. ...?bank=XYZ)
+    const sharedBankId =
       getQueryParam("sharedBank") ||
       getQueryParam("sb") ||
       getQueryParam("bank");
 
-    if (!bankId) {
+    if (!sharedBankId) {
       console.log("saveCurrentResultToFirestore: ingen sharedBank-id i URL – sparar inget resultat.");
-      alert("Det finns ingen kopplad frågebank i länken, resultatet sparas inte.");
       return;
     }
 
-    // Gör bankId synlig för SEKTION 3X (highscore)
-    window.activeSharedBankId = bankId;
-
+    // Läs state för elevens namn, klass och progression
     const s = loadState();
     const studentName = (s.student && s.student.name) || "";
     const studentClass = (s.student && s.student.klass) || "";
 
     if (!studentName || !studentClass) {
-      alert("Skriv in elevens namn och klass innan du lämnar in.");
+      console.log("saveCurrentResultToFirestore: saknar elevnamn/klass – sparar inget resultat.");
+      alert("Fyll i namn och klass innan du lämnar in spelet.");
       return;
     }
 
+    // Läs av resultatrutan i UI
     const scoreTextEl = document.getElementById("scoreText");
     const scoreDetailEl = document.getElementById("scoreDetail");
-    const resultText = scoreTextEl ? (scoreTextEl.textContent || "") : "";
-    const detailText = scoreDetailEl ? (scoreDetailEl.textContent || "") : "";
+    let resultText = scoreTextEl ? scoreTextEl.textContent || "" : "";
+    let detailText = scoreDetailEl ? scoreDetailEl.textContent || "" : "";
 
     let percent = null;
     let correct = null;
     let total = null;
 
-    if (detailText) {
+    if (scoreDetailEl && detailText) {
       const m = detailText.match(/(\d+)\s*\/\s*(\d+)/);
       if (m) {
         correct = parseInt(m[1], 10);
@@ -4258,9 +4256,55 @@ async function saveCurrentResultToFirestore() {
       }
     }
 
-    const level = (typeof currentLevel !== "undefined" && currentLevel) ? currentLevel : null;
+    // Vilken nivå spelade eleven?
+    let level = null;
+    if (typeof currentLevel !== "undefined" && currentLevel) {
+      level = currentLevel;
+    } else if (resultText) {
+      // fallback: försök läsa "nivå X" ur texten om det finns
+      const m3 = resultText.match(/nivå\s*([ECA])/i);
+      if (m3) {
+        level = m3[1].toUpperCase();
+      }
+    }
 
-    const resultObj = {
+    // =========================
+    // Uppdatera poäng & bästa resultat i state
+    // =========================
+    if (!s.progression || typeof s.progression !== "object") {
+      s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} };
+    }
+    if (!s.best || typeof s.best !== "object") {
+      s.best = { E: 0, C: 0, A: 0 };
+    }
+
+    if (correct != null && total != null && level) {
+      const pointsPerQuestion = level === "E" ? 1 : level === "C" ? 2 : 3;
+      const addPoints = correct * pointsPerQuestion;
+
+      s.progression.totalPoints = (s.progression.totalPoints || 0) + addPoints;
+    }
+
+    if (percent != null && level) {
+      if (level === "E" && percent > (s.best.E || 0)) s.best.E = percent;
+      if (level === "C" && percent > (s.best.C || 0)) s.best.C = percent;
+      if (level === "A" && percent > (s.best.A || 0)) s.best.A = percent;
+    }
+
+    // Spara tillbaka state lokalt så att nivå-kort och poängruta uppdateras
+    saveState(s);
+    if (typeof syncUI === "function") {
+      try {
+        syncUI();
+      } catch (e) {
+        console.warn("syncUI gav fel efter inlämning:", e);
+      }
+    }
+
+    // =========================
+    // Bygg dokumentet som ska in i Firestore
+    // =========================
+    const resultDoc = {
       studentName,
       studentClass,
       level: level,
@@ -4272,57 +4316,35 @@ async function saveCurrentResultToFirestore() {
       totalPoints: (s.progression && s.progression.totalPoints) || 0,
       bestE: (s.best && s.best.E) || 0,
       bestC: (s.best && s.best.C) || 0,
-      bestA: (s.best && s.best.A) || 0
+      bestA: (s.best && s.best.A) || 0,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
     };
 
-    console.log("saveCurrentResultToFirestore: förberett resultatobjekt", resultObj);
+    console.log("saveCurrentResultToFirestore: sparar resultat", resultDoc);
 
-    // Om 3X-funktionen finns: använd den (den sköter highscore + Firestore-skrivning)
-    if (typeof saveCurrentResultToFirestoreV3X === "function") {
-      await saveCurrentResultToFirestoreV3X(resultObj);
-      alert("Ditt resultat är inlämnat och sparat i lärarens highscore-lista.");
-      return;
-    }
-
-    // Fallback: spara direkt om 3X inte finns
-    const resultsRef = firebaseDbInstance
+    await firebaseDbInstance
       .collection("sharedBanks")
-      .doc(bankId)
-      .collection("results");
+      .doc(sharedBankId)
+      .collection("results")
+      .add(resultDoc);
 
-    const payload = Object.assign({}, resultObj, {
-      bankId,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
+    console.log("saveCurrentResultToFirestore: resultat sparat.");
 
-    console.log("saveCurrentResultToFirestore: sparar direkt till Firestore", payload);
-
-    await resultsRef.add(payload);
-    alert("Ditt resultat är inlämnat och sparat.");
+    // Om highscore-funktionen (3X) finns, försök uppdatera highscore-listan direkt
+    if (typeof refreshHighscoreFromFirestore === "function") {
+      try {
+        refreshHighscoreFromFirestore(sharedBankId);
+      } catch (e) {
+        console.warn("Kunde inte uppdatera highscore efter inlämning:", e);
+      }
+    }
   } catch (err) {
     console.error("saveCurrentResultToFirestore: fel vid sparande av resultat:", err);
-    alert("Något gick fel när resultatet skulle sparas. Försök igen, eller kontakta läraren.");
+    throw err;
   }
 }
-
-/* =========================
-   3D.1 – Koppla på knappen ”Lämna in spel för poäng”
-   ========================= */
-
-function setupSubmitGameToFirestore() {
-  const btnSubmit = document.getElementById("btnSubmitGame");
-  if (!btnSubmit) return;
-
-  btnSubmit.addEventListener("click", function () {
-    saveCurrentResultToFirestore();
-  });
-}
-
-document.addEventListener("DOMContentLoaded", function () {
-  setupSubmitGameToFirestore();
-});
 </script>
-<!-- slut SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
+<!-- slut SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING + POÄNG) -->
 
 
 
@@ -5679,8 +5701,17 @@ function initApp() {
 
   const btnSubmitGame = getEl("btnSubmitGame");
   if (btnSubmitGame) {
-    btnSubmitGame.addEventListener("click", emailResultToTeacher);
+    btnSubmitGame.addEventListener("click", async () => {
+      try {
+        await saveCurrentResultToFirestore();
+        alert("Ditt resultat är inlämnat till läraren.");
+      } catch (err) {
+        console.error("Fel vid inlämning:", err);
+        alert("Kunde inte lämna in resultatet. Försök igen eller kontakta läraren.");
+      }
+    });
   }
+
 
   /* ---------- Lärarläge: knappar ---------- */
 
