@@ -4255,88 +4255,1168 @@ document.addEventListener("DOMContentLoaded", function () {
 <script>
 
 
-<!-- start SEKTION 3X: BANKSTATUS & HIGHSCORE-FIX -->
-/*
-  3X – Patch för molnbanker & highscore
+<!-- start SEKTION 3A: BAS, STATE, FIREBASE & MOLN-BANKER -->
+<script>
+"use strict";
 
-  - Hookar setBankAndGoalsInState -> kör updateBankStatusUI() varje gång bank byts.
-  - Hookar autoLoadSharedBank -> uppdaterar cloudBankStatus + ger visuell bekräftelse.
-  - Hookar saveCurrentResultToFirestore -> försöker uppdatera highscore efter sparat resultat.
+/* =========================
+   3a – Konstanter & grundstate
+   ========================= */
 
-  Ändrar INTE original-funktionernas logik, bara lägger till extra anrop.
-*/
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
+  authDomain: "fangvaktaren-904db.firebaseapp.com",
+  projectId: "fangvaktaren-904db",
+  storageBucket: "fangvaktaren-904db.firebasestorage.app",
+  messagingSenderId: "105301219768",
+  appId: "1:105301219768:web:66b131fba86a541b78174d",
+  measurementId: "G-NXL9GSFZ77"
+};
 
-(function () {
-  function safeUpdateBankStatusUI(extraNote) {
+const STORAGE_KEY = "fangvaktaren-v17";
+
+// 🔁 använder teachers/{uid}/banks
+const CLOUD_ROOT_COLLECTION = "teachers";
+const CLOUD_BANKS_SUBCOLLECTION = "banks";
+
+// 🌐 ny: publik collection för auto-load till elever
+const SHARED_BANKS_COLLECTION = "sharedBanks";
+
+const $ = (sel) => document.querySelector(sel);
+const $all = (sel) => document.querySelectorAll(sel);
+
+let firebaseAppInstance = null;
+let firebaseAuthInstance = null;
+let firebaseDbInstance = null;
+let currentTeacherUser = null;
+
+let currentLevel = null;
+let currentQuestions = [];
+let currentAnswers = [];
+let lastSubmission = null;
+
+// editor-state
+let currentMcqLinks = [];
+let currentImgLinks = [];
+let currentDragLinks = [];
+let currentMcqCorrectIndex = 0;
+let currentImgCorrectIndex = 0;
+let currentImgDataUrl = null;
+
+// drag & drop-editor – temporär state för nya frågor
+let currentDragSourcesTmp = [];
+let currentDragTargetsTmp = [];
+let currentDragCorrectMapTmp = {};
+
+const defaultState = {
+  student: { name: "", klass: "" },
+  best: { E: 0, C: 0, A: 0 },
+  unlocked: { E: false, C: false, A: false },
+  thres: { E: 70, C: 70, A: 70 },
+  teacherPassword: null,
+  teacherEmail: "",
+  goalsMap: [],
+  bank: {
+    mcq: [],
+    img: [],
+    drag: []
+  },
+  progression: {
+    totalPoints: 0,
+    wrongByGoalId: {},
+    correctByGoalId: {}
+  }
+};
+
+function deepCloneDefault() {
+  return JSON.parse(JSON.stringify(defaultState));
+}
+
+function clampInt(val, min, max) {
+  const n = parseInt(val, 10);
+  if (isNaN(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+function shuffle(arr) {
+  return arr.slice().sort(() => Math.random() - 0.5);
+}
+
+function escapeHtml(str) {
+  if (!str && str !== 0) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/* =========================
+   Hjälp: sanera objekt för Firestore
+   ========================= */
+function sanitizeForFirestore(value) {
+  // Tillåt enkla typer direkt
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  // undefined ska inte in i Firestore
+  if (value === undefined) {
+    return null;
+  }
+
+  // Arrayer: sanera varje element
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeForFirestore(item))
+      .filter((item) => item !== undefined);
+  }
+
+  // Vanliga objekt: gå igenom alla nycklar
+  if (typeof value === "object") {
+    const cleaned = {};
+    for (const key of Object.keys(value)) {
+      const v = sanitizeForFirestore(value[key]);
+      if (v !== undefined) {
+        cleaned[key] = v;
+      }
+    }
+    return cleaned;
+  }
+
+  // Allt annat konstigt (funktioner, symboler etc) -> null
+  return null;
+}
+
+/* =========================
+   3b – State-hantering & embedded-data
+   ========================= */
+
+function mergeEmbeddedBank(state) {
+  const el = document.getElementById("embedded-data");
+  if (!el) return state;
+  try {
+    const raw = el.textContent || el.innerHTML || "{}";
+    const data = JSON.parse(raw);
+    if (data && data.bank) {
+      state.bank = Object.assign({ mcq: [], img: [], drag: [] }, state.bank || {});
+      state.bank.mcq = (state.bank.mcq || []).concat(data.bank.mcq || []);
+      state.bank.img = (state.bank.img || []).concat(data.bank.img || []);
+      state.bank.drag = (state.bank.drag || []).concat(data.bank.drag || []);
+    }
+  } catch (e) {
+    console.warn("Kunde inte läsa embedded-data:", e);
+  }
+  return state;
+}
+
+function loadState() {
+  let s = null;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      s = JSON.parse(raw);
+    }
+  } catch (e) {
+    console.warn("Kunde inte läsa state, återställer:", e);
+  }
+  if (!s) {
+    s = deepCloneDefault();
+    s = mergeEmbeddedBank(s);
+    saveState(s);
+  }
+
+  s.student = Object.assign({ name: "", klass: "" }, s.student || {});
+  s.best = Object.assign({ E: 0, C: 0, A: 0 }, s.best || {});
+  s.unlocked = Object.assign({ E: false, C: false, A: false }, s.unlocked || {});
+  s.thres = Object.assign({ E: 70, C: 70, A: 70 }, s.thres || {});
+  s.bank = Object.assign({ mcq: [], img: [], drag: [] }, s.bank || {});
+  if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
+  if (!Array.isArray(s.bank.img)) s.bank.img = [];
+  if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
+  if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
+  if (!s.progression || typeof s.progression !== "object") {
+    s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} };
+  } else {
+    s.progression.totalPoints = s.progression.totalPoints || 0;
+    s.progression.wrongByGoalId = s.progression.wrongByGoalId || {};
+    s.progression.correctByGoalId = s.progression.correctByGoalId || {};
+  }
+  if (typeof s.teacherEmail !== "string") {
+    s.teacherEmail = "";
+  }
+  return s;
+}
+
+function saveState(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.warn("Kunde inte spara state:", e);
+  }
+}
+
+/* =========================
+   3c – Firebase init & Google-inloggning
+   ========================= */
+
+function initFirebase() {
+  const statusEl = $("#googleStatus");
+  try {
+    if (!window.firebase) {
+      console.warn("Firebase-bibliotek kunde inte hittas.");
+      if (statusEl) {
+        statusEl.textContent = "⚠️ Tekniskt fel: Firebase-bibliotek kunde inte laddas.";
+      }
+      return;
+    }
+    if (!firebase.apps.length) {
+      firebase.initializeApp(FIREBASE_CONFIG);
+    }
+    firebaseAppInstance = firebase.app();
+    firebaseAuthInstance = firebase.auth();
+    firebaseDbInstance = firebase.firestore();
+    console.log("Firebase init OK");
+    setupGoogleLogin();
+    // 🌐 auto-load av publik bank till elever (om URL har ?bank=... eller ?sb=... eller ?sharedBank=...)
+    autoLoadSharedBank();
+  } catch (e) {
+    console.error("Firebase init misslyckades:", e);
+    if (statusEl) {
+      statusEl.textContent = "⚠️ Tekniskt fel: kunde inte starta Firebase.";
+    }
+  }
+}
+
+function setupGoogleLogin() {
+  const btnLogin = $("#btnGooglePlaceholder");
+  const btnLogout = $("#btnGoogleLogout");
+  const statusEl = $("#googleStatus");
+  if (!btnLogin || !statusEl) return;
+
+  if (!firebaseAuthInstance) {
+    console.warn("Firebase Auth saknas vid setupGoogleLogin.");
+    statusEl.textContent = "⚠️ Tekniskt fel: Firebase Auth saknas.";
+    return;
+  }
+
+  firebaseAuthInstance.onAuthStateChanged((user) => {
+    currentTeacherUser = user || null;
+    if (!statusEl) return;
+    if (user) {
+      statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
+      if (btnLogout) btnLogout.classList.remove("hidden");
+    } else {
+      statusEl.textContent = "☁️ Inte inloggad – klicka för att logga in med Google.";
+      if (btnLogout) btnLogout.classList.add("hidden");
+    }
+  });
+
+  btnLogin.addEventListener("click", async () => {
+    if (!firebaseAuthInstance) {
+      alert("Tekniskt fel: Firebase Auth saknas.");
+      return;
+    }
     try {
-      if (typeof updateBankStatusUI === "function") {
-        updateBankStatusUI();
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await firebaseAuthInstance.signInWithPopup(provider);
+    } catch (err) {
+      console.error("Google-inloggning misslyckades:", err);
+      statusEl.textContent = "⚠️ Kunde inte logga in med Google. Försök igen.";
+    }
+  });
+
+  if (btnLogout) {
+    btnLogout.addEventListener("click", async () => {
+      try {
+        await firebaseAuthInstance.signOut();
+      } catch (err) {
+        console.error("Kunde inte logga ut:", err);
       }
-      const el = document.getElementById("cloudBankStatus");
-      if (el && extraNote) {
-        // Lägg till en liten bekräftelsetext utan att ändra designen i övrigt
-        if (!el.textContent.includes(extraNote)) {
-          el.textContent = el.textContent + " " + extraNote;
-        }
-      }
-    } catch (e) {
-      console.warn("[3X] Kunde inte uppdatera bankstatus:", e);
+    });
+  }
+}
+
+/* =========================
+   3d – Moln-banker (Firestore)
+   ========================= */
+
+function getBankFromState() {
+  const s = loadState();
+  return Object.assign({ mcq: [], img: [], drag: [] }, s.bank || {});
+}
+
+// Normalisera bank-data från Firestore
+function normalizeBankFromDoc(data) {
+  if (!data || typeof data !== "object") {
+    return { mcq: [], img: [], drag: [] };
+  }
+
+  console.log("[normalizeBankFromDoc] rå data-nycklar:", Object.keys(data));
+
+  // 1) Nytt format: data.bank.mcq/img/drag
+  if (
+    data.bank &&
+    (Array.isArray(data.bank.mcq) || Array.isArray(data.bank.img) || Array.isArray(data.bank.drag))
+  ) {
+    const bank = {
+      mcq: data.bank.mcq || [],
+      img: data.bank.img || [],
+      drag: data.bank.drag || []
+    };
+    console.log(
+      "[normalizeBankFromDoc] använder data.bank.* med längder:",
+      bank.mcq.length,
+      bank.img.length,
+      bank.drag.length
+    );
+    return bank;
+  }
+
+  // 2) Bank direkt i roten: data.mcq/img/drag
+  if (Array.isArray(data.mcq) || Array.isArray(data.img) || Array.isArray(data.drag)) {
+    const bank = {
+      mcq: data.mcq || [],
+      img: data.img || [],
+      drag: data.drag || []
+    };
+    console.log(
+      "[normalizeBankFromDoc] använder data.* direkt med längder:",
+      bank.mcq.length,
+      bank.img.length,
+      bank.drag.length
+    );
+    return bank;
+  }
+
+  // 3) Gamla format med "questions" – behandla som mcq
+  if (Array.isArray(data.questions)) {
+    const bank = {
+      mcq: data.questions,
+      img: [],
+      drag: []
+    };
+    console.log(
+      "[normalizeBankFromDoc] använder data.questions som mcq, längd:",
+      bank.mcq.length
+    );
+    return bank;
+  }
+
+  // 4) Försök hitta bank inuti en under-nod, t.ex. data.payload.bank eller liknande
+  for (const key of Object.keys(data)) {
+    const nested = data[key];
+    if (!nested || typeof nested !== "object") continue;
+
+    // 4a) nested.bank.mcq/img/drag
+    if (
+      nested.bank &&
+      (Array.isArray(nested.bank.mcq) ||
+        Array.isArray(nested.bank.img) ||
+        Array.isArray(nested.bank.drag))
+    ) {
+      const bank = {
+        mcq: nested.bank.mcq || [],
+        img: nested.bank.img || [],
+        drag: nested.bank.drag || []
+      };
+      console.log(
+        "[normalizeBankFromDoc] hittade bank under data." + key + ".bank med längder:",
+        bank.mcq.length,
+        bank.img.length,
+        bank.drag.length
+      );
+      return bank;
+    }
+
+    // 4b) nested.mcq/img/drag direkt
+    if (Array.isArray(nested.mcq) || Array.isArray(nested.img) || Array.isArray(nested.drag)) {
+      const bank = {
+        mcq: nested.mcq || [],
+        img: nested.img || [],
+        drag: nested.drag || []
+      };
+      console.log(
+        "[normalizeBankFromDoc] hittade bank under data." + key + ".* med längder:",
+        bank.mcq.length,
+        bank.img.length,
+        bank.drag.length
+      );
+      return bank;
+    }
+
+    // 4c) nested.questions → mcq
+    if (Array.isArray(nested.questions)) {
+      const bank = {
+        mcq: nested.questions,
+        img: [],
+        drag: []
+      };
+      console.log(
+        "[normalizeBankFromDoc] hittade questions under data." + key + " som mcq, längd:",
+        bank.mcq.length
+      );
+      return bank;
     }
   }
 
-  window.addEventListener("load", function () {
-    // 1) Hooka setBankAndGoalsInState (används både av moln- och lokal-bank)
-    if (typeof window.setBankAndGoalsInState === "function") {
-      const originalSetBankAndGoalsInState = window.setBankAndGoalsInState;
-      window.setBankAndGoalsInState = function () {
-        const result = originalSetBankAndGoalsInState.apply(this, arguments);
-        console.log("[3X] setBankAndGoalsInState körd – uppdaterar bankstatus-UI.");
-        safeUpdateBankStatusUI();
-        return result;
-      };
-    } else {
-      console.warn("[3X] Hittade inte setBankAndGoalsInState – patchar inte bankstatus.");
+  console.log("[normalizeBankFromDoc] inget igenkänt format – returnerar tom bank.");
+  return { mcq: [], img: [], drag: [] };
+}
+
+// 🔹 Visar för eleverna vilken frågebank som är aktiv
+function updateActiveBankBanner() {
+  const s = loadState();
+  const bank = s.bank || {};
+  const mcqCount = Array.isArray(bank.mcq) ? bank.mcq.length : 0;
+  const imgCount = Array.isArray(bank.img) ? bank.img.length : 0;
+  const dragCount = Array.isArray(bank.drag) ? bank.drag.length : 0;
+
+  let text = "Ingen frågebank aktiverad.";
+  if (mcqCount || imgCount || dragCount) {
+    text = `Aktiv frågebank: ${mcqCount} flervalsfrågor, ${imgCount} bildfrågor, ${dragCount} drag & drop-frågor.`;
+  }
+
+  let banner = document.getElementById("activeBankBanner");
+  if (!banner) {
+    const header = document.querySelector(".app-header");
+    if (!header) return;
+    banner = document.createElement("div");
+    banner.id = "activeBankBanner";
+    banner.className = "mini";
+    header.appendChild(banner);
+  }
+  banner.textContent = text;
+}
+
+function setBankAndGoalsInState(bank, goalsMap) {
+  const s = loadState();
+  s.bank = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
+  if (Array.isArray(goalsMap)) {
+    s.goalsMap = goalsMap.slice();
+  }
+  saveState(s);
+  console.log("[DEBUG] State efter setBankAndGoalsInState:", {
+    mcq: s.bank.mcq.length,
+    img: s.bank.img.length,
+    drag: s.bank.drag.length,
+    goalsMap: s.goalsMap.length
+  });
+  // 🔹 Uppdatera synlig info för elever om aktiv frågebank
+  updateActiveBankBanner();
+}
+
+function setBankInState(bank) {
+  setBankAndGoalsInState(bank, null);
+}
+
+// =========================
+// 3d.1 – Hjälpare för URL-parametrar
+// =========================
+function getQueryParam(name) {
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    return params.get(name);
+  } catch (e) {
+    console.warn("getQueryParam fel:", e);
+    return null;
+  }
+}
+
+// =========================
+// 3d.2 – Auto-load av publik bank för elever
+// =========================
+async function autoLoadSharedBank() {
+  if (!firebaseDbInstance) {
+    console.warn("autoLoadSharedBank: firebaseDbInstance saknas.");
+    return;
+  }
+
+  const bankId =
+    getQueryParam("bank") || getQueryParam("sb") || getQueryParam("sharedBank");
+
+  if (!bankId) {
+    console.log("autoLoadSharedBank: ingen bank-param i URL – hoppar över.");
+    return;
+  }
+
+  try {
+    console.log("🌐 autoLoadSharedBank: försöker ladda", SHARED_BANKS_COLLECTION + "/" + bankId);
+
+    const docSnap = await firebaseDbInstance
+      .collection(SHARED_BANKS_COLLECTION)
+      .doc(bankId)
+      .get();
+
+    if (!docSnap.exists) {
+      console.warn("autoLoadSharedBank: hittade ingen shared-bank med id", bankId);
+      return;
     }
 
-    // 2) Hooka autoLoadSharedBank (URL-varianten ?bank=...)
-    if (typeof window.autoLoadSharedBank === "function") {
-      const originalAutoLoadSharedBank = window.autoLoadSharedBank;
-      window.autoLoadSharedBank = async function () {
-        const res = await originalAutoLoadSharedBank.apply(this, arguments);
-        console.log("[3X] autoLoadSharedBank klar – uppdaterar bankstatus-UI.");
-        // Visuell bekräftelse på Ladda molnbank-fliken
-        safeUpdateBankStatusUI("(molnbank laddad ✅)");
-        return res;
-      };
-    } else {
-      console.warn("[3X] Hittade inte autoLoadSharedBank – ingen URL-autoload att patcha.");
+    const data = docSnap.data() || {};
+    console.log("autoLoadSharedBank: doc-data:", data);
+
+    const normalizedBank = normalizeBankFromDoc(data);
+    const goalsFromDoc = Array.isArray(data.goalsMap)
+      ? data.goalsMap
+      : data.bank && Array.isArray(data.bank.goalsMap)
+      ? data.bank.goalsMap
+      : [];
+
+    const teacherEmailFromDoc =
+      data.teacherEmail ||
+      (data.bank && data.bank.teacherEmail) ||
+      null;
+
+    // 🔹 Sätt aktiv bank-id globalt
+    if (typeof window !== "undefined") {
+      window.activeSharedBankId = bankId;
+      window.activeCloudBankId = null;
     }
 
-    // 3) Hooka saveCurrentResultToFirestore -> uppdatera highscore efter sparat resultat
-    if (
-      typeof window.saveCurrentResultToFirestore === "function" &&
-      typeof window.refreshHighscoreFromFirestore === "function"
-    ) {
-      const originalSaveCurrentResultToFirestore = window.saveCurrentResultToFirestore;
-      window.saveCurrentResultToFirestore = async function () {
-        const res = await originalSaveCurrentResultToFirestore.apply(this, arguments);
-        try {
-          console.log("[3X] Resultat sparat – försöker uppdatera highscore från Firestore …");
-          window.refreshHighscoreFromFirestore();
-        } catch (e) {
-          console.warn("[3X] Kunde inte uppdatera highscore efter sparat resultat:", e);
+    setBankAndGoalsInState(normalizedBank, goalsFromDoc);
+
+    // 🔹 Sätt lärarens e-post i elevens state om den finns i banken
+    if (teacherEmailFromDoc) {
+      const sLocal = loadState();
+      sLocal.teacherEmail = teacherEmailFromDoc;
+      saveState(sLocal);
+    }
+
+    // 🔹 Uppdatera status-rutan om funktionen finns (Ladda molnbank-fliken)
+    if (typeof updateBankStatusUI === "function") {
+      try {
+        updateBankStatusUI();
+      } catch (e) {
+        console.warn("autoLoadSharedBank: updateBankStatusUI gav fel:", e);
+      }
+    }
+
+    if (typeof renderMcqList === "function") renderMcqList();
+    if (typeof renderImgList === "function") renderImgList();
+    if (typeof renderDragList === "function") renderDragList();
+    if (typeof renderGoalsList === "function") renderGoalsList();
+    if (typeof syncUI === "function") syncUI();
+
+    console.log("✅ autoLoadSharedBank: shared-bank laddad & aktiverad.");
+  } catch (err) {
+    console.error("autoLoadSharedBank: fel vid laddning av shared-bank:", err);
+  }
+}
+
+// =========================
+// 3d.3 – Lärarens moln-banker (teachers/{uid}/banks)
+// =========================
+
+// Läs banker från teachers/{uid}/banks
+async function loadCloudBanksList() {
+  const listEl = $("#cloudBankList");
+  if (!listEl) {
+    console.warn("Hittar inget element med id='cloudBankList' – kan inte visa moln-banker.");
+    return;
+  }
+  listEl.innerHTML = "";
+
+  if (!firebaseDbInstance || !currentTeacherUser) {
+    const li = document.createElement("li");
+    li.className = "mini";
+    li.textContent = "Du måste vara inloggad med Google för att se dina moln-banker.";
+    listEl.appendChild(li);
+    console.warn("loadCloudBanksList: ingen db eller ingen inloggad användare.");
+    return;
+  }
+
+  try {
+    console.log("🔍 loadCloudBanksList startar för användare:", currentTeacherUser.uid);
+    const snap = await firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION)
+      .doc(currentTeacherUser.uid)
+      .collection(CLOUD_BANKS_SUBCOLLECTION)
+      .orderBy("createdAt", "desc")
+      .get();
+
+    console.log(
+      "📊 loadCloudBanksList: antal docs i teachers/" +
+        currentTeacherUser.uid +
+        "/banks:",
+      snap.size
+    );
+
+    if (snap.empty) {
+      const li = document.createElement("li");
+      li.className = "mini";
+      li.textContent = "Inga moln-banker hittades ännu.";
+      listEl.appendChild(li);
+      return;
+    }
+
+    snap.forEach((docSnap) => {
+      const data = docSnap.data() || {};
+      console.log("📄 Moln-bank doc:", docSnap.id, data);
+      const normalizedBank = normalizeBankFromDoc(data);
+      console.log("✅ Normaliserad bank för", docSnap.id, {
+        mcq: normalizedBank.mcq.length,
+        img: normalizedBank.img.length,
+        drag: normalizedBank.drag.length
+      });
+
+      const goalsFromDoc = Array.isArray(data.goalsMap)
+        ? data.goalsMap
+        : data.bank && Array.isArray(data.bank.goalsMap)
+        ? data.bank.goalsMap
+        : [];
+
+      const teacherEmailFromDoc =
+        data.teacherEmail ||
+        (data.bank && data.bank.teacherEmail) ||
+        null;
+
+      const li = document.createElement("li");
+      li.className = "list-item";
+
+      const main = document.createElement("div");
+      main.className = "list-main";
+
+      const title = document.createElement("div");
+      title.className = "q-text";
+      title.textContent = data.name || "Namnlös bank";
+
+      const meta = document.createElement("div");
+      meta.className = "q-meta";
+      const ts = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : null;
+      const countMcq = Array.isArray(normalizedBank.mcq) ? normalizedBank.mcq.length : 0;
+      meta.textContent =
+        (ts ? `Skapad: ${ts.toLocaleString("sv-SE")}` : "Skapad: okänt datum") +
+        ` · MCQ: ${countMcq}`;
+
+      main.appendChild(title);
+      main.appendChild(meta);
+
+      const actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.flexDirection = "column";
+      actions.style.gap = "4px";
+
+      const btnActivate = document.createElement("button");
+      btnActivate.className = "btn btn-sm";
+      btnActivate.textContent = "Aktivera denna bank";
+      btnActivate.addEventListener("click", () => {
+        setBankAndGoalsInState(normalizedBank, goalsFromDoc);
+
+        // 🔹 markera aktiv moln-bank globalt
+        if (typeof window !== "undefined") {
+          window.activeCloudBankId = docSnap.id;
+          window.activeSharedBankId = null;
         }
-        return res;
+
+        // 🔹 Hämta tillbaka lärarens e-post från moln-banken om den finns
+        if (teacherEmailFromDoc) {
+          const sLocal = loadState();
+          sLocal.teacherEmail = teacherEmailFromDoc;
+          saveState(sLocal);
+        }
+
+        // 🔹 uppdatera status-rutan om funktionen finns
+        if (typeof updateBankStatusUI === "function") {
+          try {
+            updateBankStatusUI();
+          } catch (e) {
+            console.warn("loadCloudBanksList: updateBankStatusUI gav fel:", e);
+          }
+        }
+
+        if (typeof renderMcqList === "function") renderMcqList();
+        if (typeof renderImgList === "function") renderImgList();
+        if (typeof renderDragList === "function") renderDragList();
+        if (typeof renderGoalsList === "function") renderGoalsList();
+        if (typeof syncUI === "function") syncUI();
+        alert("Moln-bank aktiverad. Dina frågor är nu laddade i spelet.");
+      });
+      actions.appendChild(btnActivate);
+
+      const btnDelete = document.createElement("button");
+      btnDelete.className = "btn btn-sm btn-danger";
+      btnDelete.textContent = "🗑️ Ta bort";
+      btnDelete.addEventListener("click", async () => {
+        if (!confirm("Ta bort denna moln-bank permanent?")) return;
+        try {
+          await firebaseDbInstance
+            .collection(CLOUD_ROOT_COLLECTION)
+            .doc(currentTeacherUser.uid)
+            .collection(CLOUD_BANKS_SUBCOLLECTION)
+            .doc(docSnap.id)
+            .delete();
+          alert("Moln-bank borttagen.");
+          loadCloudBanksList();
+        } catch (err) {
+          console.error("Kunde inte ta bort bank:", err);
+          alert("Kunde inte ta bort bank. Se konsolen för detaljer.");
+        }
+      });
+      actions.appendChild(btnDelete);
+
+      li.appendChild(main);
+      li.appendChild(actions);
+      listEl.appendChild(li);
+    });
+  } catch (e) {
+    console.error("Kunde inte ladda moln-banker:", e);
+    const li = document.createElement("li");
+    li.className = "mini";
+    li.textContent = "Fel vid laddning av moln-banker. Se konsolen för detaljer.";
+    listEl.appendChild(li);
+  }
+}
+
+function setupCloudBankUI() {
+  const btnLoad = $("#btnLoadCloudBanks");
+  const btnSave = $("#btnSaveToCloud");
+  const btnExport = $("#btnExportBank");
+  const fileImport = $("#fileImport");
+  const btnPublish = $("#btnPublishSharedBank");
+  const sharedLinkOutput = $("#sharedBankLinkOutput");
+  const sharedStatus = $("#sharedBankStatus");
+
+  if (btnLoad) {
+    btnLoad.addEventListener("click", () => {
+      loadCloudBanksList();
+    });
+  }
+
+  if (btnSave) {
+    btnSave.addEventListener("click", async () => {
+      if (!firebaseDbInstance || !currentTeacherUser) {
+        alert("Du måste vara inloggad med Google för att spara till molnet.");
+        return;
+      }
+      const nameInput = $("#inputBankName");
+      const name = (nameInput && nameInput.value.trim()) || "Min frågebank";
+      const rawBank = getBankFromState();
+      const bank = sanitizeForFirestore(rawBank);
+      const sFull = loadState();
+
+      try {
+        await firebaseDbInstance
+          .collection(CLOUD_ROOT_COLLECTION)
+          .doc(currentTeacherUser.uid)
+          .collection(CLOUD_BANKS_SUBCOLLECTION)
+          .add({
+            ownerUid: currentTeacherUser.uid,
+            ownerEmail: currentTeacherUser.email || null,
+            name,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            bank,
+            goalsMap: sFull.goalsMap || [],
+            teacherEmail: sFull.teacherEmail || null
+          });
+        alert("Frågebank sparad till molnet.");
+        if (nameInput) nameInput.value = name;
+      } catch (e) {
+        console.error("Kunde inte spara bank till molnet:", e);
+        alert("Det gick inte att spara bank till molnet. Se konsolen för detaljer.");
+      }
+    });
+  }
+
+  if (btnExport) {
+    btnExport.addEventListener("click", () => {
+      const bank = getBankFromState();
+      const blob = new Blob([JSON.stringify(bank, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "fangvaktaren_bank.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  if (fileImport) {
+    fileImport.addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function () {
+        try {
+          const imported = JSON.parse(reader.result);
+          setBankInState(imported);
+          if (typeof renderMcqList === "function") renderMcqList();
+          if (typeof renderImgList === "function") renderImgList();
+          if (typeof renderDragList === "function") renderDragList();
+          if (typeof syncUI === "function") syncUI();
+          alert("Frågebank importerad.");
+        } catch (err) {
+          console.error("Fel vid import av JSON-bank:", err);
+          alert("Kunde inte läsa JSON-filen. Kontrollera formatet.");
+        }
       };
-    } else {
-      console.warn(
-        "[3X] Hittade inte saveCurrentResultToFirestore/refreshHighscoreFromFirestore – highscore-patch inaktiverad."
-      );
+      reader.readAsText(file, "utf-8");
+    });
+  }
+
+  // 🌐 Nytt: Gör publik / skapa elevlänk (sharedBanks)
+  if (btnPublish) {
+    btnPublish.addEventListener("click", async () => {
+      if (!firebaseDbInstance) {
+        alert("Tekniskt fel: Firebase-databas saknas.");
+        return;
+      }
+      const rawBank = getBankFromState();
+      const bank = sanitizeForFirestore(rawBank);
+      const sFull = loadState();
+
+      try {
+        const nameInput = $("#inputBankName");
+        const friendlyName =
+          (nameInput && nameInput.value.trim()) || "Publik frågebank";
+
+        const docRef = await firebaseDbInstance
+          .collection(SHARED_BANKS_COLLECTION)
+          .add({
+            name: friendlyName,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            ownerUid: currentTeacherUser ? currentTeacherUser.uid : null,
+            ownerEmail: currentTeacherUser ? currentTeacherUser.email || null : null,
+            bank,
+            goalsMap: sFull.goalsMap || [],
+            teacherEmail: sFull.teacherEmail || null
+          });
+
+        const baseUrl = window.location.origin + window.location.pathname;
+        const link = `${baseUrl}?bank=${docRef.id}`;
+
+        if (sharedLinkOutput) {
+          sharedLinkOutput.value = link;
+        }
+        if (sharedStatus) {
+          sharedStatus.textContent =
+            "Elevlänk skapad. Kopiera länken och skicka till eleverna.";
+        } else {
+          alert("Elevlänk skapad:\n" + link);
+        }
+      } catch (err) {
+        console.error("Kunde inte skapa publik bank:", err);
+        if (sharedStatus) {
+          sharedStatus.textContent =
+            "Kunde inte skapa publik bank. Se konsolen för detaljer.";
+        } else {
+          alert("Kunde inte skapa publik bank. Se konsolen för detaljer.");
+        }
+      }
+    });
+  }
+}
+</script>
+<!-- slut SEKTION 3A: BAS, STATE, FIREBASE & MOLN-BANKER -->
+
+
+
+<!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
+<script>
+/* =========================
+   3n – Spara elevresultat till Firestore vid inlämning
+   ========================= */
+
+async function saveCurrentResultToFirestore() {
+  try {
+    if (!window.firebase || !firebaseDbInstance) {
+      console.warn("saveCurrentResultToFirestore: Firebase är inte redo.");
+      return;
+    }
+
+    if (typeof getQueryParam !== "function") {
+      console.warn("saveCurrentResultToFirestore: getQueryParam saknas.");
+      return;
+    }
+
+    const sharedBankId =
+      getQueryParam("sharedBank") ||
+      getQueryParam("sb") ||
+      getQueryParam("bank");
+
+    if (!sharedBankId) {
+      console.log("saveCurrentResultToFirestore: ingen sharedBank-id i URL – sparar inget resultat.");
+      return;
+    }
+
+    // markera aktiv shared-bank globalt så highscore kan hitta den
+    if (typeof window !== "undefined") {
+      window.activeSharedBankId = sharedBankId;
+    }
+
+    const s = loadState();
+    const studentName = (s.student && s.student.name) || "";
+    const studentClass = (s.student && s.student.klass) || "";
+
+    if (!studentName || !studentClass) {
+      console.log("saveCurrentResultToFirestore: saknar elevnamn/klass – sparar inget resultat.");
+      return;
+    }
+
+    const scoreTextEl = document.getElementById("scoreText");
+    const scoreDetailEl = document.getElementById("scoreDetail");
+    let resultText = scoreTextEl ? scoreTextEl.textContent || "" : "";
+    let detailText = scoreDetailEl ? scoreDetailEl.textContent || "" : "";
+
+    let percent = null;
+    let correct = null;
+    let total = null;
+
+    if (scoreDetailEl && detailText) {
+      const m = detailText.match(/(\d+)\s*\/\s*(\d+)/);
+      if (m) {
+        correct = parseInt(m[1], 10);
+        total = parseInt(m[2], 10);
+        if (!isNaN(correct) && !isNaN(total) && total > 0) {
+          percent = Math.round((correct * 100) / total);
+        }
+      }
+    }
+
+    if (percent == null && resultText) {
+      const m2 = resultText.match(/(\d+)\s*%/);
+      if (m2) {
+        percent = parseInt(m2[1], 10);
+        if (isNaN(percent)) percent = null;
+      }
+    }
+
+    const level = typeof currentLevel !== "undefined" && currentLevel
+      ? currentLevel
+      : null;
+
+    const resultDoc = {
+      studentName,
+      studentClass,
+      level: level,
+      percent: percent,
+      scorePercent: percent, // används av highscore-sorteringen
+      correct: correct,
+      total: total,
+      resultText: resultText,
+      detailText: detailText,
+      totalPoints: (s.progression && s.progression.totalPoints) || 0,
+      bestE: (s.best && s.best.E) || 0,
+      bestC: (s.best && s.best.C) || 0,
+      bestA: (s.best && s.best.A) || 0,
+      bankId: sharedBankId,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+
+    console.log("saveCurrentResultToFirestore: sparar resultat", resultDoc);
+
+    await firebaseDbInstance
+      .collection("sharedBanks")
+      .doc(sharedBankId)
+      .collection("results")
+      .add(resultDoc);
+
+    console.log("saveCurrentResultToFirestore: resultat sparat.");
+
+    // Försök uppdatera highscore direkt efter inlämning
+    try {
+      if (typeof refreshHighscoreFromFirestore === "function") {
+        refreshHighscoreFromFirestore(sharedBankId);
+      }
+    } catch (e) {
+      console.warn("saveCurrentResultToFirestore: kunde inte uppdatera highscore:", e);
+    }
+  } catch (err) {
+    console.error("saveCurrentResultToFirestore: fel vid sparande av resultat:", err);
+  }
+}
+
+/* =========================
+   3n.1 – Koppla på knappen ”Lämna in spel för poäng”
+   ========================= */
+
+function setupSubmitGameToFirestore() {
+  const btnSubmit = document.getElementById("btnSubmitGame");
+  if (!btnSubmit) return;
+
+  btnSubmit.addEventListener("click", function () {
+    try {
+      saveCurrentResultToFirestore();
+    } catch (e) {
+      console.error("setupSubmitGameToFirestore: fel vid klick-hantering:", e);
     }
   });
-})();
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  setupSubmitGameToFirestore();
+});
 </script>
-<!-- slut SEKTION 3X: BANKSTATUS & HIGHSCORE-FIX -->
+<!-- slut SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
+
+
+
+<script>
+// start SEKTION 3X: FIRESTORE-INLÄMNING & LÄRAR-HIGHSCORELISTA
+
+// Resultat lagras per frågebank i en egen subkollektion
+const RESULTS_COLLECTION_NAME = "results";
+
+/**
+ * Hitta aktiv bankId för highscore:
+ *  1) explicit param
+ *  2) window.activeSharedBankId
+ *  3) URL-param (sharedBank / sb / bank)
+ */
+function getBankIdForHighscore(explicitId) {
+  if (explicitId) return explicitId;
+  if (typeof window !== "undefined" && window.activeSharedBankId) {
+    return window.activeSharedBankId;
+  }
+  if (typeof getQueryParam === "function") {
+    return (
+      getQueryParam("sharedBank") ||
+      getQueryParam("sb") ||
+      getQueryParam("bank")
+    );
+  }
+  return null;
+}
+
+/**
+ * Säkerställ att det finns en highscore-ruta i Elevprogression-fliken.
+ */
+function ensureHighscoreBox() {
+  const grid = document.querySelector(".progress-grid");
+  if (!grid) return null;
+
+  let box = document.getElementById("progressHighscoreBox");
+  if (box) return box;
+
+  box = document.createElement("div");
+  box.id = "progressHighscoreBox";
+  box.className = "progress-box";
+
+  const title = document.createElement("h4");
+  title.textContent = "Highscore (sparat i molnet)";
+
+  const list = document.createElement("ul");
+  list.id = "teacherHighscoreList";
+  list.className = "goals-list mini";
+
+  const li = document.createElement("li");
+  li.textContent = "Inga inlämningar sparade ännu.";
+  list.appendChild(li);
+
+  box.appendChild(title);
+  box.appendChild(list);
+  grid.appendChild(box);
+
+  return box;
+}
+
+/**
+ * Uppdatera själva lärar-vyn för highscore-listan.
+ */
+function updateHighscoreUI(entries) {
+  try {
+    const box = ensureHighscoreBox();
+    if (!box) return;
+
+    let list = document.getElementById("teacherHighscoreList");
+    if (!list) {
+      list = document.createElement("ul");
+      list.id = "teacherHighscoreList";
+      list.className = "goals-list mini";
+      box.appendChild(list);
+    }
+
+    list.innerHTML = "";
+
+    if (!entries || !entries.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga inlämningar sparade ännu.";
+      list.appendChild(li);
+      return;
+    }
+
+    entries.forEach((e, index) => {
+      const li = document.createElement("li");
+      const pos = index + 1;
+      const name = e.name || "-";
+      const cls = e.className || "-";
+      const score =
+        typeof e.score === "number" ? e.score.toFixed(0) : String(e.score || 0);
+      const level = e.level || "?";
+
+      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}`;
+      list.appendChild(li);
+    });
+  } catch (err) {
+    console.error("[3X] Fel vid uppdatering av highscore-UI:", err);
+  }
+}
+
+/**
+ * Läs highscore från Firestore för aktuell bank
+ * och uppdatera lärarens highscore-lista i Elevprogression-fliken.
+ */
+function refreshHighscoreFromFirestore(optionalBankId) {
+  if (!firebaseDbInstance || !window.firebase) {
+    console.warn("[3X] Ingen firebaseDbInstance – hoppar över highscore-laddning.");
+    return;
+  }
+
+  const bankId = getBankIdForHighscore(optionalBankId);
+  if (!bankId) {
+    console.warn("[3X] Ingen bankId – hoppar över highscore-laddning.");
+    return;
+  }
+
+  const resultsRef = firebaseDbInstance
+    .collection("sharedBanks")
+    .doc(bankId)
+    .collection(RESULTS_COLLECTION_NAME);
+
+  resultsRef
+    .orderBy("percent", "desc")
+    .orderBy("createdAt", "asc")
+    .limit(20)
+    .get()
+    .then((snapshot) => {
+      const entries = [];
+      snapshot.forEach((doc) => {
+        const d = doc.data() || {};
+        const scoreValue =
+          typeof d.percent === "number"
+            ? d.percent
+            : typeof d.scorePercent === "number"
+            ? d.scorePercent
+            : 0;
+
+        entries.push({
+          name: d.studentName || d.name || "",
+          className: d.studentClass || d.class || "",
+          level: d.level || d.levelId || "",
+          score: scoreValue,
+          createdAt:
+            d.createdAt && typeof d.createdAt.toDate === "function"
+              ? d.createdAt.toDate()
+              : null
+        });
+      });
+
+      console.log("[3X] Highscore-inläsning klar, poster:", entries.length);
+      updateHighscoreUI(entries);
+    })
+    .catch((err) => {
+      console.error("[3X] Fel vid highscore-laddning:", err);
+    });
+}
+
+// slut SEKTION 3X: FIRESTORE-INLÄMNING & LÄRAR-HIGHSCORELISTA
+</script>
 
 
 </script>
