@@ -1910,6 +1910,10 @@ let currentDragSourcesTmp = [];
 let currentDragTargetsTmp = [];
 let currentDragCorrectMapTmp = {};
 
+// 🔹 Globala markörer för aktiv bank (för highscore/inlämning)
+window.activeSharedBankId = window.activeSharedBankId || null;
+window.activeCloudBankId = window.activeCloudBankId || null;
+
 const defaultState = {
   student: { name: "", klass: "" },
   best: { E: 0, C: 0, A: 0 },
@@ -2308,8 +2312,18 @@ function setBankAndGoalsInState(bank, goalsMap) {
     drag: s.bank.drag.length,
     goalsMap: s.goalsMap.length
   });
+
   // 🔹 Uppdatera synlig info för elever om aktiv frågebank
   updateActiveBankBanner();
+
+  // 🔹 Uppdatera lärarens statusrad om funktionen finns (definieras i 3B)
+  if (typeof updateBankStatusUI === "function") {
+    try {
+      updateBankStatusUI();
+    } catch (e) {
+      console.warn("updateBankStatusUI gav fel:", e);
+    }
+  }
 }
 
 function setBankInState(bank) {
@@ -2376,6 +2390,10 @@ async function autoLoadSharedBank() {
 
     setBankAndGoalsInState(normalizedBank, goalsFromDoc);
 
+    // 🔹 Markera vilken shared-bank som är aktiv (för highscore/inlämning)
+    window.activeSharedBankId = bankId;
+    console.log("autoLoadSharedBank: activeSharedBankId =", window.activeSharedBankId);
+
     // 🔹 Sätt lärarens e-post i elevens state om den finns i banken
     if (teacherEmailFromDoc) {
       const sLocal = loadState();
@@ -2388,6 +2406,15 @@ async function autoLoadSharedBank() {
     if (typeof renderDragList === "function") renderDragList();
     if (typeof renderGoalsList === "function") renderGoalsList();
     if (typeof syncUI === "function") syncUI();
+
+    // 🔹 Försök uppdatera highscore direkt för denna bank (om funktionen finns)
+    if (typeof refreshHighscoreFromFirestore === "function") {
+      try {
+        refreshHighscoreFromFirestore(bankId);
+      } catch (e) {
+        console.warn("autoLoadSharedBank: refreshHighscoreFromFirestore gav fel:", e);
+      }
+    }
 
     console.log("✅ autoLoadSharedBank: shared-bank laddad & aktiverad.");
   } catch (err) {
@@ -2492,7 +2519,12 @@ async function loadCloudBanksList() {
       btnActivate.className = "btn btn-sm";
       btnActivate.textContent = "Aktivera denna bank";
       btnActivate.addEventListener("click", () => {
+        // 🔹 Lägg bank + goals i state
         setBankAndGoalsInState(normalizedBank, goalsFromDoc);
+
+        // 🔹 Markera aktiv moln-bank globalt (för highscore/inlämning)
+        window.activeCloudBankId = docSnap.id;
+        console.log("loadCloudBanksList: activeCloudBankId =", window.activeCloudBankId);
 
         // 🔹 Hämta tillbaka lärarens e-post från moln-banken om den finns
         if (teacherEmailFromDoc) {
@@ -2506,6 +2538,23 @@ async function loadCloudBanksList() {
         if (typeof renderDragList === "function") renderDragList();
         if (typeof renderGoalsList === "function") renderGoalsList();
         if (typeof syncUI === "function") syncUI();
+
+        // 🔹 Uppdatera statusrad + highscore om funktionerna finns
+        if (typeof updateBankStatusUI === "function") {
+          try {
+            updateBankStatusUI();
+          } catch (e) {
+            console.warn("updateBankStatusUI gav fel efter aktivering:", e);
+          }
+        }
+        if (typeof refreshHighscoreFromFirestore === "function") {
+          try {
+            refreshHighscoreFromFirestore(docSnap.id);
+          } catch (e) {
+            console.warn("refreshHighscoreFromFirestore gav fel efter aktivering:", e);
+          }
+        }
+
         alert("Moln-bank aktiverad. Dina frågor är nu laddade i spelet.");
       });
       actions.appendChild(btnActivate);
@@ -2622,6 +2671,14 @@ function setupCloudBankUI() {
           if (typeof renderImgList === "function") renderImgList();
           if (typeof renderDragList === "function") renderDragList();
           if (typeof syncUI === "function") syncUI();
+          // 🔹 Uppdatera statusrad efter import
+          if (typeof updateBankStatusUI === "function") {
+            try {
+              updateBankStatusUI();
+            } catch (e) {
+              console.warn("updateBankStatusUI gav fel efter import:", e);
+            }
+          }
           alert("Frågebank importerad.");
         } catch (err) {
           console.error("Fel vid import av JSON-bank:", err);
@@ -2686,7 +2743,6 @@ function setupCloudBankUI() {
 }
 </script>
 <!-- slut SEKTION 3A: BAS, STATE, FIREBASE & MOLN-BANKER -->
-
 
 
 
@@ -4133,50 +4189,57 @@ document.addEventListener("DOMContentLoaded", function () {
 <!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
 <script>
 /* =========================
-   3n – Spara elevresultat till Firestore vid inlämning
+   3D – Spara elevresultat till Firestore vid inlämning
    ========================= */
 
 async function saveCurrentResultToFirestore() {
   try {
     if (!window.firebase || !firebaseDbInstance) {
       console.warn("saveCurrentResultToFirestore: Firebase är inte redo.");
+      alert("Tekniskt fel: resultatet kunde inte sparas (Firebase saknas).");
       return;
     }
 
     if (typeof getQueryParam !== "function") {
       console.warn("saveCurrentResultToFirestore: getQueryParam saknas.");
+      alert("Tekniskt fel: resultatet kunde inte sparas (URL-parameter-fel).");
       return;
     }
 
-    const sharedBankId =
+    // BankId från elevlänk – används både direkt här och av 3X-highscore
+    const bankId =
       getQueryParam("sharedBank") ||
       getQueryParam("sb") ||
       getQueryParam("bank");
 
-    if (!sharedBankId) {
+    if (!bankId) {
       console.log("saveCurrentResultToFirestore: ingen sharedBank-id i URL – sparar inget resultat.");
+      alert("Det finns ingen kopplad frågebank i länken, resultatet sparas inte.");
       return;
     }
+
+    // Gör bankId synlig för SEKTION 3X (highscore)
+    window.activeSharedBankId = bankId;
 
     const s = loadState();
     const studentName = (s.student && s.student.name) || "";
     const studentClass = (s.student && s.student.klass) || "";
 
     if (!studentName || !studentClass) {
-      console.log("saveCurrentResultToFirestore: saknar elevnamn/klass – sparar inget resultat.");
+      alert("Skriv in elevens namn och klass innan du lämnar in.");
       return;
     }
 
     const scoreTextEl = document.getElementById("scoreText");
     const scoreDetailEl = document.getElementById("scoreDetail");
-    let resultText = scoreTextEl ? scoreTextEl.textContent || "" : "";
-    let detailText = scoreDetailEl ? scoreDetailEl.textContent || "" : "";
+    const resultText = scoreTextEl ? (scoreTextEl.textContent || "") : "";
+    const detailText = scoreDetailEl ? (scoreDetailEl.textContent || "") : "";
 
     let percent = null;
     let correct = null;
     let total = null;
 
-    if (scoreDetailEl && detailText) {
+    if (detailText) {
       const m = detailText.match(/(\d+)\s*\/\s*(\d+)/);
       if (m) {
         correct = parseInt(m[1], 10);
@@ -4190,51 +4253,14 @@ async function saveCurrentResultToFirestore() {
     if (percent == null && resultText) {
       const m2 = resultText.match(/(\d+)\s*%/);
       if (m2) {
-        percent = parseInt(m2[1], 10);
-        if (isNaN(percent)) percent = null;
+        const p = parseInt(m2[1], 10);
+        if (!isNaN(p)) percent = p;
       }
     }
 
-    const level = typeof currentLevel !== "undefined" && currentLevel
-      ? currentLevel
-      : null;
+    const level = (typeof currentLevel !== "undefined" && currentLevel) ? currentLevel : null;
 
-    // 🔢 Poängräkning: 1p/E, 2p/C, 3p/A – baserat på antal rätt
-    let pointsThisRun = 0;
-    if (typeof correct === "number" && !isNaN(correct) && level) {
-      let factor = 1;
-      if (level === "C") factor = 2;
-      else if (level === "A") factor = 3;
-      pointsThisRun = correct * factor;
-    }
-
-    // Säkerställ progression-objektet i state
-    if (!s.progression || typeof s.progression !== "object") {
-      s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} };
-    }
-    if (typeof s.progression.totalPoints !== "number") {
-      s.progression.totalPoints = 0;
-    }
-
-    // Undvik dubbla poäng om samma resultat lämnas in flera gånger i rad
-    const signature = `${studentName}::${studentClass}::${level || "?"}::${correct || "?"}::${total || "?"}`;
-    if (lastSubmission !== signature) {
-      if (pointsThisRun > 0) {
-        s.progression.totalPoints += pointsThisRun;
-        console.log(
-          "saveCurrentResultToFirestore: poäng denna omgång:",
-          pointsThisRun,
-          "– totalPoints nu:",
-          s.progression.totalPoints
-        );
-      }
-      lastSubmission = signature;
-      saveState(s);
-    } else {
-      console.log("saveCurrentResultToFirestore: samma resultat som senast – hoppar över poängökning.");
-    }
-
-    const resultDoc = {
+    const resultObj = {
       studentName,
       studentClass,
       level: level,
@@ -4246,35 +4272,41 @@ async function saveCurrentResultToFirestore() {
       totalPoints: (s.progression && s.progression.totalPoints) || 0,
       bestE: (s.best && s.best.E) || 0,
       bestC: (s.best && s.best.C) || 0,
-      bestA: (s.best && s.best.A) || 0,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      bestA: (s.best && s.best.A) || 0
     };
 
-    console.log("saveCurrentResultToFirestore: sparar resultat", resultDoc);
+    console.log("saveCurrentResultToFirestore: förberett resultatobjekt", resultObj);
 
-    await firebaseDbInstance
-      .collection("sharedBanks")
-      .doc(sharedBankId)
-      .collection("results")
-      .add(resultDoc);
-
-    console.log("saveCurrentResultToFirestore: resultat sparat.");
-
-    // Uppdatera UI så att poäng-rutan under sparad elev visar nya totalPoints
-    if (typeof syncUI === "function") {
-      try {
-        syncUI();
-      } catch (e) {
-        console.warn("saveCurrentResultToFirestore: syncUI gav fel efter inlämning:", e);
-      }
+    // Om 3X-funktionen finns: använd den (den sköter highscore + Firestore-skrivning)
+    if (typeof saveCurrentResultToFirestoreV3X === "function") {
+      await saveCurrentResultToFirestoreV3X(resultObj);
+      alert("Ditt resultat är inlämnat och sparat i lärarens highscore-lista.");
+      return;
     }
+
+    // Fallback: spara direkt om 3X inte finns
+    const resultsRef = firebaseDbInstance
+      .collection("sharedBanks")
+      .doc(bankId)
+      .collection("results");
+
+    const payload = Object.assign({}, resultObj, {
+      bankId,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log("saveCurrentResultToFirestore: sparar direkt till Firestore", payload);
+
+    await resultsRef.add(payload);
+    alert("Ditt resultat är inlämnat och sparat.");
   } catch (err) {
     console.error("saveCurrentResultToFirestore: fel vid sparande av resultat:", err);
+    alert("Något gick fel när resultatet skulle sparas. Försök igen, eller kontakta läraren.");
   }
 }
 
 /* =========================
-   3n.1 – Koppla på knappen ”Lämna in spel för poäng”
+   3D.1 – Koppla på knappen ”Lämna in spel för poäng”
    ========================= */
 
 function setupSubmitGameToFirestore() {
@@ -4282,11 +4314,7 @@ function setupSubmitGameToFirestore() {
   if (!btnSubmit) return;
 
   btnSubmit.addEventListener("click", function () {
-    try {
-      saveCurrentResultToFirestore();
-    } catch (e) {
-      console.error("setupSubmitGameToFirestore: fel vid klick-hantering:", e);
-    }
+    saveCurrentResultToFirestore();
   });
 }
 
