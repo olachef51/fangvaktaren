@@ -4253,200 +4253,90 @@ document.addEventListener("DOMContentLoaded", function () {
 <!-- slut SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
 
 <script>
-// start SEKTION 3X: FIRESTORE-INLÄMNING & LÄRAR-HIGHSCORELISTA
 
-// Resultat lagras per frågebank i en egen subkollektion
-const RESULTS_COLLECTION_NAME = "results";
 
-/**
- * Hjälpfunktion – ta fram aktiv bankId för inlämning / highscore
- * 1) aktiv shared bank från URL (elevlänk)
- * 2) annars aktiv moln-bank (läraren har laddat bank i modal)
- */
-function getActiveBankIdForResults() {
-  if (window.activeSharedBankId) return window.activeSharedBankId;
-  if (window.activeCloudBankId) return window.activeCloudBankId;
-  return null;
-}
+<!-- start SEKTION 3X: BANKSTATUS & HIGHSCORE-FIX -->
+/*
+  3X – Patch för molnbanker & highscore
 
-/**
- * Spara elevens senaste resultat till Firestore under:
- *  sharedBanks/{bankId}/results/{autoId}
- *
- * resultObj kommer från spelet (nivå, procent, antal frågor, namn, klass osv).
- * Vi lägger bara till bankId + timestamp.
- */
-function saveCurrentResultToFirestoreV3X(resultObj) {
-  if (!firebaseDbInstance) {
-    console.warn("saveCurrentResultToFirestoreV3X: ingen firebaseDbInstance – avbryter.");
-    return;
+  - Hookar setBankAndGoalsInState -> kör updateBankStatusUI() varje gång bank byts.
+  - Hookar autoLoadSharedBank -> uppdaterar cloudBankStatus + ger visuell bekräftelse.
+  - Hookar saveCurrentResultToFirestore -> försöker uppdatera highscore efter sparat resultat.
+
+  Ändrar INTE original-funktionernas logik, bara lägger till extra anrop.
+*/
+
+(function () {
+  function safeUpdateBankStatusUI(extraNote) {
+    try {
+      if (typeof updateBankStatusUI === "function") {
+        updateBankStatusUI();
+      }
+      const el = document.getElementById("cloudBankStatus");
+      if (el && extraNote) {
+        // Lägg till en liten bekräftelsetext utan att ändra designen i övrigt
+        if (!el.textContent.includes(extraNote)) {
+          el.textContent = el.textContent + " " + extraNote;
+        }
+      }
+    } catch (e) {
+      console.warn("[3X] Kunde inte uppdatera bankstatus:", e);
+    }
   }
 
-  const bankId = getActiveBankIdForResults();
-  if (!bankId) {
-    console.warn("saveCurrentResultToFirestoreV3X: ingen aktiv bankId – avbryter.");
-    return;
-  }
-
-  const resultsRef = firebaseDbInstance
-    .collection("sharedBanks")
-    .doc(bankId)
-    .collection(RESULTS_COLLECTION_NAME);
-
-  const payload = {
-    ...resultObj,
-    bankId,
-    createdAt: firebase.firestore.FieldValue.serverTimestamp()
-  };
-
-  console.log("saveCurrentResultToFirestoreV3X: sparar resultat", payload);
-
-  return resultsRef
-    .add(payload)
-    .then(() => {
-      console.log("saveCurrentResultToFirestoreV3X: resultat sparat.");
-      // Uppdatera highscore-listan efter varje inlämning
-      refreshHighscoreFromFirestore(bankId);
-      console.log("[3X] Inlämning sparad till Firestore:", payload);
-    })
-    .catch((err) => {
-      console.error("saveCurrentResultToFirestoreV3X: fel vid sparande:", err);
-    });
-}
-
-/**
- * Läs highscore från Firestore för aktuell bank
- * och uppdatera lärarens highscore-lista i Elevprogression-fliken.
- */
-function refreshHighscoreFromFirestore(optionalBankId) {
-  if (!firebaseDbInstance) {
-    console.warn("[3X] Ingen firebaseDbInstance – hoppar över highscore-laddning.");
-    return;
-  }
-
-  const bankId = optionalBankId || getActiveBankIdForResults();
-  if (!bankId) {
-    console.warn("[3X] Ingen bankId – hoppar över highscore-laddning.");
-    return;
-  }
-
-  const resultsRef = firebaseDbInstance
-    .collection("sharedBanks")
-    .doc(bankId)
-    .collection(RESULTS_COLLECTION_NAME);
-
-  resultsRef
-    .orderBy("scorePercent", "desc")
-    .orderBy("createdAt", "asc")
-    .limit(20)
-    .get()
-    .then((snapshot) => {
-      const entries = [];
-      snapshot.forEach((doc) => {
-        const d = doc.data() || {};
-        entries.push({
-          name: d.studentName || d.name || "",
-          className: d.studentClass || d.class || "",
-          level: d.levelId || d.level || "",
-          score:
-            typeof d.scorePercent === "number"
-              ? d.scorePercent
-              : typeof d.percent === "number"
-              ? d.percent
-              : 0,
-          createdAt:
-            d.createdAt && typeof d.createdAt.toDate === "function"
-              ? d.createdAt.toDate()
-              : null
-        });
-      });
-
-      console.log("[3X] Highscore-inläsning klar, poster:", entries.length);
-      updateHighscoreUI(entries);
-    })
-    .catch((err) => {
-      console.error("[3X] Fel vid highscore-laddning:", err);
-    });
-}
-
-/**
- * Säkerställ att det finns en highscore-ruta i Elevprogression-fliken.
- * Vi återanvänder befintliga klasser (progress-box, goals-list, mini)
- * så layouten följer nuvarande design.
- */
-function ensureHighscoreBox() {
-  const grid = document.querySelector(".progress-grid");
-  if (!grid) return null;
-
-  let box = document.getElementById("progressHighscoreBox");
-  if (box) return box;
-
-  box = document.createElement("div");
-  box.id = "progressHighscoreBox";
-  box.className = "progress-box";
-
-  const title = document.createElement("h4");
-  title.textContent = "Highscore (sparat i molnet)";
-
-  const list = document.createElement("ul");
-  list.id = "teacherHighscoreList";
-  list.className = "goals-list mini";
-
-  const li = document.createElement("li");
-  li.textContent = "Inga inlämningar sparade ännu.";
-  list.appendChild(li);
-
-  box.appendChild(title);
-  box.appendChild(list);
-  grid.appendChild(box);
-
-  return box;
-}
-
-/**
- * Uppdatera själva lärar-vyn för highscore-listan.
- * Visar topp 20 resultat för aktuell frågebank.
- */
-function updateHighscoreUI(entries) {
-  try {
-    const box = ensureHighscoreBox();
-    if (!box) return;
-
-    let list = document.getElementById("teacherHighscoreList");
-    if (!list) {
-      list = document.createElement("ul");
-      list.id = "teacherHighscoreList";
-      list.className = "goals-list mini";
-      box.appendChild(list);
+  window.addEventListener("load", function () {
+    // 1) Hooka setBankAndGoalsInState (används både av moln- och lokal-bank)
+    if (typeof window.setBankAndGoalsInState === "function") {
+      const originalSetBankAndGoalsInState = window.setBankAndGoalsInState;
+      window.setBankAndGoalsInState = function () {
+        const result = originalSetBankAndGoalsInState.apply(this, arguments);
+        console.log("[3X] setBankAndGoalsInState körd – uppdaterar bankstatus-UI.");
+        safeUpdateBankStatusUI();
+        return result;
+      };
+    } else {
+      console.warn("[3X] Hittade inte setBankAndGoalsInState – patchar inte bankstatus.");
     }
 
-    list.innerHTML = "";
-
-    if (!entries || !entries.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu.";
-      list.appendChild(li);
-      return;
+    // 2) Hooka autoLoadSharedBank (URL-varianten ?bank=...)
+    if (typeof window.autoLoadSharedBank === "function") {
+      const originalAutoLoadSharedBank = window.autoLoadSharedBank;
+      window.autoLoadSharedBank = async function () {
+        const res = await originalAutoLoadSharedBank.apply(this, arguments);
+        console.log("[3X] autoLoadSharedBank klar – uppdaterar bankstatus-UI.");
+        // Visuell bekräftelse på Ladda molnbank-fliken
+        safeUpdateBankStatusUI("(molnbank laddad ✅)");
+        return res;
+      };
+    } else {
+      console.warn("[3X] Hittade inte autoLoadSharedBank – ingen URL-autoload att patcha.");
     }
 
-    entries.forEach((e, index) => {
-      const li = document.createElement("li");
-      const pos = index + 1;
-      const name = e.name || "-";
-      const cls = e.className || "-";
-      const score =
-        typeof e.score === "number" ? e.score.toFixed(0) : String(e.score || 0);
-      const level = e.level || "?";
-
-      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}`;
-      list.appendChild(li);
-    });
-  } catch (err) {
-    console.error("[3X] Fel vid uppdatering av highscore-UI:", err);
-  }
-}
-
-// slut SEKTION 3X: FIRESTORE-INLÄMNING & LÄRAR-HIGHSCORELISTA
+    // 3) Hooka saveCurrentResultToFirestore -> uppdatera highscore efter sparat resultat
+    if (
+      typeof window.saveCurrentResultToFirestore === "function" &&
+      typeof window.refreshHighscoreFromFirestore === "function"
+    ) {
+      const originalSaveCurrentResultToFirestore = window.saveCurrentResultToFirestore;
+      window.saveCurrentResultToFirestore = async function () {
+        const res = await originalSaveCurrentResultToFirestore.apply(this, arguments);
+        try {
+          console.log("[3X] Resultat sparat – försöker uppdatera highscore från Firestore …");
+          window.refreshHighscoreFromFirestore();
+        } catch (e) {
+          console.warn("[3X] Kunde inte uppdatera highscore efter sparat resultat:", e);
+        }
+        return res;
+      };
+    } else {
+      console.warn(
+        "[3X] Hittade inte saveCurrentResultToFirestore/refreshHighscoreFromFirestore – highscore-patch inaktiverad."
+      );
+    }
+  });
+})();
+</script>
+<!-- slut SEKTION 3X: BANKSTATUS & HIGHSCORE-FIX -->
 
 
 </script>
