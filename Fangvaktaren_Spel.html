@@ -1112,6 +1112,7 @@
           Svar registreras när du klickar i alternativen eller släpper kort i rätt ruta.
         </div>
         <div class="play-actions">
+          <button id="btnSpeakQuestion" class="btn btn-sm">🔊 Läs upp frågan</button>
           <button id="btnFinish" class="btn btn-sm btn-primary">✅ Lämna in nivå</button>
         </div>
       </footer>
@@ -1850,6 +1851,7 @@ Gurka
   </div>
 </body>
 <!-- slut SEKTION 2: BODY (ELEVYTA & LÄRARLÄGE) -->
+
 
 
 
@@ -4189,23 +4191,87 @@ document.addEventListener("DOMContentLoaded", function () {
 <!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
 <script>
 /* =========================
-   3n – Spara elevresultat till Firestore vid inlämning
+   3n – Bygg elevresultat: poäng + delbitar (starka/svaga)
+   ========================= */
+
+/**
+ * Bygger sammanfattning av starka / svaga delbitar ur state.
+ * "Godkänd delbit" = andel rätt (correct/(correct+wrong)) >= thres.E (%)
+ */
+function buildGoalStrengthSummary(state) {
+  const s = state || loadState();
+  const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+  const prog = s.progression || {};
+  const correctMap = prog.correctByGoalId || {};
+  const wrongMap = prog.wrongByGoalId || {};
+
+  // Lärarens gräns för "godkänd delbit" hämtas från inställningar (E-tröskeln)
+  const passThreshold = clampInt(
+    s.thres && typeof s.thres.E !== "undefined" ? s.thres.E : 70,
+    0,
+    100
+  );
+
+  const strongGoals = [];
+  const weakGoals = [];
+
+  const allIds = new Set([
+    ...Object.keys(correctMap),
+    ...Object.keys(wrongMap)
+  ]);
+
+  allIds.forEach((idStr) => {
+    const id = idStr;
+    const correct = Number(correctMap[id]) || 0;
+    const wrong = Number(wrongMap[id]) || 0;
+    const total = correct + wrong;
+    if (!total) return;
+
+    const percent = Math.round((correct * 100) * 1.0 / total);
+
+    const meta = goalsMap.find((g) => String(g.id) === String(id)) || {};
+    const entry = {
+      goalId: id,
+      goal: meta.goal || "",
+      parts: meta.parts || "",
+      percent: percent,
+      correct: correct,
+      wrong: wrong,
+      total: total
+    };
+
+    if (percent >= passThreshold) {
+      // Godkänd delbit
+      strongGoals.push(entry);
+    } else if (wrong > 0) {
+      // Svårighet: eleven har haft fel här och ligger under gränsen
+      weakGoals.push(entry);
+    }
+  });
+
+  // Sortera så det blir snyggare i listor
+  strongGoals.sort((a, b) => b.percent - a.percent);
+  weakGoals.sort((a, b) => a.percent - b.percent);
+
+  return { strongGoals, weakGoals, passThreshold };
+}
+
+/* =========================
+   3n.1 – Spara elevens resultat + delbitar till Firestore
    ========================= */
 
 async function saveCurrentResultToFirestore() {
   try {
     if (!window.firebase || !firebaseDbInstance) {
       console.warn("saveCurrentResultToFirestore: Firebase är inte redo.");
-      alert("Tekniskt fel: kunde inte koppla mot databasen. Be läraren om hjälp.");
       return;
     }
-
     if (typeof getQueryParam !== "function") {
       console.warn("saveCurrentResultToFirestore: getQueryParam saknas.");
-      alert("Tekniskt fel: kunde inte läsa bank-id. Be läraren om hjälp.");
       return;
     }
 
+    // Vilken publicerad bank gäller resultatet?
     const sharedBankId =
       getQueryParam("sharedBank") ||
       getQueryParam("sb") ||
@@ -4213,32 +4279,31 @@ async function saveCurrentResultToFirestore() {
 
     if (!sharedBankId) {
       console.log("saveCurrentResultToFirestore: ingen sharedBank-id i URL – sparar inget resultat.");
-      alert("Kunde inte hitta vilken frågebank du spelar på. Be läraren om hjälp.");
       return;
     }
 
+    // Grunddata om elev
     const s = loadState();
     const studentName = (s.student && s.student.name) || "";
     const studentClass = (s.student && s.student.klass) || "";
 
     if (!studentName || !studentClass) {
       console.log("saveCurrentResultToFirestore: saknar elevnamn/klass – sparar inget resultat.");
-      alert("Skriv in namn och klass innan du lämnar in.");
       return;
     }
 
+    // Läs ut resultat från resultatrutan
     const scoreTextEl = document.getElementById("scoreText");
     const scoreDetailEl = document.getElementById("scoreDetail");
-    let resultText = scoreTextEl ? scoreTextEl.textContent || "" : "";
-    let detailText = scoreDetailEl ? scoreDetailEl.textContent || "" : "";
+    const resultSummary = scoreTextEl ? (scoreTextEl.textContent || "") : "";
+    const resultDetail = scoreDetailEl ? (scoreDetailEl.textContent || "") : "";
 
-    let percent = null;
     let correct = null;
     let total = null;
+    let percent = null;
 
-    // Försök plocka ut "rätt/antal" från detaljtexten (t.ex. "7 / 10")
-    if (scoreDetailEl && detailText) {
-      const m = detailText.match(/(\d+)\s*\/\s*(\d+)/);
+    if (resultDetail) {
+      const m = resultDetail.match(/(\d+)\s*\/\s*(\d+)/);
       if (m) {
         correct = parseInt(m[1], 10);
         total = parseInt(m[2], 10);
@@ -4248,70 +4313,110 @@ async function saveCurrentResultToFirestore() {
       }
     }
 
-    // Om procentsats inte kunde läsas från detaljtexten, försök läsa "XX%" från huvudtexten
-    if (percent == null && resultText) {
-      const m2 = resultText.match(/(\d+)\s*%/);
+    if (percent == null && resultSummary) {
+      const m2 = resultSummary.match(/(\d+)\s*%/);
       if (m2) {
         const p = parseInt(m2[1], 10);
-        if (!isNaN(p)) {
-          percent = p;
-        }
+        if (!isNaN(p)) percent = p;
       }
     }
 
-    const level = typeof currentLevel !== "undefined" && currentLevel
-      ? currentLevel
-      : null;
+    // Nivå + fallback från lastSubmission om den finns
+    let levelId = typeof currentLevel !== "undefined" && currentLevel ? currentLevel : null;
 
-    /* -------------------------
-       Uppdatera lokal progression / poäng
-       1p per rätt på E
-       2p per rätt på C
-       3p per rätt på A
-       + uppdatera bästa % per nivå (E/C/A)
-       ------------------------- */
-    try {
-      if (s && s.progression) {
-        const weight = level === "A" ? 3 : level === "C" ? 2 : 1;
-        if (typeof correct === "number" && !isNaN(correct)) {
-          const gained = correct * weight;
-          s.progression.totalPoints = (s.progression.totalPoints || 0) + gained;
-        }
-
-        if (typeof percent === "number" && !isNaN(percent)) {
-          if (!s.best) s.best = { E: 0, C: 0, A: 0 };
-          if (level === "E") {
-            s.best.E = Math.max(s.best.E || 0, percent);
-          } else if (level === "C") {
-            s.best.C = Math.max(s.best.C || 0, percent);
-          } else if (level === "A") {
-            s.best.A = Math.max(s.best.A || 0, percent);
-          }
-        }
-
-        saveState(s);
-        if (typeof syncUI === "function") {
-          syncUI(); // ska uppdatera "Din poäng"-rutan och nivåernas bästa resultat
-        }
+    if (window.lastSubmission && typeof window.lastSubmission === "object") {
+      const ls = window.lastSubmission;
+      if (ls.level) levelId = ls.level;
+      if (ls.correct != null && ls.total != null) {
+        correct = ls.correct;
+        total = ls.total;
       }
-    } catch (e) {
-      console.warn("Kunde inte uppdatera lokal progression:", e);
+      if (ls.percent != null && !isNaN(ls.percent)) {
+        percent = ls.percent;
+      }
     }
 
+    if (correct == null || total == null || percent == null) {
+      console.warn("saveCurrentResultToFirestore: kunde inte tolka resultatet fullt ut.", {
+        correct,
+        total,
+        percent
+      });
+    }
+
+    // ======================
+    // Uppdatera lokal progression (poäng + best E/C/A)
+    // ======================
+    const sProgress = loadState();
+
+    if (!sProgress.progression || typeof sProgress.progression !== "object") {
+      sProgress.progression = {
+        totalPoints: 0,
+        wrongByGoalId: {},
+        correctByGoalId: {}
+      };
+    }
+
+    let addedPoints = 0;
+    if (typeof correct === "number" && !isNaN(correct)) {
+      let perCorrect = 1;
+      if (levelId === "C") perCorrect = 2;
+      else if (levelId === "A") perCorrect = 3;
+      addedPoints = correct * perCorrect;
+
+      sProgress.progression.totalPoints =
+        (sProgress.progression.totalPoints || 0) + addedPoints;
+    }
+
+    if (!sProgress.best || typeof sProgress.best !== "object") {
+      sProgress.best = { E: 0, C: 0, A: 0 };
+    }
+
+    if (typeof percent === "number" && !isNaN(percent) && levelId) {
+      const currentBest = sProgress.best[levelId] || 0;
+      if (percent > currentBest) {
+        sProgress.best[levelId] = percent;
+      }
+    }
+
+    saveState(sProgress);
+
+    // Försök uppdatera UI (poängrutan, nivåkort mm)
+    if (typeof syncUI === "function") {
+      try {
+        syncUI();
+      } catch (e) {
+        console.warn("syncUI gav fel efter inlämning:", e);
+      }
+    }
+
+    // ======================
+    // Bygg listor med delbitar (starka / svaga)
+    // ======================
+    const goalSummary = buildGoalStrengthSummary(sProgress);
+
+    // ======================
+    // Bygg dokument att spara till Firestore
+    // ======================
     const resultDoc = {
       studentName,
       studentClass,
-      level: level,
+      level: levelId,
       percent: percent,
-      scorePercent: typeof percent === "number" ? percent : null,
+      scorePercent: percent,
       correct: correct,
       total: total,
-      resultText: resultText,
-      detailText: detailText,
-      totalPoints: (s.progression && s.progression.totalPoints) || 0,
-      bestE: (s.best && s.best.E) || 0,
-      bestC: (s.best && s.best.C) || 0,
-      bestA: (s.best && s.best.A) || 0,
+      resultText: resultSummary,
+      detailText: resultDetail,
+      // Poäng & tidigare bästa
+      totalPoints: sProgress.progression.totalPoints || 0,
+      bestE: (sProgress.best && sProgress.best.E) || 0,
+      bestC: (sProgress.best && sProgress.best.C) || 0,
+      bestA: (sProgress.best && sProgress.best.A) || 0,
+      // Delbitar
+      strongGoals: goalSummary.strongGoals,      // godkända delbitar
+      weakGoals: goalSummary.weakGoals,          // delbitar med svårighet
+      goalPassThreshold: goalSummary.passThreshold,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     };
 
@@ -4324,20 +4429,41 @@ async function saveCurrentResultToFirestore() {
       .add(resultDoc);
 
     console.log("saveCurrentResultToFirestore: resultat sparat.");
+
+    // Försök trigga highscore/elevprogression om funktioner finns
+    if (typeof refreshHighscoreFromFirestore === "function") {
+      try {
+        refreshHighscoreFromFirestore(sharedBankId);
+      } catch (e) {
+        console.warn("Kunde inte uppdatera highscore efter inlämning:", e);
+      }
+    }
+    if (typeof refreshElevProgressionFromFirestore === "function") {
+      try {
+        refreshElevProgressionFromFirestore(sharedBankId);
+      } catch (e) {
+        console.warn("Kunde inte uppdatera elevprogression efter inlämning:", e);
+      }
+    }
+
     alert("Ditt resultat har skickats till läraren.");
   } catch (err) {
     console.error("saveCurrentResultToFirestore: fel vid sparande av resultat:", err);
-    alert("Kunde inte spara ditt resultat. Försök igen eller be läraren om hjälp.");
+    alert("Det gick inte att skicka ditt resultat. Försök igen senare.");
   }
 }
 
 /* =========================
-   3n.1 – Koppla på knappen ”Lämna in spel för poäng”
+   3n.2 – Koppla knappen ”Lämna in spel för poäng”
    ========================= */
 
 function setupSubmitGameToFirestore() {
   const btnSubmit = document.getElementById("btnSubmitGame");
   if (!btnSubmit) return;
+
+  // Enkel säkerhet så vi inte dubblar event (om init körs flera gånger)
+  if (btnSubmit.__fvSubmitBound) return;
+  btnSubmit.__fvSubmitBound = true;
 
   btnSubmit.addEventListener("click", function () {
     try {
@@ -4356,6 +4482,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
 
 
+
 <script>
 // start SEKTION 3X: FIRESTORE-INLÄMNING, LÄRAR-HIGHSCORELISTA & ELEVPROGRESSION
 
@@ -4368,7 +4495,6 @@ function getActiveBankIdForResults() {
   if (window.activeSharedBankId) return window.activeSharedBankId;
   if (window.activeCloudBankId) return window.activeCloudBankId;
 
-  // Fallback: läs direkt från URL (?sharedBank=, ?sb= eller ?bank=)
   try {
     if (typeof getQueryParam === "function") {
       const fromUrl =
@@ -4384,104 +4510,11 @@ function getActiveBankIdForResults() {
   return null;
 }
 
-/* =====================================================
-   Highscore – toppresultat för aktuell bank
-   ===================================================== */
-
-function saveCurrentResultToFirestoreV3X(resultObj) {
-  if (!firebaseDbInstance) {
-    console.warn("saveCurrentResultToFirestoreV3X: ingen firebaseDbInstance – avbryter.");
-    return;
-  }
-
-  const bankId = getActiveBankIdForResults();
-  if (!bankId) {
-    console.warn("saveCurrentResultToFirestoreV3X: ingen aktiv bankId – avbryter.");
-    return;
-  }
-
-  const resultsRef = firebaseDbInstance
-    .collection("sharedBanks")
-    .doc(bankId)
-    .collection(RESULTS_COLLECTION_NAME);
-
-  const payload = {
-    ...resultObj,
-    bankId,
-    createdAt: firebase.firestore.FieldValue.serverTimestamp()
-  };
-
-  console.log("saveCurrentResultToFirestoreV3X: sparar resultat", payload);
-
-  return resultsRef
-    .add(payload)
-    .then(() => {
-      console.log("saveCurrentResultToFirestoreV3X: resultat sparat.");
-      refreshHighscoreFromFirestore(bankId);
-      console.log("[3X] Inlämning sparad till Firestore:", payload);
-    })
-    .catch((err) => {
-      console.error("saveCurrentResultToFirestoreV3X: fel vid sparande:", err);
-    });
-}
-
-function refreshHighscoreFromFirestore(optionalBankId) {
-  if (!firebaseDbInstance) {
-    console.warn("[3X] Ingen firebaseDbInstance – hoppar över highscore-laddning.");
-    return;
-  }
-
-  const bankId = optionalBankId || getActiveBankIdForResults();
-  if (!bankId) {
-    console.warn("[3X] Ingen bankId – hoppar över highscore-laddning.");
-    return;
-  }
-
-  const resultsRef = firebaseDbInstance
-    .collection("sharedBanks")
-    .doc(bankId)
-    .collection(RESULTS_COLLECTION_NAME);
-
-  resultsRef
-    .orderBy("scorePercent", "desc")
-    .orderBy("createdAt", "asc")
-    .limit(20)
-    .get()
-    .then((snapshot) => {
-      const entries = [];
-      snapshot.forEach((doc) => {
-        const d = doc.data() || {};
-        entries.push({
-          name: d.studentName || d.name || "",
-          className: d.studentClass || d.class || "",
-          level: d.levelId || d.level || "",
-          score:
-            typeof d.scorePercent === "number"
-              ? d.scorePercent
-              : typeof d.percent === "number"
-              ? d.percent
-              : 0,
-          createdAt:
-            d.createdAt && typeof d.createdAt.toDate === "function"
-              ? d.createdAt.toDate()
-              : null
-        });
-      });
-
-      console.log("[3X] Highscore-inläsning klar, poster:", entries.length);
-      updateHighscoreUI(entries);
-    })
-    .catch((err) => {
-      console.error("[3X] Fel vid highscore-laddning:", err);
-    });
-}
-
 /* --------------------------------------
-   Hjälp: hitta/ skapa progress-grid
+   Hjälp: hitta / skapa progress-grid
    -------------------------------------- */
 
 function ensureProgressGrid() {
-  // Försök först hitta en befintlig grid i lärarmodal
   let grid = document.querySelector("#teacherModal .progress-grid");
   if (grid) return grid;
 
@@ -4573,9 +4606,9 @@ function updateHighscoreUI(entries) {
   }
 }
 
-/* =====================================================
-   Elevlista + detaljvy i Elevprogression-fliken
-   ===================================================== */
+/* --------------------------------------
+   Elevlista + detaljvy-box
+   -------------------------------------- */
 
 function ensureProgressionBox() {
   const grid = ensureProgressGrid();
@@ -4620,6 +4653,11 @@ function ensureProgressionBox() {
 
   return box;
 }
+
+/* --------------------------------------
+   Läs resultat från Firestore och uppdatera
+   både elevlista och highscore
+   -------------------------------------- */
 
 function refreshElevProgressionFromFirestore(optionalBankId) {
   if (!firebaseDbInstance) {
@@ -4682,13 +4720,33 @@ function refreshElevProgressionFromFirestore(optionalBankId) {
       });
 
       console.log("[3X] Elevprogression-inläsning klar, poster:", entries.length);
+
       updateElevProgressionUI(entries);
+
+      const highscoreEntries = entries
+        .slice()
+        .sort((a, b) => (b.score || 0) - (a.score || 0))
+        .slice(0, 20);
+      updateHighscoreUI(highscoreEntries);
     })
     .catch((err) => {
       console.error("[3X] Fel vid elevprogression-laddning:", err);
       alert("Fel vid laddning av elevprogression. Se konsolen för detaljer.");
     });
 }
+
+/* --------------------------------------
+   Highscore-refresh alias (kompatibilitet)
+   -------------------------------------- */
+
+function refreshHighscoreFromFirestore(optionalBankId) {
+  // Använd samma data som elevprogression för att slippa dubbla queries
+  refreshElevProgressionFromFirestore(optionalBankId);
+}
+
+/* --------------------------------------
+   Bygg elevlista + detaljvy i UI
+   -------------------------------------- */
 
 function updateElevProgressionUI(entries) {
   try {
@@ -4745,7 +4803,7 @@ function updateElevProgressionUI(entries) {
         }
 
         if (typeof e.totalPoints === "number") {
-          lines.push(`Totala poäng (alla spel): ${e.totalPoints}`);
+          lines.push(`Elevens poäng (lokalt): ${e.totalPoints}`);
         }
 
         if (e.bestE != null || e.bestC != null || e.bestA != null) {
@@ -4793,10 +4851,613 @@ document.addEventListener("DOMContentLoaded", function () {
       refreshElevProgressionFromFirestore();
     });
   }
+
+  const bankId = getActiveBankIdForResults();
+  if (bankId) {
+    refreshElevProgressionFromFirestore(bankId);
+  }
 });
 
 // slut SEKTION 3X: FIRESTORE-INLÄMNING, LÄRAR-HIGHSCORELISTA & ELEVPROGRESSION
 </script>
+
+<!-- start SEKTION 3E: ELEVPROGRESSION – LISTA & DETALJVY -->
+<script>
+/* =========================
+   3e.1 – Säkerställ rutor i Elevprogression-fliken
+   ========================= */
+
+function ensureElevProgressionBoxes() {
+  const grid = document.querySelector(".progress-grid");
+  if (!grid) return null;
+
+  // Elevlista-box
+  let listBox = document.getElementById("progressStudentListBox");
+  if (!listBox) {
+    listBox = document.createElement("div");
+    listBox.id = "progressStudentListBox";
+    listBox.className = "progress-box";
+
+    const title = document.createElement("h4");
+    title.textContent = "Elevlista (denna frågebank)";
+
+    const btn = document.createElement("button");
+    btn.id = "btnRefreshProgress";
+    btn.className = "btn btn-sm";
+    btn.textContent = "Uppdatera elevprogression";
+
+    const list = document.createElement("ul");
+    list.id = "studentResultsList";
+    list.className = "goals-list mini";
+    const li = document.createElement("li");
+    li.textContent = "Inga inlämningar ännu. Klicka på ”Uppdatera elevprogression”.";
+    list.appendChild(li);
+
+    listBox.appendChild(title);
+    listBox.appendChild(btn);
+    listBox.appendChild(list);
+    grid.appendChild(listBox);
+  }
+
+  // Elevens poäng (lokalt)
+  let pointsBox = document.getElementById("progressStudentPointsBox");
+  if (!pointsBox) {
+    pointsBox = document.createElement("div");
+    pointsBox.id = "progressStudentPointsBox";
+    pointsBox.className = "progress-box";
+
+    const title = document.createElement("h4");
+    title.textContent = "Elevens poäng (lokalt)";
+
+    const body = document.createElement("div");
+    body.id = "studentPointsSummary";
+    body.className = "mini";
+    body.textContent = "Ingen data ännu. Låt eleven spela och lämna in nivåer.";
+
+    pointsBox.appendChild(title);
+    pointsBox.appendChild(body);
+    grid.appendChild(pointsBox);
+  }
+
+  // Starka delbitar
+  let strongBox = document.getElementById("progressStrongGoalsBox");
+  if (!strongBox) {
+    strongBox = document.createElement("div");
+    strongBox.id = "progressStrongGoalsBox";
+    strongBox.className = "progress-box";
+
+    const title = document.createElement("h4");
+    title.textContent = "Starka delbitar";
+
+    const list = document.createElement("ul");
+    list.id = "studentStrongGoals";
+    list.className = "goals-list mini";
+    const li = document.createElement("li");
+    li.textContent = "Inga starka delbitar inlästa ännu.";
+    list.appendChild(li);
+
+    strongBox.appendChild(title);
+    strongBox.appendChild(list);
+    grid.appendChild(strongBox);
+  }
+
+  // Svaga delbitar
+  let weakBox = document.getElementById("progressWeakGoalsBox");
+  if (!weakBox) {
+    weakBox = document.createElement("div");
+    weakBox.id = "progressWeakGoalsBox";
+    weakBox.className = "progress-box";
+
+    const title = document.createElement("h4");
+    title.textContent = "Delbitar att öva på";
+
+    const list = document.createElement("ul");
+    list.id = "studentWeakGoals";
+    list.className = "goals-list mini";
+    const li = document.createElement("li");
+    li.textContent = "Inga svaga delbitar inlästa ännu.";
+    list.appendChild(li);
+
+    weakBox.appendChild(title);
+    weakBox.appendChild(list);
+    grid.appendChild(weakBox);
+  }
+
+  return {
+    listBox,
+    pointsBox,
+    strongBox,
+    weakBox
+  };
+}
+
+/* =========================
+   3e.2 – Uppdatera UI för vald elev
+   ========================= */
+
+function showStudentProgress(entry) {
+  ensureElevProgressionBoxes();
+
+  const summaryEl = document.getElementById("studentPointsSummary");
+  const strongList = document.getElementById("studentStrongGoals");
+  const weakList = document.getElementById("studentWeakGoals");
+
+  if (!summaryEl || !strongList || !weakList) return;
+
+  const name = entry.studentName || entry.name || "-";
+  const cls = entry.studentClass || entry.className || "-";
+  const level = entry.level || "?";
+  const score =
+    typeof entry.scorePercent === "number"
+      ? entry.scorePercent
+      : typeof entry.percent === "number"
+      ? entry.percent
+      : null;
+  const totalPoints = entry.totalPoints || 0;
+  const bestE = entry.bestE || 0;
+  const bestC = entry.bestC || 0;
+  const bestA = entry.bestA || 0;
+  const strongGoals = Array.isArray(entry.strongGoals) ? entry.strongGoals : [];
+  const weakGoals = Array.isArray(entry.weakGoals) ? entry.weakGoals : [];
+  const threshold =
+    typeof entry.goalPassThreshold === "number" ? entry.goalPassThreshold : null;
+
+  let dateText = "";
+  if (entry.createdAt instanceof Date) {
+    dateText = entry.createdAt.toLocaleString("sv-SE");
+  } else if (entry.createdAt && entry.createdAt.toDate) {
+    try {
+      dateText = entry.createdAt.toDate().toLocaleString("sv-SE");
+    } catch (_) {}
+  }
+
+  const lines = [];
+  lines.push(`Elev: ${name} (${cls})`);
+  if (score != null) {
+    lines.push(`Senaste resultat: ${score}% på nivå ${level}`);
+  } else {
+    lines.push(`Senaste resultat: ?% på nivå ${level}`);
+  }
+  lines.push(`Total poäng: ${totalPoints}`);
+  lines.push(`Bästa resultat per nivå – E: ${bestE}%, C: ${bestC}%, A: ${bestA}%`);
+  if (threshold != null) {
+    lines.push(`Gräns för godkänd delbit: ${threshold}% rätt`);
+  }
+  if (dateText) {
+    lines.push(`Senast inlämnat: ${dateText}`);
+  }
+
+  summaryEl.textContent = lines.join("\n");
+
+  // Starka delbitar
+  strongList.innerHTML = "";
+  if (!strongGoals.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga starka delbitar inlästa ännu.";
+    strongList.appendChild(li);
+  } else {
+    strongGoals.forEach((g) => {
+      const li = document.createElement("li");
+      const goalTxt = g.goal || "(okänt delmål)";
+      const partsTxt = g.parts || "";
+      const pct = typeof g.percent === "number" ? g.percent : "?";
+      const corr = typeof g.correct === "number" ? g.correct : "?";
+      const tot = typeof g.total === "number" ? g.total : "?";
+      li.textContent = `${goalTxt} – ${partsTxt} (${pct}% rätt, ${corr}/${tot} frågor)`;
+      strongList.appendChild(li);
+    });
+  }
+
+  // Svaga delbitar
+  weakList.innerHTML = "";
+  if (!weakGoals.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga svaga delbitar inlästa ännu.";
+    weakList.appendChild(li);
+  } else {
+    weakGoals.forEach((g) => {
+      const li = document.createElement("li");
+      const goalTxt = g.goal || "(okänt delmål)";
+      const partsTxt = g.parts || "";
+      const pct = typeof g.percent === "number" ? g.percent : "?";
+      const corr = typeof g.correct === "number" ? g.correct : "?";
+      const tot = typeof g.total === "number" ? g.total : "?";
+      li.textContent = `${goalTxt} – ${partsTxt} (${pct}% rätt, ${corr}/${tot} frågor)`;
+      weakList.appendChild(li);
+    });
+  }
+}
+
+/* =========================
+   3e.3 – Bygg elevlista från Firestore
+   ========================= */
+
+function updateElevProgressionUI(entries) {
+  const boxes = ensureElevProgressionBoxes();
+  if (!boxes) return;
+
+  const listEl = document.getElementById("studentResultsList");
+  if (!listEl) return;
+
+  listEl.innerHTML = "";
+
+  if (!entries || !entries.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga inlämningar sparade ännu.";
+    listEl.appendChild(li);
+    return;
+  }
+
+  // Ta senaste resultatet per elev (namn + klass)
+  const latestByStudent = new Map();
+
+  entries.forEach((e) => {
+    const name = e.studentName || e.name || "";
+    const cls = e.studentClass || e.className || "";
+    const key = `${name}|||${cls}`;
+    const prev = latestByStudent.get(key);
+
+    const currentDate =
+      e.createdAt && typeof e.createdAt.toDate === "function"
+        ? e.createdAt.toDate()
+        : e.createdAt instanceof Date
+        ? e.createdAt
+        : null;
+
+    if (!prev) {
+      latestByStudent.set(key, { ...e, createdAt: currentDate || e.createdAt || null });
+    } else {
+      const prevDate =
+        prev.createdAt && prev.createdAt instanceof Date
+          ? prev.createdAt
+          : prev.createdAt && prev.createdAt.toDate
+          ? prev.createdAt.toDate()
+          : null;
+
+      if (!prevDate || (currentDate && currentDate > prevDate)) {
+        latestByStudent.set(key, { ...e, createdAt: currentDate || e.createdAt || null });
+      }
+    }
+  });
+
+  const students = Array.from(latestByStudent.values());
+
+  // Sortera elever alfabetiskt (klass + namn)
+  students.sort((a, b) => {
+    const an = (a.studentClass || "") + " " + (a.studentName || "");
+    const bn = (b.studentClass || "") + " " + (b.studentName || "");
+    return an.localeCompare(bn, "sv-SE");
+  });
+
+  students.forEach((e) => {
+    const li = document.createElement("li");
+    li.className = "clickable mini";
+
+    const name = e.studentName || e.name || "-";
+    const cls = e.studentClass || e.className || "-";
+    const level = e.level || "?";
+    const score =
+      typeof e.scorePercent === "number"
+        ? e.scorePercent
+        : typeof e.percent === "number"
+        ? e.percent
+        : "?";
+
+    let dateText = "";
+    if (e.createdAt instanceof Date) {
+      dateText = e.createdAt.toLocaleString("sv-SE");
+    } else if (e.createdAt && e.createdAt.toDate) {
+      try {
+        dateText = e.createdAt.toDate().toLocaleString("sv-SE");
+      } catch (_) {}
+    }
+
+    li.textContent = `${name} (${cls}) – ${score}% på nivå ${level}${
+      dateText ? " – " + dateText : ""
+    }`;
+
+    li.addEventListener("click", () => {
+      showStudentProgress(e);
+    });
+
+    listEl.appendChild(li);
+  });
+}
+
+/* =========================
+   3e.4 – Läs elevresultat från Firestore för aktuell bank
+   ========================= */
+
+function refreshElevProgressionFromFirestore(optionalBankId) {
+  if (!firebaseDbInstance) {
+    console.warn("[Elevprogression] Ingen firebaseDbInstance – kan inte ladda resultat.");
+    return;
+  }
+
+  let bankId = optionalBankId || null;
+
+  // Försök använda helper från 3X, annars URL-param
+  if (!bankId && typeof getActiveBankIdForResults === "function") {
+    bankId = getActiveBankIdForResults();
+  }
+  if (!bankId && typeof getQueryParam === "function") {
+    bankId =
+      getQueryParam("sharedBank") ||
+      getQueryParam("sb") ||
+      getQueryParam("bank");
+  }
+
+  if (!bankId) {
+    console.warn("[Elevprogression] Ingen bankId hittades – kan inte ladda resultat.");
+    return;
+  }
+
+  const resultsRef = firebaseDbInstance
+    .collection("sharedBanks")
+    .doc(bankId)
+    .collection("results");
+
+  resultsRef
+    .orderBy("createdAt", "desc")
+    .limit(500)
+    .get()
+    .then((snapshot) => {
+      const entries = [];
+      snapshot.forEach((doc) => {
+        const d = doc.data() || {};
+        entries.push({
+          ...d,
+          createdAt: d.createdAt && d.createdAt.toDate ? d.createdAt.toDate() : null
+        });
+      });
+
+      console.log("[Elevprogression] Läst", entries.length, "elevresultat från Firestore.");
+      updateElevProgressionUI(entries);
+    })
+    .catch((err) => {
+      console.error("[Elevprogression] Fel vid laddning av elevresultat:", err);
+    });
+}
+
+/* =========================
+   3e.5 – Knappar i lärarfliken (Uppdatera elevprogression)
+   ========================= */
+
+function setupElevProgressionUI() {
+  const boxes = ensureElevProgressionBoxes();
+  if (!boxes) return;
+
+  const btn = document.getElementById("btnRefreshProgress");
+  if (!btn) return;
+
+  if (btn.__fvProgressBound) return;
+  btn.__fvProgressBound = true;
+
+  btn.addEventListener("click", function () {
+    try {
+      refreshElevProgressionFromFirestore();
+    } catch (e) {
+      console.error("[Elevprogression] Fel vid uppdatering:", e);
+    }
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  setupElevProgressionUI();
+});
+</script>
+<!-- slut SEKTION 3E: ELEVPROGRESSION – LISTA & DETALJVY -->
+
+
+
+
+
+
+<!-- start SEKTION 3F: TALSYNTHES FÖR FRÅGOR -->
+<script>
+(function () {
+  function speakText(text) {
+    if (!("speechSynthesis" in window)) {
+      alert("Din webbläsare stödjer tyvärr inte talsyntes.");
+      return;
+    }
+
+    // Avbryt eventuell tidigare uppläsning
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "sv-SE";
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function isControlButtonText(txt) {
+    const lower = txt.toLowerCase();
+    return (
+      lower.includes("nästa") ||
+      lower.includes("avbryt") ||
+      lower.includes("tillbaka") ||
+      lower.includes("lämna in") ||
+      lower.includes("starta om") ||
+      lower.includes("öppna lärarläge") ||
+      lower.includes("välj nivå") ||
+      lower.includes("avsluta")
+    );
+  }
+
+  // Bygg upp text att läsa upp från EN specifik frågeruta
+  function buildQuestionTextFromBox(box) {
+    if (!box) return "";
+
+    // 1) Hämta alla svarsalternativ i rutan (men hoppa över talsyntes-knappen)
+    const optionSelector =
+      "button, li, label, .answer-option, .mcq-option, .img-option, .drag-option, .play-option, .option";
+
+    const optionEls = Array.from(box.querySelectorAll(optionSelector));
+    const optionTexts = [];
+    optionEls.forEach((el) => {
+      // Hoppa över talsyntes-knappen
+      if (el.classList && el.classList.contains("tts-speak-btn")) return;
+
+      const txt = (el.innerText || "").trim();
+      if (!txt) return;
+      if (isControlButtonText(txt)) return;
+
+      optionTexts.push(txt);
+    });
+
+    // 2) Hämta alla text-rader i rutan som inte är knappar/alternativ
+    const textEls = Array.from(
+      box.querySelectorAll("h1,h2,h3,h4,p,div,span")
+    ).filter((el) => {
+      if (el.closest("button")) return false;
+      if (el.classList && el.classList.contains("tts-speak-btn")) return false;
+      return true;
+    });
+
+    const lines = [];
+    textEls.forEach((el) => {
+      const raw = (el.innerText || "");
+      raw.split("\n").forEach((r) => {
+        const line = r.trim();
+        if (!line) return;
+        if (optionTexts.includes(line)) return;
+        if (isControlButtonText(line)) return;
+        lines.push({ text: line, el: el });
+      });
+    });
+
+    if (!lines.length) return "";
+
+    // 3) Försök hitta "Fråga 1 (E)"-rad som header
+    let headerIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^fråga\s*\d+/i.test(lines[i].text)) {
+        headerIndex = i;
+        break;
+      }
+    }
+
+    // 4) Försök hitta första rad med frågetecken som själva frågan
+    let questionIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].text.includes("?")) {
+        questionIndex = i;
+        break;
+      }
+    }
+
+    // Fallback: om ingen "?" hittas, ta första raden som inte är själva "Fråga X"
+    if (questionIndex === -1) {
+      for (let i = 0; i < lines.length; i++) {
+        if (i === headerIndex) continue;
+        questionIndex = i;
+        break;
+      }
+    }
+
+    const parts = [];
+
+    if (questionIndex !== -1) {
+      parts.push("Fråga:");
+      // Lägg gärna med "Fråga 1 (E)" om den står före frågan
+      if (headerIndex !== -1 && headerIndex < questionIndex) {
+        parts.push(lines[headerIndex].text);
+      }
+      parts.push(lines[questionIndex].text);
+    }
+
+    if (optionTexts.length) {
+      parts.push("Svarsalternativ:");
+      optionTexts.forEach((t, idx) => {
+        parts.push("Alternativ " + (idx + 1) + ": " + t);
+      });
+    }
+
+    return parts.join(". ");
+  }
+
+  // Sätt in en 🔊-knapp i varje frågeruta (UNDER alternativen)
+  function attachSpeakButtonsToAllQuestions() {
+    const play = document.getElementById("play");
+    if (!play) return;
+
+    const textNodes = Array.from(
+      play.querySelectorAll("h1,h2,h3,h4,p,div,span")
+    );
+
+    textNodes.forEach((node) => {
+      const txt = (node.innerText || "").trim();
+      if (!txt) return;
+
+      const lower = txt.toLowerCase();
+      if (!/^fråga\s*\d/.test(lower)) return; // bara "Fråga 1", "Fråga 2" osv
+
+      // Försök hitta en vettig "frågeruta" runt texten
+      let box =
+        node.closest(".question-card, .play-question-card, .inner-question, .card, li") ||
+        node.parentElement ||
+        node;
+
+      if (!box) return;
+
+      // Undvik dubbla knappar i samma ruta
+      if (box.dataset.ttsAttached === "1") return;
+      box.dataset.ttsAttached = "1";
+
+      // Skapa knapp
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-sm tts-speak-btn";
+      btn.textContent = "🔊 Läs upp frågan";
+      btn.style.marginTop = "6px";
+
+      btn.addEventListener("click", function () {
+        try {
+          const text = buildQuestionTextFromBox(box);
+          if (!text) {
+            alert("Hittar ingen fråga att läsa upp i denna ruta.");
+            return;
+          }
+          speakText(text);
+        } catch (e) {
+          console.error("Fel vid talsyntes:", e);
+        }
+      });
+
+      // Lägg knappen LÄNGST NER i rutan (under alternativen)
+      box.appendChild(btn);
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    // Ta bort ev. gammal global knapp överst (btnSpeakQuestion)
+    const globalBtn = document.getElementById("btnSpeakQuestion");
+    if (globalBtn && globalBtn.parentNode) {
+      globalBtn.parentNode.removeChild(globalBtn);
+    }
+
+    attachSpeakButtonsToAllQuestions();
+
+    // Om spelet ritar om frågorna (t.ex. ny nivå), försök igen
+    if ("MutationObserver" in window) {
+      const play = document.getElementById("play");
+      if (play) {
+        const obs = new MutationObserver(function () {
+          attachSpeakButtonsToAllQuestions();
+        });
+        obs.observe(play, { childList: true, subtree: true });
+      }
+    }
+  });
+})();
+</script>
+<!-- slut SEKTION 3F: TALSYNTHES FÖR FRÅGOR -->
+
+
+
 
 
 
