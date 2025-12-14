@@ -4008,57 +4008,66 @@ window.addEventListener("load", repositionOptionCheckboxes);
 <!-- slut SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK (FIX: ?bank=ID + AUTOLOAD bank/sharedBank/sb) -->
 
 
-
-<!-- start SEKTION 3X: ELEVPROGRESSION (NY DESIGN + DELETE-BREDVID VARJE ELEV) -->
+<!-- start SEKTION 3X: AUTO-KOPPLA ELEVRESULTAT TILL AKTIV ELEV-LÄNK (INGEN GISSNING) -->
 <script>
 (function () {
   "use strict";
 
-  // ====== VERSION: 3X v9 (fix: delete-knapp bredvid varje elev, hårda inline-stilar) ======
-  if (window.__fvProgV9Init) return;
-  window.__fvProgV9Init = true;
+  /* =========================================================
+     INSTRUKTION:
+     - BYT UT hela din nuvarande SEKTION 3X mot denna.
+     - Resultat/progression kopplas automatiskt till rätt sharedBank-id via:
+       1) URL (?bank=ID / ?sharedBank=ID / ?sb=ID)
+       2) senast publicerad elevlänk (sparas lokalt)
+       3) fallback: senaste sharedBanks skapad av inloggad lärare (ownerUid)
+     ========================================================= */
 
-  const RESULTS_COLLECTION_NAME = "results";
+  if (window.__fvAutoLink3X) return;
+  window.__fvAutoLink3X = true;
 
-  function fvEnsureStyles() {
-    if (document.getElementById("fvProgV9Styles")) return;
-    const st = document.createElement("style");
-    st.id = "fvProgV9Styles";
-    st.textContent = `
-      #fvStudentList{ padding-left:0; margin:0; }
-      #fvStudentList li{ list-style:none; }
-      .fv-del{
-        display:inline-flex !important;
-        align-items:center !important;
-        justify-content:center !important;
-        min-width:44px !important;
-        padding:8px 10px !important;
-        border-radius:10px !important;
-        border:1px solid var(--border,#1f2937) !important;
-        background: transparent !important;
-        color: var(--text,#e5e7eb) !important;
-        cursor:pointer !important;
-      }
-      .fv-del:hover{ filter:brightness(1.1); }
-      .fv-del:active{ transform: translateY(1px); }
-    `;
-    document.head.appendChild(st);
+  const STORAGE_KEY = "fangvaktaren-v17";
+
+  function fvSafeParse(json) {
+    try { return JSON.parse(json); } catch (_) { return null; }
   }
 
-  function fvGetState() {
-    try { if (typeof loadState === "function") return loadState(); } catch (_) {}
-    try { const raw = localStorage.getItem("fangvaktaren-v17"); return raw ? JSON.parse(raw) : {}; } catch (_) {}
+  function fvReadStateSafe() {
+    try {
+      if (typeof loadState === "function") return loadState();
+    } catch (_) {}
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return fvSafeParse(raw) || {};
+    } catch (_) {}
     return {};
   }
-  function fvSaveState(s) {
-    try { if (typeof saveState === "function") return saveState(s); } catch (_) {}
-    try { localStorage.setItem("fangvaktaren-v17", JSON.stringify(s || {})); } catch (_) {}
+
+  function fvWriteStateSafe(s) {
+    try {
+      if (typeof saveState === "function") return saveState(s);
+    } catch (_) {}
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    } catch (_) {}
   }
 
-  function fvGetQueryParamSafe(key) {
-    try { if (typeof getQueryParam === "function") return getQueryParam(key); } catch (_) {}
-    try { return new URL(window.location.href).searchParams.get(key); } catch (_) {}
+  function fvGetQueryParam(key) {
+    try {
+      if (typeof getQueryParam === "function") return getQueryParam(key);
+    } catch (_) {}
+    try {
+      return new URL(window.location.href).searchParams.get(key);
+    } catch (_) {}
     return null;
+  }
+
+  function fvResolveSharedIdFromUrl() {
+    return (
+      fvGetQueryParam("bank") ||
+      fvGetQueryParam("sharedBank") ||
+      fvGetQueryParam("sb") ||
+      null
+    );
   }
 
   function fvGetDb() {
@@ -4068,731 +4077,305 @@ window.addEventListener("load", repositionOptionCheckboxes);
     return null;
   }
 
-  function fvToDate(v) {
-    try { if (v && typeof v.toDate === "function") return v.toDate(); } catch (_) {}
-    return v instanceof Date ? v : null;
-  }
-  function fvFmtDate(d) {
-    try { if (d instanceof Date) return d.toLocaleString("sv-SE"); } catch (_) {}
-    return "";
-  }
-  function fvPickScore(d) {
-    if (typeof d.scorePercent === "number") return d.scorePercent;
-    if (typeof d.percent === "number") return d.percent;
-    if (typeof d.score === "number") return d.score;
+  function fvGetAuth() {
+    try { if (typeof firebaseAuthInstance !== "undefined" && firebaseAuthInstance) return firebaseAuthInstance; } catch (_) {}
+    try { if (window.firebaseAuthInstance) return window.firebaseAuthInstance; } catch (_) {}
     return null;
   }
-  function fvNormalizeEntry(docId, d) {
-    return {
-      id: docId,
-      studentName: d.studentName || d.name || "",
-      studentClass: d.studentClass || d.class || d.className || "",
-      level: d.level || d.levelId || d.levelName || null,
-      score: fvPickScore(d),
-      correct: typeof d.correct === "number" ? d.correct : null,
-      total: typeof d.total === "number" ? d.total : null,
-      totalPoints: typeof d.totalPoints === "number" ? d.totalPoints : null,
-      bestE: d.bestE != null ? d.bestE : null,
-      bestC: d.bestC != null ? d.bestC : null,
-      bestA: d.bestA != null ? d.bestA : null,
-      strongGoals: Array.isArray(d.strongGoals) ? d.strongGoals : [],
-      weakGoals: Array.isArray(d.weakGoals) ? d.weakGoals : [],
-      goalPassThreshold: typeof d.goalPassThreshold === "number" ? d.goalPassThreshold : null,
-      createdAt: fvToDate(d.createdAt)
-    };
+
+  function fvSetActiveSharedBankId(sharedId, sourceLabel) {
+    const id = (sharedId || "").trim();
+    if (!id) return;
+
+    window.activeSharedBankId = id;
+
+    const s = fvReadStateSafe();
+    s.linkedSharedBankId = id;
+    s.activeSharedBankId = id;
+    s.lastPublishedSharedId = s.lastPublishedSharedId || id; // if missing
+    s.lastLinkedSharedSource = sourceLabel || s.lastLinkedSharedSource || "";
+    fvWriteStateSafe(s);
+
+    fvUpdateProgressionLinkUI(id, sourceLabel || "");
   }
 
-  function fvKey(e) {
-    return (e.studentName || "").trim().toLowerCase() + "|||" + (e.studentClass || "").trim().toLowerCase();
+  function fvResolveSharedBankIdSync() {
+    // 1) URL alltid högst prio
+    const urlId = fvResolveSharedIdFromUrl();
+    if (urlId) return urlId;
+
+    // 2) window
+    if (window.activeSharedBankId) return window.activeSharedBankId;
+
+    // 3) state
+    const s = fvReadStateSafe();
+    if (s.linkedSharedBankId) return s.linkedSharedBankId;
+    if (s.activeSharedBankId) return s.activeSharedBankId;
+    if (s.bankMeta && s.bankMeta.sharedBankId) return s.bankMeta.sharedBankId;
+    if (s.lastPublishedSharedId) return s.lastPublishedSharedId;
+
+    return null;
   }
 
-  function fvGetLinkedSharedBankId() {
-    try { if (window.activeSharedBankId) return window.activeSharedBankId; } catch (_) {}
-    const fromUrl =
-      fvGetQueryParamSafe("bank") ||
-      fvGetQueryParamSafe("sharedBank") ||
-      fvGetQueryParamSafe("sb");
-    if (fromUrl) return fromUrl;
-    const s = fvGetState();
-    if (s && s.linkedSharedBankId) return s.linkedSharedBankId;
-    return "";
-  }
+  async function fvResolveSharedBankIdAsyncFallback() {
+    // fallback: senaste sharedBanks för inloggad lärare
+    const db = fvGetDb();
+    const auth = fvGetAuth();
+    if (!db || !auth || !auth.currentUser) return null;
 
-  function fvSetLinkedSharedBankId(id) {
-    const clean = (id || "").trim();
-    try { window.activeSharedBankId = clean; } catch (_) {}
-    const s = fvGetState();
-    s.linkedSharedBankId = clean;
-    fvSaveState(s);
+    const uid = auth.currentUser.uid;
+    try {
+      const snap = await db
+        .collection("sharedBanks")
+        .where("ownerUid", "==", uid)
+        .orderBy("createdAt", "desc")
+        .limit(1)
+        .get();
 
-    const inp = document.getElementById("fvLinkedSharedBankId");
-    if (inp) inp.value = clean;
+      if (snap.empty) return null;
 
-    const st = document.getElementById("fvLinkStatus");
-    if (st) st.textContent = clean ? ("Kopplad till sharedBank-id: " + clean) : "Ingen sharedBank kopplad ännu.";
-  }
-
-  function fvFindProgressHost() {
-    return (
-      document.querySelector('.tab-panel[data-panel="progress"]') ||
-      document.querySelector('.tab-panel[data-panel="elevprogression"]') ||
-      document.querySelector("#teacherModal .modal-body") ||
-      document.getElementById("teacherModal") ||
-      document.body
-    );
-  }
-
-  function fvRemoveDuplicateLinkBoxesByTitle() {
-    const titles = Array.from(document.querySelectorAll("h4"))
-      .filter((h) => (h.textContent || "").trim() === "Koppla elevresultat (sharedBank-id)");
-    if (titles.length <= 1) return;
-    for (let i = titles.length - 1; i >= 1; i--) {
-      const box = titles[i].closest(".progress-box") || titles[i].parentElement;
-      if (box && box.parentNode) box.parentNode.removeChild(box);
+      const doc = snap.docs[0];
+      return doc && doc.id ? doc.id : null;
+    } catch (e) {
+      console.warn("[3X] fallback-query sharedBanks misslyckades:", e);
+      return null;
     }
   }
 
-  function fvCleanupOldProgressStuff() {
-    const killIds = [
-      "progressStudentListBox","progressStudentPointsBox","progressStrongGoalsBox","progressWeakGoalsBox",
-      "teacherStudentList","progressStudentDetail","teacherHighscoreList","progressHighscoreBox","progressStudentsBox",
-      "fvProgRoot","fvBoxLink","fvBoxStudents","fvBoxHighscore","fvBoxStrong","fvBoxWeak","fvBoxExport",
-      "fvLinkedSharedBankId","fvBtnLinkBank","fvBtnClearBank","fvBtnRefresh","fvLinkStatus",
-      "fvStudentList","fvStudentDetail","fvHighscoreList","fvStrongList","fvWeakList","fvBtnExport","fvExportOutput",
-      "fvBtnDeleteSelected","fvSelectedActions"
-    ];
-    killIds.forEach((id) => {
-      const el = document.getElementById(id);
-      if (el && el.parentNode) el.parentNode.removeChild(el);
-    });
-    Array.from(document.querySelectorAll(".progress-grid")).forEach((g) => {
-      if (g && g.parentNode) g.parentNode.removeChild(g);
-    });
-    fvRemoveDuplicateLinkBoxesByTitle();
+  async function fvEnsureActiveSharedBankId() {
+    // Sync först
+    const syncId = fvResolveSharedBankIdSync();
+    if (syncId) {
+      fvSetActiveSharedBankId(syncId, syncId === fvResolveSharedIdFromUrl() ? "URL" : "Sparad koppling");
+      return syncId;
+    }
+
+    // Async fallback
+    const fb = await fvResolveSharedBankIdAsyncFallback();
+    if (fb) {
+      fvSetActiveSharedBankId(fb, "Senaste publicerade (konto)");
+      return fb;
+    }
+
+    fvUpdateProgressionLinkUI("", "Ingen koppling");
+    return null;
   }
 
-  function fvEnsureRoot() {
-    const host = fvFindProgressHost();
-    if (!host) return null;
-    let root = document.getElementById("fvProgRoot");
-    if (root) return root;
-    root = document.createElement("div");
-    root.id = "fvProgRoot";
-    root.className = "progress-grid";
-    try { host.prepend(root); } catch (_) { host.appendChild(root); }
-    return root;
-  }
+  function fvEnsureStatusBox() {
+    const panel =
+      document.querySelector('.tab-panel[data-panel="progress"]') ||
+      document.getElementById("teacherModal") ||
+      document.body;
 
-  function fvBox(titleText, id) {
-    const root = fvEnsureRoot();
-    if (!root) return null;
-    let box = document.getElementById(id);
+    let box = document.getElementById("fvProgressBankLinkBox");
     if (box) return box;
+
     box = document.createElement("div");
-    box.id = id;
+    box.id = "fvProgressBankLinkBox";
     box.className = "progress-box";
+
     const h = document.createElement("h4");
-    h.textContent = titleText;
+    h.textContent = "Koppla elevresultat (sharedBank-id)";
+
+    const p = document.createElement("div");
+    p.id = "fvProgressBankLinkStatus";
+    p.className = "mini";
+    p.style.whiteSpace = "pre-line";
+    p.textContent = "Letar efter aktiv elevlänk...";
+
+    const input = document.createElement("input");
+    input.id = "fvProgressBankLinkInput";
+    input.className = "input";
+    input.placeholder = "sharedBank-id (autofylls)";
+
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.gap = "8px";
+    row.style.marginTop = "8px";
+
+    const btnUse = document.createElement("button");
+    btnUse.id = "fvBtnUseBankId";
+    btnUse.className = "btn btn-sm";
+    btnUse.textContent = "Använd detta ID";
+
+    const btnRefresh = document.createElement("button");
+    btnRefresh.id = "fvBtnRefreshProgression";
+    btnRefresh.className = "btn btn-sm btn-primary";
+    btnRefresh.textContent = "Uppdatera elevprogression";
+
+    row.appendChild(btnUse);
+    row.appendChild(btnRefresh);
+
     box.appendChild(h);
-    root.appendChild(box);
+    box.appendChild(p);
+    box.appendChild(input);
+    box.appendChild(row);
+
+    // Lägg boxen överst i progressionsfliken om grid finns, annars i panelen
+    const grid = document.querySelector(".progress-grid");
+    if (grid && grid.parentNode) {
+      grid.parentNode.insertBefore(box, grid);
+    } else {
+      panel.appendChild(box);
+    }
+
+    // actions
+    btnUse.addEventListener("click", function () {
+      const val = (input.value || "").trim();
+      if (!val) return;
+      fvSetActiveSharedBankId(val, "Manuellt");
+    });
+
+    btnRefresh.addEventListener("click", async function () {
+      const id = await fvEnsureActiveSharedBankId();
+      if (!id) {
+        alert("Hittar ingen sharedBank-id. Öppna elevlänken eller publicera en elevlänk först.");
+        return;
+      }
+      try {
+        // Kör befintlig refresh om den finns
+        if (typeof window.__fvOrigRefreshElevProgression === "function") {
+          window.__fvOrigRefreshElevProgression(id);
+        } else if (typeof refreshElevProgressionFromFirestore === "function") {
+          refreshElevProgressionFromFirestore(id);
+        }
+      } catch (e) {
+        console.error("[3X] Fel vid uppdatering:", e);
+      }
+    });
+
     return box;
   }
 
-  function fvBuildUI() {
-    fvEnsureStyles();
-    fvCleanupOldProgressStuff();
+  function fvUpdateProgressionLinkUI(sharedId, sourceLabel) {
+    const box = document.getElementById("fvProgressBankLinkBox") || fvEnsureStatusBox();
+    if (!box) return;
 
-    const linkBox = fvBox("Koppla elevresultat (sharedBank-id)", "fvBoxLink");
-    if (linkBox) {
-      const row = document.createElement("div");
-      row.style.display = "flex";
-      row.style.gap = "8px";
-      row.style.alignItems = "center";
-      row.style.flexWrap = "wrap";
+    const status = document.getElementById("fvProgressBankLinkStatus");
+    const input = document.getElementById("fvProgressBankLinkInput");
 
-      const inp = document.createElement("input");
-      inp.id = "fvLinkedSharedBankId";
-      inp.className = "input";
-      inp.placeholder = "Klistra in sharedBank-id (t.ex. från ?bank=ID)";
-      inp.style.flex = "1";
-      inp.autocomplete = "off";
+    const id = (sharedId || "").trim();
 
-      const btnLink = document.createElement("button");
-      btnLink.id = "fvBtnLinkBank";
-      btnLink.type = "button";
-      btnLink.className = "btn btn-sm btn-primary";
-      btnLink.textContent = "Koppla";
+    if (input) input.value = id;
 
-      const btnClear = document.createElement("button");
-      btnClear.id = "fvBtnClearBank";
-      btnClear.type = "button";
-      btnClear.className = "btn btn-sm";
-      btnClear.textContent = "Rensa";
-
-      const btnRefresh = document.createElement("button");
-      btnRefresh.id = "fvBtnRefresh";
-      btnRefresh.type = "button";
-      btnRefresh.className = "btn btn-sm";
-      btnRefresh.textContent = "Uppdatera";
-
-      row.appendChild(inp);
-      row.appendChild(btnLink);
-      row.appendChild(btnClear);
-      row.appendChild(btnRefresh);
-
-      const st = document.createElement("div");
-      st.id = "fvLinkStatus";
-      st.className = "mini";
-      st.style.marginTop = "8px";
-      st.textContent = "Ingen sharedBank kopplad ännu.";
-
-      linkBox.appendChild(row);
-      linkBox.appendChild(st);
-    }
-
-    const studentsBox = fvBox("Elever (senaste inlämning per elev)", "fvBoxStudents");
-    if (studentsBox) {
-      const list = document.createElement("ul");
-      list.id = "fvStudentList";
-      list.className = "goals-list mini";
-
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar inlästa ännu. Koppla sharedBank-id och klicka Uppdatera.";
-      list.appendChild(li);
-
-      const detail = document.createElement("div");
-      detail.id = "fvStudentDetail";
-      detail.className = "mini";
-      detail.style.marginTop = "8px";
-      detail.style.whiteSpace = "pre-line";
-      detail.textContent = "Välj en elev för att se detaljer.";
-
-      const actions = document.createElement("div");
-      actions.id = "fvSelectedActions";
-      actions.style.display = "flex";
-      actions.style.gap = "8px";
-      actions.style.flexWrap = "wrap";
-      actions.style.marginTop = "8px";
-
-      const btnDelSelected = document.createElement("button");
-      btnDelSelected.id = "fvBtnDeleteSelected";
-      btnDelSelected.type = "button";
-      btnDelSelected.className = "btn btn-sm btn-danger";
-      btnDelSelected.textContent = "Ta bort vald inlämning";
-
-      actions.appendChild(btnDelSelected);
-
-      studentsBox.appendChild(list);
-      studentsBox.appendChild(detail);
-      studentsBox.appendChild(actions);
-    }
-
-    const hsBox = fvBox("Highscore (sparat i molnet)", "fvBoxHighscore");
-    if (hsBox) {
-      const list = document.createElement("ul");
-      list.id = "fvHighscoreList";
-      list.className = "goals-list mini";
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar inlästa ännu.";
-      list.appendChild(li);
-      hsBox.appendChild(list);
-    }
-
-    const strongBox = fvBox("Starka delbitar", "fvBoxStrong");
-    if (strongBox) {
-      const list = document.createElement("ul");
-      list.id = "fvStrongList";
-      list.className = "goals-list mini";
-      const li = document.createElement("li");
-      li.textContent = "Välj en elev för att se starka delbitar.";
-      list.appendChild(li);
-      strongBox.appendChild(list);
-    }
-
-    const weakBox = fvBox("Delbitar att öva på", "fvBoxWeak");
-    if (weakBox) {
-      const list = document.createElement("ul");
-      list.id = "fvWeakList";
-      list.className = "goals-list mini";
-      const li = document.createElement("li");
-      li.textContent = "Välj en elev för att se delbitar att öva på.";
-      list.appendChild(li);
-      weakBox.appendChild(list);
-    }
-
-    const expBox = fvBox("Export till elevkort (JSON)", "fvBoxExport");
-    if (expBox) {
-      const btn = document.createElement("button");
-      btn.id = "fvBtnExport";
-      btn.type = "button";
-      btn.className = "btn btn-sm btn-primary";
-      btn.textContent = "Skapa JSON för vald elev";
-
-      const out = document.createElement("textarea");
-      out.id = "fvExportOutput";
-      out.className = "input";
-      out.rows = 10;
-      out.placeholder = "JSON hamnar här...";
-      out.style.marginTop = "8px";
-      out.style.width = "100%";
-      out.spellcheck = false;
-
-      expBox.appendChild(btn);
-      expBox.appendChild(out);
-    }
-
-    fvRemoveDuplicateLinkBoxesByTitle();
-    fvSetLinkedSharedBankId(fvGetLinkedSharedBankId());
-  }
-
-  let fvAllEntries = [];
-  let fvLatestByStudent = [];
-  let fvHighscore = [];
-  let fvSelected = null;
-  let fvSelectedDocId = null;
-
-  function fvComputeLatest(entries) {
-    const map = new Map();
-    entries.forEach((e) => {
-      const k = fvKey(e);
-      const prev = map.get(k);
-      if (!prev) { map.set(k, e); return; }
-      const a = prev.createdAt instanceof Date ? prev.createdAt : null;
-      const b = e.createdAt instanceof Date ? e.createdAt : null;
-      if (!a && b) map.set(k, e);
-      else if (a && b && b > a) map.set(k, e);
-    });
-    return Array.from(map.values()).sort((a, b) => {
-      const an = (a.studentClass || "") + " " + (a.studentName || "");
-      const bn = (b.studentClass || "") + " " + (b.studentName || "");
-      return an.localeCompare(bn, "sv-SE");
-    });
-  }
-
-  function fvComputeHighscore(entries) {
-    const best = new Map();
-    entries.forEach((e) => {
-      const k = fvKey(e);
-      const prev = best.get(k);
-      const score = typeof e.score === "number" ? e.score : -1;
-      if (!prev) { best.set(k, e); return; }
-      const prevScore = typeof prev.score === "number" ? prev.score : -1;
-      if (score > prevScore) { best.set(k, e); return; }
-      if (score === prevScore) {
-        const a = prev.createdAt instanceof Date ? prev.createdAt : null;
-        const b = e.createdAt instanceof Date ? e.createdAt : null;
-        if (!a && b) best.set(k, e);
-        else if (a && b && b > a) best.set(k, e);
+    if (status) {
+      if (!id) {
+        status.textContent =
+          "Ingen kopplad elevlänk hittades.\n" +
+          "Tips: Öppna elevlänken (…?bank=ID) eller klicka Publicera → då sparas kopplingen automatiskt.";
+      } else {
+        status.textContent =
+          "Aktiv elevlänk (sharedBank-id): " + id +
+          (sourceLabel ? "\nKälla: " + sourceLabel : "");
       }
-    });
-    return Array.from(best.values()).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 50);
-  }
-
-  function fvSetStatus(msg) {
-    const st = document.getElementById("fvLinkStatus");
-    if (st) st.textContent = msg;
-  }
-
-  async function fvFetchEntries(bankId) {
-    const db = fvGetDb();
-    if (!db) throw new Error("No DB");
-    const snap = await db
-      .collection("sharedBanks")
-      .doc(bankId)
-      .collection(RESULTS_COLLECTION_NAME)
-      .orderBy("createdAt", "desc")
-      .limit(2000)
-      .get();
-
-    const entries = [];
-    snap.forEach((doc) => entries.push(fvNormalizeEntry(doc.id, doc.data() || {})));
-    return entries;
-  }
-
-  async function fvDeleteDoc(bankId, docId) {
-    const db = fvGetDb();
-    if (!db) throw new Error("No DB");
-    await db
-      .collection("sharedBanks")
-      .doc(bankId)
-      .collection(RESULTS_COLLECTION_NAME)
-      .doc(docId)
-      .delete();
-  }
-
-  async function fvDeleteAllForStudent(bankId, studentName, studentClass) {
-    const db = fvGetDb();
-    if (!db) throw new Error("No DB");
-
-    const nameKey = (studentName || "").trim().toLowerCase();
-    const classKey = (studentClass || "").trim().toLowerCase();
-
-    const entries = await fvFetchEntries(bankId);
-    const toDelete = entries
-      .filter((e) => (e.studentName || "").trim().toLowerCase() === nameKey && (e.studentClass || "").trim().toLowerCase() === classKey)
-      .map((e) => e.id)
-      .filter(Boolean);
-
-    for (const id of toDelete) {
-      await fvDeleteDoc(bankId, id);
     }
   }
 
-  function fvRenderStrongWeak(entry) {
-    const strongList = document.getElementById("fvStrongList");
-    const weakList = document.getElementById("fvWeakList");
-    if (!strongList || !weakList) return;
+  // =========================================================
+  // Patcha publishCurrentBankAsShared så vi alltid sparar ID
+  // =========================================================
+  function fvTryWrapPublish() {
+    const fn = window.publishCurrentBankAsShared;
+    if (!fn || fn.__fvWrapped) return;
 
-    strongList.innerHTML = "";
-    weakList.innerHTML = "";
+    const wrapped = async function () {
+      const before = fvReadStateSafe();
+      const beforeId = before.lastPublishedSharedId || before.linkedSharedBankId || null;
 
-    if (!entry) {
-      const li1 = document.createElement("li");
-      li1.textContent = "Välj en elev för att se starka delbitar.";
-      strongList.appendChild(li1);
+      const res = await fn.apply(this, arguments);
 
-      const li2 = document.createElement("li");
-      li2.textContent = "Välj en elev för att se delbitar att öva på.";
-      weakList.appendChild(li2);
-      return;
-    }
+      // Försök läsa ID ur outputfältet eller URL (om man publicerar och direkt får länk)
+      let id =
+        fvResolveSharedIdFromUrl() ||
+        (function () {
+          const out = document.getElementById("sharedBankLinkOutput");
+          const v = out ? (out.value || "").trim() : "";
+          const m = v.match(/[?&](bank|sharedBank|sb)=([^&#]+)/i);
+          return m ? decodeURIComponent(m[2]) : null;
+        })();
 
-    const strong = Array.isArray(entry.strongGoals) ? entry.strongGoals : [];
-    const weak = Array.isArray(entry.weakGoals) ? entry.weakGoals : [];
+      if (!id) {
+        const after = fvReadStateSafe();
+        id = after.lastPublishedSharedId || after.linkedSharedBankId || null;
+      }
 
-    if (!strong.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga starka delbitar sparade i detta resultat (kan vara äldre inlämning utan delbitar).";
-      strongList.appendChild(li);
-    } else {
-      strong.slice(0, 60).forEach((g) => {
-        const li = document.createElement("li");
-        li.textContent = `${g.goal || "(okänt delmål)"}${g.parts ? " – " + g.parts : ""} (${typeof g.percent === "number" ? g.percent : "?"}% rätt)`;
-        strongList.appendChild(li);
-      });
-    }
-
-    if (!weak.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga svaga delbitar sparade i detta resultat.";
-      weakList.appendChild(li);
-    } else {
-      weak.slice(0, 60).forEach((g) => {
-        const li = document.createElement("li");
-        li.textContent = `${g.goal || "(okänt delmål)"}${g.parts ? " – " + g.parts : ""} (${typeof g.percent === "number" ? g.percent : "?"}% rätt)`;
-        weakList.appendChild(li);
-      });
-    }
-  }
-
-  function fvRenderSelected() {
-    const detail = document.getElementById("fvStudentDetail");
-    if (!detail) return;
-
-    if (!fvSelected) {
-      detail.textContent = "Välj en elev för att se detaljer.";
-      fvSelectedDocId = null;
-      fvRenderStrongWeak(null);
-      return;
-    }
-
-    const e = fvSelected;
-    fvSelectedDocId = e.id || null;
-
-    const lines = [];
-    lines.push(`Elev: ${e.studentName || "-"} (${e.studentClass || "-"})`);
-    lines.push(`Senaste resultat: ${typeof e.score === "number" ? Math.round(e.score) : "?"}% på nivå ${e.level || "?"}`);
-    if (e.correct != null && e.total != null) lines.push(`Rätt: ${e.correct} av ${e.total}`);
-    if (e.totalPoints != null) lines.push(`Total poäng: ${e.totalPoints}`);
-    if (e.goalPassThreshold !=null) lines.push(`Gräns godkänd delbit: ${e.goalPassThreshold}% rätt`);
-    if (e.createdAt instanceof Date) lines.push(`Inlämnad: ${fvFmtDate(e.createdAt)}`);
-    if (fvSelectedDocId) lines.push(`Resultat-id: ${fvSelectedDocId}`);
-
-    detail.textContent = lines.join("\n");
-    fvRenderStrongWeak(e);
-  }
-
-  // ====== HÄR: elevlistan med delete-knapp BREDVID varje elev ======
-  function fvRenderStudents() {
-    const list = document.getElementById("fvStudentList");
-    const detail = document.getElementById("fvStudentDetail");
-    if (!list || !detail) return;
-
-    list.innerHTML = "";
-
-    if (!fvLatestByStudent.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu (för denna sharedBank).";
-      list.appendChild(li);
-      detail.textContent = "Välj en elev för att se detaljer.";
-      return;
-    }
-
-    fvLatestByStudent.forEach((e) => {
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.style.marginBottom = "8px";
-
-      // ROW med hårda inline-stilar så delete alltid hamnar bredvid
-      const row = document.createElement("div");
-      row.style.display = "flex";
-      row.style.gap = "8px";
-      row.style.alignItems = "stretch";
-      row.style.width = "100%";
-
-      // VÄLJ elev (knapp)
-      const pick = document.createElement("button");
-      pick.type = "button";
-      pick.className = "btn btn-sm btn-primary";
-      pick.style.flex = "1 1 auto";
-      pick.style.width = "auto";
-      pick.style.textAlign = "left";
-      pick.style.whiteSpace = "normal";
-
-      pick.textContent =
-        `${e.studentName || "-"} (${e.studentClass || "-"}) – ` +
-        `${typeof e.score === "number" ? Math.round(e.score) : "?"}% på nivå ${e.level || "?"}` +
-        `${e.createdAt instanceof Date ? " – " + fvFmtDate(e.createdAt) : ""}`;
-
-      pick.addEventListener("click", () => {
-        fvSelected = e;
-        fvRenderSelected();
-      });
-
-      // DELETE elev (knapp bredvid)
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "fv-del";
-      del.textContent = "🗑️";
-      del.title = "Ta bort ALLA inlämningar för denna elev (namn + klass)";
-      del.setAttribute("aria-label", "Ta bort elevens inlämningar");
-      del.style.flex = "0 0 auto";
-      del.style.width = "44px";
-
-      del.addEventListener("click", async () => {
-        try {
-          const bankId = fvGetLinkedSharedBankId();
-          if (!bankId) { alert("Ingen sharedBank kopplad."); return; }
-
-          const name = e.studentName || "-";
-          const cls = e.studentClass || "-";
-          const msg = `Ta bort ALLA inlämningar för:\n${name} (${cls})\n\nDetta kan inte ångras.`;
-          if (!confirm(msg)) return;
-
-          await fvDeleteAllForStudent(bankId, e.studentName, e.studentClass);
-          await fvRefreshFromFirestore();
-        } catch (err) {
-          console.error("[3X] Delete elev fel:", err);
-          alert("Kunde inte ta bort elevens inlämningar. Se konsolen.");
+      if (id && id !== beforeId) {
+        const s = fvReadStateSafe();
+        s.lastPublishedSharedId = id;
+        s.linkedSharedBankId = id;
+        s.activeSharedBankId = id;
+        if (s.bankMeta && typeof s.bankMeta === "object") {
+          s.bankMeta.sharedBankId = id;
+        } else {
+          s.bankMeta = { sharedBankId: id };
         }
-      });
-
-      row.appendChild(pick);
-      row.appendChild(del);
-      li.appendChild(row);
-      list.appendChild(li);
-    });
-
-    detail.textContent = "Välj en elev för att se detaljer. 🗑️ tar bort ALLA elevens inlämningar i denna bank.";
-  }
-
-  function fvRenderHighscore() {
-    const list = document.getElementById("fvHighscoreList");
-    if (!list) return;
-
-    list.innerHTML = "";
-    if (!fvHighscore.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu.";
-      list.appendChild(li);
-      return;
-    }
-
-    fvHighscore.slice(0, 20).forEach((e, i) => {
-      const li = document.createElement("li");
-      li.textContent =
-        `${i + 1}. ${e.studentName || "-"} (${e.studentClass || "-"}) – ` +
-        `${typeof e.score === "number" ? Math.round(e.score) : "?"}% på nivå ${e.level || "?"}` +
-        `${e.createdAt instanceof Date ? " – " + fvFmtDate(e.createdAt) : ""}`;
-      list.appendChild(li);
-    });
-  }
-
-  async function fvRefreshFromFirestore() {
-    const db = fvGetDb();
-    if (!db) {
-      fvSetStatus("Firebase är inte redo ännu (ingen db-instans). Öppna lärarläget och försök igen.");
-      return;
-    }
-
-    const bankId = (document.getElementById("fvLinkedSharedBankId")?.value || "").trim() || fvGetLinkedSharedBankId();
-    if (!bankId) {
-      fvSetStatus("Hittar ingen sharedBank-id. Klistra in ID och klicka Koppla.");
-      return;
-    }
-
-    fvSetLinkedSharedBankId(bankId);
-    fvSetStatus("Laddar elevresultat från sharedBank-id: " + bankId + " ...");
-
-    try {
-      const entries = await fvFetchEntries(bankId);
-
-      fvAllEntries = entries;
-      fvLatestByStudent = fvComputeLatest(entries);
-      fvHighscore = fvComputeHighscore(entries);
-
-      fvSelected = null;
-      fvSelectedDocId = null;
-
-      fvRenderStudents();
-      fvRenderHighscore();
-      fvRenderSelected();
-
-      fvSetStatus("Klart. Inlästa inlämningar: " + entries.length);
-    } catch (err) {
-      console.error("[3X] Fel vid laddning av elevresultat:", err);
-      fvSetStatus("Fel vid laddning av elevresultat. Se konsolen.");
-    }
-  }
-
-  function fvBuildExportJson(entry) {
-    const bankId = fvGetLinkedSharedBankId() || "";
-    return {
-      source: "Fångvaktaren",
-      sharedBankId: bankId,
-      exportedAt: new Date().toISOString(),
-      student: { name: entry.studentName || "", klass: entry.studentClass || "" },
-      latest: {
-        level: entry.level || null,
-        percent: typeof entry.score === "number" ? entry.score : null,
-        correct: entry.correct,
-        total: entry.total,
-        submittedAt: entry.createdAt instanceof Date ? entry.createdAt.toISOString() : null
-      },
-      points: {
-        totalPoints: entry.totalPoints != null ? entry.totalPoints : null,
-        best: { E: entry.bestE != null ? entry.bestE : null, C: entry.bestC != null ? entry.bestC : null, A: entry.bestA != null ? entry.bestA : null }
-      },
-      goals: {
-        passThreshold: entry.goalPassThreshold != null ? entry.goalPassThreshold : null,
-        strong: entry.strongGoals || [],
-        weak: entry.weakGoals || []
+        fvWriteStateSafe(s);
+        fvSetActiveSharedBankId(id, "Publicerad elevlänk");
       }
+
+      return res;
     };
+
+    wrapped.__fvWrapped = true;
+    window.publishCurrentBankAsShared = wrapped;
   }
 
-  function fvBindUI() {
-    const inp = document.getElementById("fvLinkedSharedBankId");
-    const btnLink = document.getElementById("fvBtnLinkBank");
-    const btnClear = document.getElementById("fvBtnClearBank");
-    const btnRefresh = document.getElementById("fvBtnRefresh");
-    const btnExport = document.getElementById("fvBtnExport");
-    const out = document.getElementById("fvExportOutput");
-    const btnDeleteSelected = document.getElementById("fvBtnDeleteSelected");
+  // =========================================================
+  // Patcha refreshElevProgressionFromFirestore så den ALDRIG kräver gissning
+  // =========================================================
+  function fvPatchRefresh() {
+    if (window.__fvOrigRefreshElevProgression) return;
 
-    if (btnLink && !btnLink.__fvBound) {
-      btnLink.__fvBound = true;
-      btnLink.addEventListener("click", function () {
-        const id = (inp && inp.value ? inp.value.trim() : "") || "";
-        fvSetLinkedSharedBankId(id);
-        fvRefreshFromFirestore();
-      });
-    }
+    if (typeof window.refreshElevProgressionFromFirestore === "function") {
+      window.__fvOrigRefreshElevProgression = window.refreshElevProgressionFromFirestore;
 
-    if (btnClear && !btnClear.__fvBound) {
-      btnClear.__fvBound = true;
-      btnClear.addEventListener("click", function () {
-        if (inp) inp.value = "";
-        fvSetLinkedSharedBankId("");
-        fvAllEntries = [];
-        fvLatestByStudent = [];
-        fvHighscore = [];
-        fvSelected = null;
-        fvSelectedDocId = null;
-        fvRenderStudents();
-        fvRenderHighscore();
-        fvRenderSelected();
-        if (out) out.value = "";
-      });
-    }
-
-    if (btnRefresh && !btnRefresh.__fvBound) {
-      btnRefresh.__fvBound = true;
-      btnRefresh.addEventListener("click", function () {
-        fvRefreshFromFirestore();
-      });
-    }
-
-    if (btnExport && !btnExport.__fvBound) {
-      btnExport.__fvBound = true;
-      btnExport.addEventListener("click", function () {
-        if (!out) return;
-        if (!fvSelected) {
-          out.value = "";
-          alert("Välj en elev först.");
-          return;
+      window.refreshElevProgressionFromFirestore = function (optionalBankId) {
+        const provided = (optionalBankId || "").trim();
+        if (provided) {
+          fvSetActiveSharedBankId(provided, "Anrop");
+          return window.__fvOrigRefreshElevProgression(provided);
         }
-        out.value = JSON.stringify(fvBuildExportJson(fvSelected), null, 2);
-        try { out.focus(); out.select(); } catch (_) {}
-      });
-    }
 
-    if (btnDeleteSelected && !btnDeleteSelected.__fvBound) {
-      btnDeleteSelected.__fvBound = true;
-      btnDeleteSelected.addEventListener("click", async function () {
-        try {
-          const bankId = fvGetLinkedSharedBankId();
-          if (!bankId) { alert("Ingen sharedBank kopplad."); return; }
-          if (!fvSelectedDocId) { alert("Välj en elev först."); return; }
-
-          const name = fvSelected?.studentName || "-";
-          const cls = fvSelected?.studentClass || "-";
-          const msg = `Ta bort vald inlämning (senaste) för:\n${name} (${cls})\n\nResultat-id: ${fvSelectedDocId}\n\nDetta kan inte ångras.`;
-          if (!confirm(msg)) return;
-
-          await fvDeleteDoc(bankId, fvSelectedDocId);
-          await fvRefreshFromFirestore();
-        } catch (err) {
-          console.error("[3X] Delete selected fel:", err);
-          alert("Kunde inte ta bort inlämningen. Se konsolen.");
-        }
-      });
+        // Om ingen gavs: säkra id och kör
+        fvEnsureActiveSharedBankId().then((id) => {
+          if (!id) {
+            console.warn("[3X] Ingen sharedBankId hittades.");
+            fvUpdateProgressionLinkUI("", "Ingen koppling");
+            return;
+          }
+          window.__fvOrigRefreshElevProgression(id);
+        });
+      };
     }
   }
 
-  window.refreshElevProgressionFromFirestore = function (optionalBankId) {
-    if (optionalBankId) fvSetLinkedSharedBankId(optionalBankId);
-    fvRefreshFromFirestore();
-  };
-  window.refreshHighscoreFromFirestore = function (optionalBankId) {
-    if (optionalBankId) fvSetLinkedSharedBankId(optionalBankId);
-    fvRefreshFromFirestore();
-  };
-
-  function fvWaitForDbThenAutoRefresh(tries) {
-    const t = typeof tries === "number" ? tries : 25;
-    if (fvGetDb()) {
-      const id = fvGetLinkedSharedBankId();
-      if (id) fvRefreshFromFirestore();
-      return;
-    }
-    if (t <= 0) return;
-    setTimeout(() => fvWaitForDbThenAutoRefresh(t - 1), 250);
-  }
-
+  // =========================================================
+  // Init
+  // =========================================================
   document.addEventListener("DOMContentLoaded", function () {
-    fvBuildUI();
-    fvBindUI();
-    fvWaitForDbThenAutoRefresh(25);
+    fvEnsureStatusBox();
+    fvTryWrapPublish();
+    fvPatchRefresh();
 
-    setTimeout(fvRemoveDuplicateLinkBoxesByTitle, 0);
-    setTimeout(fvRemoveDuplicateLinkBoxesByTitle, 250);
-    setTimeout(fvRemoveDuplicateLinkBoxesByTitle, 1000);
+    // Försök koppla direkt (URL eller sparad koppling)
+    fvEnsureActiveSharedBankId();
+
+    // Retry medan firebase init:ar
+    let tries = 25;
+    const t = setInterval(function () {
+      fvTryWrapPublish();
+      fvPatchRefresh();
+      fvEnsureActiveSharedBankId();
+      tries--;
+      if (tries <= 0) clearInterval(t);
+    }, 250);
   });
+
+  // Exponera helper om du vill använda den i andra sektioner
+  window.fvEnsureActiveSharedBankId = fvEnsureActiveSharedBankId;
 })();
 </script>
-<!-- slut SEKTION 3X: ELEVPROGRESSION (NY DESIGN + DELETE-BREDVID VARJE ELEV) -->
-
+<!-- slut SEKTION 3X: AUTO-KOPPLA ELEVRESULTAT TILL AKTIV ELEV-LÄNK (INGEN GISSNING) -->
 
 
 
