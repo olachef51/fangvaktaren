@@ -4177,33 +4177,33 @@ function finishLevel() {
 </script>
 <!-- slut SEKTION 4: SCRIPT & LOGIK FÅNGVAKTAREN (elev, spel, progression & highscore) -->
 
+
+
+
+
 <!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (e-post, lärarläge, flikar, bankstatus, initiering & knappar) -->
 <script>
 "use strict";
 
-/* Hjälpfunktion för att slippa getElementById överallt */
+/* Hjälpfunktion */
 function getEl(id) {
   return document.getElementById(id);
 }
 
 /* =========================
-   5a – Bank: synka goalsMap in i bank (måste följa med i Firebase)
+   5a – Bank: se till att goalsMap följer med i Firebase-bank
    ========================= */
 
 function syncGoalsMapIntoBankState() {
   const s = loadState();
   if (!s.bank || typeof s.bank !== "object") return;
-
-  // Spara goalsMap i bank-objektet så att det följer med när banken sparas/publishas
   s.bank.goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-
   saveState(s);
 }
 
 function syncBankGoalsMapIntoState() {
   const s = loadState();
   const bank = s.bank || {};
-
   if (Array.isArray(bank.goalsMap)) {
     s.goalsMap = bank.goalsMap;
     saveState(s);
@@ -4215,38 +4215,175 @@ function getBankSignature(bank) {
   const mcq = Array.isArray(b.mcq) ? b.mcq.length : 0;
   const img = Array.isArray(b.img) ? b.img.length : 0;
   const drag = Array.isArray(b.drag) ? b.drag.length : 0;
-
-  // Försök plocka någon stabil identifierare (om den finns)
-  const id =
-    b.sharedBankId ||
-    b.sharedBank ||
-    b.bankId ||
-    b.id ||
-    "";
-
-  return `${mcq}|${img}|${drag}|${id}`;
-}
-
-function forceRefreshAfterBankChange() {
-  // 1) goalsMap tillbaka från bank (om bank innehåller det)
-  syncBankGoalsMapIntoState();
-
-  // 2) init + refresh av dropdowns/lists (om funktionerna finns)
-  if (typeof initGoalsMap === "function") initGoalsMap();
-
-  // 3) Frågeeditorer/listor (om de finns)
-  if (typeof initQuestionForms === "function") initQuestionForms();
-  if (typeof initImageQuestionsEditor === "function") initImageQuestionsEditor();
-  if (typeof initDragDropQuestionsEditor === "function") initDragDropQuestionsEditor();
-
-  // 4) UI
-  if (typeof updateBankStatusUI === "function") updateBankStatusUI();
-  if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
-  if (typeof syncUI === "function") syncUI();
+  const id = b.sharedBankId || b.sharedBank || b.bankId || b.id || "";
+  const gm = Array.isArray(b.goalsMap) ? b.goalsMap.length : 0;
+  return `${mcq}|${img}|${drag}|${gm}|${id}`;
 }
 
 /* =========================
-   5b – E-postinlämning
+   5b – Fallback-rendering: visa befintliga frågor + goalsMap även om editorlogik missar
+   ========================= */
+
+function fallbackRenderGoalsList() {
+  const list = getEl("goalsList");
+  if (!list) return;
+
+  const s = loadState();
+  const bank = s.bank || {};
+  const gm = Array.isArray(s.goalsMap) ? s.goalsMap : (Array.isArray(bank.goalsMap) ? bank.goalsMap : []);
+
+  list.innerHTML = "";
+
+  if (!gm.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga delmål/delbitar sparade ännu.";
+    list.appendChild(li);
+    return;
+  }
+
+  gm.forEach((row) => {
+    const li = document.createElement("li");
+    const g = row.goal || row.delmal || row.title || row.g || "Delmål";
+    const p = row.part || row.delbit || row.range || row.p || "";
+    li.textContent = p ? `${g}: ${p}` : `${g}`;
+    list.appendChild(li);
+  });
+}
+
+function safeText(s) {
+  return (s || "").toString().replace(/\s+/g, " ").trim();
+}
+
+function fallbackRenderMcqList() {
+  const s = loadState();
+  const mcq = (s.bank && Array.isArray(s.bank.mcq)) ? s.bank.mcq : [];
+  const list = getEl("mcqList");
+  const count = getEl("mcqCount");
+  if (count) count.textContent = String(mcq.length);
+  if (!list) return;
+
+  list.innerHTML = "";
+  if (!mcq.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga flervalsfrågor i aktuell bank.";
+    list.appendChild(li);
+    return;
+  }
+
+  mcq.forEach((q, i) => {
+    const li = document.createElement("li");
+    li.className = "question-item";
+
+    const lvl = safeText(q.level || "E");
+    const qt = safeText(q.q || q.text || "");
+    const opts = Array.isArray(q.options) ? q.options : [];
+    const ans = (typeof q.answer === "number") ? q.answer : (typeof q.correct === "number" ? q.correct : null);
+    const ansTxt = (ans != null && opts[ans] != null) ? safeText(opts[ans]) : "";
+
+    const meta = [];
+    if (q.goalPartId != null) meta.push(`Delbit: ${q.goalPartId}`);
+    else if (q.parts != null) meta.push(`Delbit: ${q.parts}`);
+    else if (q.goal != null) meta.push(`Delmål: ${q.goal}`);
+
+    li.innerHTML =
+      `<div class="mini"><strong>${lvl}</strong> • MCQ • #${i + 1}</div>` +
+      `<div>${qt || "-"}</div>` +
+      `<div class="mini">${ansTxt ? ("Rätt: " + ansTxt) : ""}${meta.length ? (" • " + meta.join(" • ")) : ""}</div>`;
+
+    list.appendChild(li);
+  });
+}
+
+function fallbackRenderImgList() {
+  const s = loadState();
+  const img = (s.bank && Array.isArray(s.bank.img)) ? s.bank.img : [];
+  const list = getEl("imgList");
+  const count = getEl("imgCount");
+  if (count) count.textContent = String(img.length);
+  if (!list) return;
+
+  list.innerHTML = "";
+  if (!img.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga bildfrågor i aktuell bank.";
+    list.appendChild(li);
+    return;
+  }
+
+  img.forEach((q, i) => {
+    const li = document.createElement("li");
+    li.className = "question-item";
+
+    const lvl = safeText(q.level || "E");
+    const qt = safeText(q.q || q.text || "");
+    const hasImg = !!(q.imgDataUrl || q.imgUrl || q.image || q.img);
+    const opts = Array.isArray(q.options) ? q.options : [];
+    const ans = (typeof q.answer === "number") ? q.answer : (typeof q.correct === "number" ? q.correct : null);
+    const ansTxt = (ans != null && opts[ans] != null) ? safeText(opts[ans]) : "";
+
+    const meta = [];
+    if (q.goalPartId != null) meta.push(`Delbit: ${q.goalPartId}`);
+    else if (q.parts != null) meta.push(`Delbit: ${q.parts}`);
+    else if (q.goal != null) meta.push(`Delmål: ${q.goal}`);
+
+    li.innerHTML =
+      `<div class="mini"><strong>${lvl}</strong> • IMG • #${i + 1} ${hasImg ? "• 📷" : "• (ingen bild)"} </div>` +
+      `<div>${qt || "-"}</div>` +
+      `<div class="mini">${ansTxt ? ("Rätt: " + ansTxt) : ""}${meta.length ? (" • " + meta.join(" • ")) : ""}</div>`;
+
+    list.appendChild(li);
+  });
+}
+
+function fallbackRenderDragList() {
+  const s = loadState();
+  const drag = (s.bank && Array.isArray(s.bank.drag)) ? s.bank.drag : [];
+  const list = getEl("dragList");
+  const count = getEl("dragCount");
+  if (count) count.textContent = String(drag.length);
+  if (!list) return;
+
+  list.innerHTML = "";
+  if (!drag.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga drag & drop-frågor i aktuell bank.";
+    list.appendChild(li);
+    return;
+  }
+
+  drag.forEach((q, i) => {
+    const li = document.createElement("li");
+    li.className = "question-item";
+
+    const lvl = safeText(q.level || "E");
+    const qt = safeText(q.q || q.text || "");
+    const c1 = safeText(q.column1 || (q.columns && q.columns[0]) || "");
+    const c2 = safeText(q.column2 || (q.columns && q.columns[1]) || "");
+    const src = Array.isArray(q.dragSources) ? q.dragSources.length : (Array.isArray(q.items) ? q.items.length : 0);
+
+    const meta = [];
+    if (q.goalPartId != null) meta.push(`Delbit: ${q.goalPartId}`);
+    else if (q.parts != null) meta.push(`Delbit: ${q.parts}`);
+    else if (q.goal != null) meta.push(`Delmål: ${q.goal}`);
+
+    li.innerHTML =
+      `<div class="mini"><strong>${lvl}</strong> • DRAG • #${i + 1} • ${src} kort</div>` +
+      `<div>${qt || "-"}</div>` +
+      `<div class="mini">${(c1 || c2) ? (`Kolumner: ${c1 || "1"} / ${c2 || "2"}`) : ""}${meta.length ? (" • " + meta.join(" • ")) : ""}</div>`;
+
+    list.appendChild(li);
+  });
+}
+
+function fallbackRenderAllLists() {
+  try { fallbackRenderGoalsList(); } catch (e) {}
+  try { fallbackRenderMcqList(); } catch (e) {}
+  try { fallbackRenderImgList(); } catch (e) {}
+  try { fallbackRenderDragList(); } catch (e) {}
+}
+
+/* =========================
+   5c – E-postinlämning
    ========================= */
 
 function emailResultToTeacher() {
@@ -4291,21 +4428,18 @@ function emailResultToTeacher() {
 }
 
 /* =========================
-   5c – Lärarlösenord & status
+   5d – Lärarlösenord & status
    ========================= */
 
 function showTeacherPasswordInStatus() {
   const s = loadState();
   const statusEl = getEl("passwordStatus");
-  if (statusEl && s.teacherPassword) {
-    statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
-  } else if (statusEl) {
-    statusEl.textContent = "";
-  }
+  if (statusEl && s.teacherPassword) statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
+  else if (statusEl) statusEl.textContent = "";
 }
 
 /* =========================
-   5d – Lärarläge: gate + modal
+   5e – Lärarläge: gate + modal
    ========================= */
 
 function openTeacherGate() {
@@ -4377,7 +4511,7 @@ function handleTeacherConfirm() {
 }
 
 /* =========================
-   5e – Fliknavigering i lärarmodal
+   5f – Fliknavigering i lärarmodal
    ========================= */
 
 function setupTabNavigation() {
@@ -4386,12 +4520,13 @@ function setupTabNavigation() {
   if (!tabButtons.length || !panels.length) return;
 
   function activateTab(tabId) {
-    tabButtons.forEach((btn) => {
-      btn.classList.toggle("active", btn.getAttribute("data-tab") === tabId);
-    });
-    panels.forEach((panel) => {
-      panel.classList.toggle("hidden", panel.getAttribute("data-panel") !== tabId);
-    });
+    tabButtons.forEach((btn) => btn.classList.toggle("active", btn.getAttribute("data-tab") === tabId));
+    panels.forEach((panel) => panel.classList.toggle("hidden", panel.getAttribute("data-panel") !== tabId));
+
+    // Efter tabbyte: försök alltid rendera listorna
+    setTimeout(() => {
+      fallbackRenderAllLists();
+    }, 0);
   }
 
   tabButtons.forEach((btn) => {
@@ -4407,7 +4542,7 @@ function setupTabNavigation() {
 }
 
 /* =========================
-   5f – Bankstatus (UI)
+   5g – Bankstatus (UI)
    ========================= */
 
 function updateBankStatusUI() {
@@ -4436,19 +4571,52 @@ function updateBankStatusUI() {
   if (!total) {
     statusEl.textContent = "Status: Ingen frågebank laddad.";
   } else {
-    statusEl.textContent =
-      `Status: Aktiv bank med ${total} frågor (MCQ: ${mcqCount}, bild: ${imgCount}, drag & drop: ${dragCount}).`;
+    statusEl.textContent = `Status: Aktiv bank med ${total} frågor (MCQ: ${mcqCount}, bild: ${imgCount}, drag & drop: ${dragCount}).`;
   }
 }
 
 /* =========================
-   5g – Initiering & knappar
+   5h – Refresh efter bankbyte
+   ========================= */
+
+function forceRefreshAfterBankChange() {
+  // 1) goalsMap tillbaka från bank (om bank innehåller det)
+  syncBankGoalsMapIntoState();
+
+  // 2) init om det finns (men fallback ska alltid visa oavsett)
+  if (typeof initGoalsMap === "function") {
+    try { initGoalsMap(); } catch (e) {}
+  }
+  if (typeof initQuestionForms === "function") {
+    try { initQuestionForms(); } catch (e) {}
+  }
+  if (typeof initImageQuestionsEditor === "function") {
+    try { initImageQuestionsEditor(); } catch (e) {}
+  }
+  if (typeof initDragDropQuestionsEditor === "function") {
+    try { initDragDropQuestionsEditor(); } catch (e) {}
+  }
+
+  // 3) Fallback render (garanterar att listor inte är tomma)
+  fallbackRenderAllLists();
+
+  // 4) UI
+  if (typeof updateBankStatusUI === "function") updateBankStatusUI();
+  if (typeof updateAllProgressionUI === "function") {
+    try { updateAllProgressionUI(); } catch (e) {}
+  }
+  if (typeof syncUI === "function") {
+    try { syncUI(); } catch (e) {}
+  }
+}
+
+/* =========================
+   5i – Initiering & knappar
    ========================= */
 
 function initApp() {
   console.log("initApp start");
 
-  // 1) Säkerställ frågebank (merga embedded-data om tom)
   let s = loadState();
 
   const hasBank =
@@ -4465,29 +4633,38 @@ function initApp() {
     saveState(s);
   }
 
-  // 2) Om bank innehåller goalsMap: skriv tillbaka till state
+  // Om bank innehåller goalsMap: skriv tillbaka till state
   syncBankGoalsMapIntoState();
 
-  // 3) Initiera inställningsdelar om de finns
   if (typeof initTeacherEmailSettings === "function") initTeacherEmailSettings();
   if (typeof initThresholdSettings === "function") initThresholdSettings();
   if (typeof initTeacherPasswordSettings === "function") initTeacherPasswordSettings();
   showTeacherPasswordInStatus();
 
-  // Viktigt: init goalsMap efter att vi synkat från bank
-  if (typeof initGoalsMap === "function") initGoalsMap();
-
-  if (typeof initQuestionForms === "function") initQuestionForms();
-  if (typeof initImageQuestionsEditor === "function") initImageQuestionsEditor();
-  if (typeof initDragDropQuestionsEditor === "function") initDragDropQuestionsEditor();
+  if (typeof initGoalsMap === "function") {
+    try { initGoalsMap(); } catch (e) {}
+  }
+  if (typeof initQuestionForms === "function") {
+    try { initQuestionForms(); } catch (e) {}
+  }
+  if (typeof initImageQuestionsEditor === "function") {
+    try { initImageQuestionsEditor(); } catch (e) {}
+  }
+  if (typeof initDragDropQuestionsEditor === "function") {
+    try { initDragDropQuestionsEditor(); } catch (e) {}
+  }
 
   setupTabNavigation();
 
   if (typeof setupCloudBankUI === "function") setupCloudBankUI();
-  if (typeof syncUI === "function") syncUI();
+  if (typeof syncUI === "function") {
+    try { syncUI(); } catch (e) {}
+  }
 
   updateBankStatusUI();
-  if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
+
+  // Tvinga fram rendering av befintliga listor direkt
+  fallbackRenderAllLists();
 
   /* ---------- Elevyta: knappar ---------- */
 
@@ -4560,15 +4737,7 @@ function initApp() {
   const btnCloseTeacher = getEl("btnCloseTeacher");
   if (btnCloseTeacher) btnCloseTeacher.addEventListener("click", closeTeacherModal);
 
-  /* ---------- Elevprogression-fliken: JSON ---------- */
-
-  const btnGenerateProgressJson = getEl("btnGenerateProgressJson");
-  if (btnGenerateProgressJson) btnGenerateProgressJson.addEventListener("click", handleGenerateProgressJson);
-
-  const btnCopyProgressJson = getEl("btnCopyProgressJson");
-  if (btnCopyProgressJson) btnCopyProgressJson.addEventListener("click", handleCopyProgressJson);
-
-  /* ---------- Inställningar: trösklar, e-post, lösen ---------- */
+  /* ---------- Inställningar ---------- */
 
   const btnSaveThresholds = getEl("btnSaveThresholds");
   if (btnSaveThresholds && typeof handleSaveThresholds === "function") {
@@ -4591,8 +4760,8 @@ function initApp() {
   if (btnAddGoalPart && typeof handleAddGoalPart === "function") {
     btnAddGoalPart.addEventListener("click", () => {
       handleAddGoalPart();
-      // När goalsMap ändras: spegla in i bank så att det följer med i moln
       syncGoalsMapIntoBankState();
+      fallbackRenderGoalsList();
     });
   }
 
@@ -4601,6 +4770,7 @@ function initApp() {
     btnSaveGoalsMap.addEventListener("click", () => {
       handleSaveGoalsMap();
       syncGoalsMapIntoBankState();
+      fallbackRenderGoalsList();
     });
   }
 
@@ -4609,10 +4779,11 @@ function initApp() {
     btnClearGoalsMap.addEventListener("click", () => {
       handleClearGoalsMap();
       syncGoalsMapIntoBankState();
+      fallbackRenderGoalsList();
     });
   }
 
-  /* ---------- Rensa / nollställ elevdata ---------- */
+  /* ---------- Rensa / nollställ ---------- */
 
   const btnClearStudentData = getEl("btnClearStudentData");
   if (btnClearStudentData && typeof handleClearStudentData === "function") {
@@ -4630,27 +4801,31 @@ function initApp() {
   if (btnLoadCloudBanks && typeof handleLoadCloudBanks === "function") {
     btnLoadCloudBanks.addEventListener("click", () => {
       handleLoadCloudBanks();
-      updateBankStatusUI();
+      setTimeout(() => {
+        forceRefreshAfterBankChange();
+      }, 300);
     });
   }
 
   const btnSaveToCloud = getEl("btnSaveToCloud");
   if (btnSaveToCloud && typeof handleSaveToCloud === "function") {
     btnSaveToCloud.addEventListener("click", () => {
-      // Viktigt: goalsMap måste ligga i s.bank innan vi sparar till molnet
       syncGoalsMapIntoBankState();
       handleSaveToCloud();
-      updateBankStatusUI();
+      setTimeout(() => {
+        forceRefreshAfterBankChange();
+      }, 300);
     });
   }
 
   const btnExportBank = getEl("btnExportBank");
   if (btnExportBank && typeof handleExportBank === "function") {
     btnExportBank.addEventListener("click", () => {
-      // Export ska också bära med goalsMap
       syncGoalsMapIntoBankState();
       handleExportBank();
-      updateBankStatusUI();
+      setTimeout(() => {
+        forceRefreshAfterBankChange();
+      }, 100);
     });
   }
 
@@ -4658,9 +4833,9 @@ function initApp() {
   if (fileImport && typeof handleImportBank === "function") {
     fileImport.addEventListener("change", (evt) => {
       handleImportBank(evt);
-      // Efter import: försök synka goalsMap från bank + refresh
-      forceRefreshAfterBankChange();
-      updateBankStatusUI();
+      setTimeout(() => {
+        forceRefreshAfterBankChange();
+      }, 300);
     });
   }
 
@@ -4682,18 +4857,6 @@ function initApp() {
     btnGoogleLogout.addEventListener("click", handleGoogleLogout);
   }
 
-  // Klick-delegering för knappar i cloudBankList (Aktivera bank / Kopiera elevlänk / Ta bort)
-  const cloudList = getEl("cloudBankList");
-  if (cloudList) {
-    cloudList.addEventListener("click", () => {
-      // Låt ev. async-aktivering hinna uppdatera state först
-      setTimeout(() => {
-        forceRefreshAfterBankChange();
-        updateBankStatusUI();
-      }, 250);
-    });
-  }
-
   // Bank-övervakning: om bank ändras (t.ex. auto-load från URL) -> refresh
   let lastSig = getBankSignature(loadState().bank || {});
   setInterval(() => {
@@ -4704,16 +4867,14 @@ function initApp() {
         lastSig = sig;
         forceRefreshAfterBankChange();
       }
-    } catch (e) {
-      // tyst
-    }
-  }, 800);
+    } catch (e) {}
+  }, 700);
 
   console.log("initApp klar – knappar kopplade");
 }
 
 /* =========================
-   5h – DOMContentLoaded
+   5j – DOMContentLoaded
    ========================= */
 
 document.addEventListener("DOMContentLoaded", function () {
