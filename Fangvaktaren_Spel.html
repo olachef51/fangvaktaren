@@ -4494,322 +4494,387 @@ window.refreshHighscoreFromFirestore = refreshHighscoreFromFirestore;
 
 
 
-<!-- start SEKTION 3Z: HOTFIX – ELEVPROGRESSION UTAN firebaseDbInstance -->
+<!-- start SEKTION 3Z: KOPPLA SHAREDBANK-ID & LÄS ELEVRESULTAT -->
 <script>
-"use strict";
-
-/* =====================================================
-   HOTFIX:
-   - Din konsol visar att EN GAMMAL 3X fortfarande körs (”[3X] Ingen firebaseDbInstance...”).
-   - Denna sektion OVERRIDAR gamla funktioner och kopplar om knapparna,
-     så att elevprogression funkar även om firebaseDbInstance är null.
-   - Klistra in denna SEKTION 3Z LÄNGST NER i din stora <script>-kedja
-     (efter 3X/3E), så den laddas sist.
-   ===================================================== */
+/* =========================
+   3Z – Koppla sharedBank-id till en laddad bank (utan URL-param)
+        + stabil refresh av elevresultat/highscore
+   ========================= */
 
 (function () {
-  const RESULTS_COLLECTION_NAME = "results";
-  const STORE_KEY_LAST_SHARED = "fv-last-sharedBankId";
+  function fvParseSharedIdFromText(txt) {
+    const s = (txt || "").trim();
+    if (!s) return null;
 
-  function fvGetFirestoreDb() {
+    // Om användaren klistrar in en hel länk
     try {
-      if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return firebaseDbInstance;
-    } catch (_) {}
-
-    try {
-      if (window.firebase && firebase.apps && firebase.apps.length && typeof firebase.firestore === "function") {
-        return firebase.firestore();
-      }
-    } catch (e) {
-      console.warn("[3Z] fvGetFirestoreDb: kunde inte skapa firestore():", e);
-    }
-    return null;
-  }
-
-  function fvWaitForFirestoreDb(timeoutMs) {
-    const timeout = typeof timeoutMs === "number" ? timeoutMs : 12000;
-    const start = Date.now();
-    return new Promise((resolve) => {
-      (function tick() {
-        const db = fvGetFirestoreDb();
-        if (db) return resolve(db);
-        if (Date.now() - start >= timeout) return resolve(null);
-        setTimeout(tick, 150);
-      })();
-    });
-  }
-
-  function fvGetQueryParamSafe(name) {
-    try {
-      if (typeof getQueryParam === "function") return getQueryParam(name);
-    } catch (_) {}
-    try {
-      const u = new URL(window.location.href);
-      return u.searchParams.get(name);
-    } catch (_) {}
-    return null;
-  }
-
-  function fvExtractSharedBankIdFromUrlString(urlStr) {
-    try {
-      const u = new URL(urlStr);
+      const u = new URL(s);
+      const p = u.searchParams;
       return (
-        u.searchParams.get("sharedBank") ||
-        u.searchParams.get("sb") ||
-        u.searchParams.get("bank") ||
-        u.searchParams.get("sharedBankId")
+        p.get("sharedBank") ||
+        p.get("bank") ||
+        p.get("sb") ||
+        null
       );
     } catch (_) {
+      // inte en URL
+    }
+
+    // Om användaren klistrar in "?bank=ID" eller "bank=ID"
+    const m = s.match(/(?:\?|&)?(?:sharedBank|bank|sb)=([^&\s]+)/i);
+    if (m && m[1]) return decodeURIComponent(m[1]);
+
+    // Annars: anta att det är ett id
+    if (/^[A-Za-z0-9_-]{10,}$/.test(s)) return s;
+
+    return null;
+  }
+
+  function fvSetSharedIdLocally(sharedId) {
+    if (!sharedId) return;
+    window.activeSharedBankId = sharedId;
+
+    try {
+      const st = loadState();
+      st.linkedSharedBankId = sharedId;
+      saveState(st);
+    } catch (e) {
+      console.warn("[3Z] Kunde inte spara linkedSharedBankId i state:", e);
+    }
+  }
+
+  async function fvTryPersistSharedIdToCloudBank(sharedId) {
+    try {
+      if (!sharedId) return;
+      if (!firebaseDbInstance || !firebaseAuthInstance) return;
+
+      const user = firebaseAuthInstance.currentUser;
+      const cloudId = window.activeCloudBankId || null;
+      if (!user || !cloudId) return;
+
+      await firebaseDbInstance
+        .collection("teachers")
+        .doc(user.uid)
+        .collection("banks")
+        .doc(cloudId)
+        .set(
+          {
+            linkedSharedBankId: sharedId,
+            linkedSharedUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        );
+
+      console.log("[3Z] Sparade linkedSharedBankId på moln-bank:", cloudId, sharedId);
+    } catch (e) {
+      console.warn("[3Z] Kunde inte spara linkedSharedBankId på moln-bank:", e);
+    }
+  }
+
+  function fvGetSharedIdFromUrl() {
+    try {
+      if (typeof getQueryParam !== "function") return null;
+      return (
+        getQueryParam("sharedBank") ||
+        getQueryParam("bank") ||
+        getQueryParam("sb") ||
+        null
+      );
+    } catch (e) {
       return null;
     }
   }
 
-  function fvGetStoredSharedBankId() {
-    try {
-      return localStorage.getItem(STORE_KEY_LAST_SHARED) || null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function fvSetStoredSharedBankId(id) {
-    try {
-      localStorage.setItem(STORE_KEY_LAST_SHARED, String(id));
-    } catch (_) {}
-  }
-
-  function fvResolveBankId() {
-    // 1) Globalt satt av appen
+  async function fvResolveSharedBankId() {
+    // 1) Global markör
     if (window.activeSharedBankId) return window.activeSharedBankId;
 
-    // 2) Försök läsa från rutan där du kopierar elevlänken
-    const linkOutput = document.getElementById("sharedBankLinkOutput");
-    if (linkOutput && linkOutput.value) {
-      const idFromOutput = fvExtractSharedBankIdFromUrlString(linkOutput.value.trim());
-      if (idFromOutput) {
-        window.activeSharedBankId = idFromOutput;
-        fvSetStoredSharedBankId(idFromOutput);
-        return idFromOutput;
-      }
-    }
-
-    // 3) Senast sparad publicerad bank
-    const stored = fvGetStoredSharedBankId();
-    if (stored) {
-      window.activeSharedBankId = stored;
-      return stored;
-    }
-
-    // 4) URL-param
-    const fromUrl =
-      fvGetQueryParamSafe("sharedBank") ||
-      fvGetQueryParamSafe("sb") ||
-      fvGetQueryParamSafe("bank") ||
-      fvGetQueryParamSafe("sharedBankId");
+    // 2) URL
+    const fromUrl = fvGetSharedIdFromUrl();
     if (fromUrl) {
-      window.activeSharedBankId = fromUrl;
-      fvSetStoredSharedBankId(fromUrl);
+      fvSetSharedIdLocally(fromUrl);
       return fromUrl;
     }
 
-    // 5) (Sista utväg) activeCloudBankId är OFTA INTE samma som sharedBanks-id,
-    // så vi använder den inte här för att undvika fel.
+    // 3) Local state
+    try {
+      const st = loadState();
+      if (st && st.linkedSharedBankId) {
+        window.activeSharedBankId = st.linkedSharedBankId;
+        return st.linkedSharedBankId;
+      }
+    } catch (_) {}
+
+    // 4) Om läraren är inloggad och en moln-bank är aktiv: läs kopplingen från teachers/{uid}/banks/{cloudId}
+    try {
+      if (!firebaseDbInstance || !firebaseAuthInstance) return null;
+      const user = firebaseAuthInstance.currentUser;
+      const cloudId = window.activeCloudBankId || null;
+      if (!user || !cloudId) return null;
+
+      const doc = await firebaseDbInstance
+        .collection("teachers")
+        .doc(user.uid)
+        .collection("banks")
+        .doc(cloudId)
+        .get();
+
+      if (!doc.exists) return null;
+
+      const data = doc.data() || {};
+      const sharedId = data.linkedSharedBankId || data.publishedSharedId || null;
+      if (sharedId) {
+        fvSetSharedIdLocally(sharedId);
+        return sharedId;
+      }
+    } catch (e) {
+      console.warn("[3Z] Kunde inte läsa kopplad sharedBankId från moln-bank:", e);
+    }
+
     return null;
   }
 
-  function ensureUi() {
-    // Vi använder dina befintliga element om de finns, annars skapar vi minimalt.
-    let list = document.getElementById("teacherStudentList");
-    let detail = document.getElementById("progressStudentDetail");
-    let hs = document.getElementById("teacherHighscoreList");
+  function fvEnsureLinkUI() {
+    // Försök lägga verktyget i lärarlägets progress-grid om det finns
+    let grid =
+      document.querySelector("#teacherModal .progress-grid") ||
+      document.querySelector(".progress-grid");
 
-    if (!list || !detail || !hs) {
-      // Försök skapa via dina helpers om de finns
-      try { if (typeof ensureHighscoreBox === "function") ensureHighscoreBox(); } catch (_) {}
-      try { if (typeof ensureProgressionBox === "function") ensureProgressionBox(); } catch (_) {}
+    if (!grid) {
+      // Sista fallback: modal-body
+      const modalBody =
+        document.querySelector("#teacherModal .modal-body") ||
+        document.getElementById("teacherModal");
+      if (!modalBody) return null;
 
-      list = document.getElementById("teacherStudentList");
-      detail = document.getElementById("progressStudentDetail");
-      hs = document.getElementById("teacherHighscoreList");
+      grid = document.createElement("div");
+      grid.className = "progress-grid";
+      modalBody.appendChild(grid);
     }
 
-    return { list, detail, hs };
-  }
+    let box = document.getElementById("fvSharedLinkBox");
+    if (box) return box;
 
-  function setStatus(msg) {
-    const ui = ensureUi();
-    if (ui.detail) ui.detail.textContent = msg;
-  }
+    box = document.createElement("div");
+    box.id = "fvSharedLinkBox";
+    box.className = "progress-box";
 
-  function updateHighscoreUI(entries) {
-    const ui = ensureUi();
-    const list = ui.hs;
-    if (!list) return;
+    const title = document.createElement("h4");
+    title.textContent = "Koppla elevresultat (sharedBank-id)";
 
-    list.innerHTML = "";
-    if (!entries || !entries.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu.";
-      list.appendChild(li);
-      return;
-    }
+    const mini = document.createElement("div");
+    mini.className = "mini";
+    mini.textContent =
+      "Klistra in elevlänk (…?bank=ID) eller bara ID så kan du läsa in sparade elevresultat utan att öppna via elevlänken.";
 
-    entries.forEach((e, idx) => {
-      const li = document.createElement("li");
-      const pos = idx + 1;
-      const name = e.name || "-";
-      const cls = e.className || "-";
-      const score = typeof e.score === "number" ? e.score.toFixed(0) : String(e.score || 0);
-      const level = e.level || "?";
-      const dateStr = e.createdAt instanceof Date ? " – " + e.createdAt.toLocaleString("sv-SE") : "";
-      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}${dateStr}`;
-      list.appendChild(li);
-    });
-  }
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.gap = "6px";
+    row.style.flexWrap = "wrap";
+    row.style.alignItems = "center";
+    row.style.marginTop = "8px";
 
-  function updateElevProgressionUI(entries) {
-    const ui = ensureUi();
-    const list = ui.list;
-    const detail = ui.detail;
-    if (!list || !detail) return;
+    const input = document.createElement("input");
+    input.id = "fvSharedIdInput";
+    input.className = "input";
+    input.placeholder = "Klistra in elevlänk eller sharedBank-id...";
+    input.style.flex = "1";
+    input.autocomplete = "off";
 
-    list.innerHTML = "";
+    const btnSave = document.createElement("button");
+    btnSave.id = "fvBtnSaveSharedId";
+    btnSave.className = "btn btn-sm";
+    btnSave.textContent = "Spara koppling";
 
-    if (!entries || !entries.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu.";
-      list.appendChild(li);
-      detail.textContent = "Inga resultat hittades för denna bank ännu.";
-      return;
-    }
+    const btnRefresh = document.createElement("button");
+    btnRefresh.id = "fvBtnRefreshResults";
+    btnRefresh.className = "btn btn-sm";
+    btnRefresh.textContent = "Läs in elevresultat";
 
-    detail.textContent = "Klicka på en elev i listan för att se detaljer.";
+    const status = document.createElement("div");
+    status.id = "fvSharedIdStatus";
+    status.className = "mini";
+    status.style.marginTop = "6px";
+    status.textContent = "Ingen koppling sparad ännu.";
 
-    entries.forEach((e) => {
-      const li = document.createElement("li");
-      const name = e.name || "-";
-      const cls = e.className || "-";
-      const level = e.level || "?";
-      const scoreText = typeof e.score === "number" ? e.score.toFixed(0) + "%" : "okänd %";
-      const dateStr = e.createdAt instanceof Date ? e.createdAt.toLocaleString("sv-SE") : "okänt datum";
-      li.textContent = `${name} (${cls}) – ${scoreText} på nivå ${level} – ${dateStr}`;
+    row.appendChild(input);
+    row.appendChild(btnSave);
+    row.appendChild(btnRefresh);
 
-      li.addEventListener("click", () => {
-        const lines = [];
-        lines.push(`Elev: ${name}`);
-        lines.push(`Klass: ${cls}`);
-        lines.push(`Nivå: ${level}`);
-        if (e.correct != null && e.total != null) lines.push(`Rätt: ${e.correct} av ${e.total}`);
-        if (typeof e.score === "number") lines.push(`Procent: ${e.score.toFixed(0)} %`);
-        if (typeof e.totalPoints === "number") lines.push(`Elevens poäng (lokalt): ${e.totalPoints}`);
-        if (e.bestE != null || e.bestC != null || e.bestA != null) {
-          lines.push(
-            `Bästa resultat per nivå – E: ${e.bestE != null ? e.bestE + " %" : "-"}, ` +
-            `C: ${e.bestC != null ? e.bestC + " %" : "-"}, ` +
-            `A: ${e.bestA != null ? e.bestA + " %" : "-"}`
-          );
-        }
-        if (e.createdAt instanceof Date) lines.push(`Inlämnad: ${e.createdAt.toLocaleString("sv-SE")}`);
-        detail.textContent = lines.join("\n");
-      });
+    box.appendChild(title);
+    box.appendChild(mini);
+    box.appendChild(row);
+    box.appendChild(status);
 
-      list.appendChild(li);
-    });
-  }
+    grid.prepend(box);
 
-  async function fvRefreshElevProgressionFromFirestore(optionalBankId) {
-    const db = await fvWaitForFirestoreDb(12000);
-    if (!db) {
-      console.warn("[3Z] Firestore inte redo ännu.");
-      setStatus("Tekniskt: Firestore är inte redo ännu. Vänta 2–5 sek och tryck Uppdatera igen.");
-      return;
-    }
-
-    const bankId = optionalBankId || fvResolveBankId();
-    if (!bankId) {
-      console.warn("[3Z] Ingen sharedBankId hittades.");
-      setStatus("Hittar ingen sharedBank-id. Skapa elevlänk (Publicera) eller öppna spelet med ?sharedBank=ID.");
-      return;
-    }
-
-    setStatus("Laddar elevresultat från molnet...");
-
+    // Förifyll från state om möjligt
     try {
-      const snap = await db
-        .collection("sharedBanks")
-        .doc(bankId)
-        .collection(RESULTS_COLLECTION_NAME)
-        .orderBy("createdAt", "desc")
-        .limit(200)
-        .get();
+      const st = loadState();
+      if (st && st.linkedSharedBankId) {
+        input.value = st.linkedSharedBankId;
+        status.textContent = "Kopplad sharedBank-id: " + st.linkedSharedBankId;
+      }
+    } catch (_) {}
 
-      const entries = [];
-      snap.forEach((doc) => {
-        const d = doc.data() || {};
-        entries.push({
-          id: doc.id,
-          name: d.studentName || d.name || "",
-          className: d.studentClass || d.class || "",
-          level: d.levelId || d.level || "",
-          score: typeof d.scorePercent === "number" ? d.scorePercent : (typeof d.percent === "number" ? d.percent : null),
-          correct: typeof d.correct === "number" ? d.correct : null,
-          total: typeof d.total === "number" ? d.total : null,
-          totalPoints: typeof d.totalPoints === "number" ? d.totalPoints : null,
-          bestE: d.bestE != null ? d.bestE : null,
-          bestC: d.bestC != null ? d.bestC : null,
-          bestA: d.bestA != null ? d.bestA : null,
-          createdAt: d.createdAt && typeof d.createdAt.toDate === "function" ? d.createdAt.toDate() : null
-        });
+    btnSave.addEventListener("click", async () => {
+      const sharedId = fvParseSharedIdFromText(input.value);
+      if (!sharedId) {
+        status.textContent = "Hittar ingen sharedBank-id i texten du klistrade in.";
+        return;
+      }
+      fvSetSharedIdLocally(sharedId);
+      status.textContent = "Kopplad sharedBank-id: " + sharedId;
+
+      await fvTryPersistSharedIdToCloudBank(sharedId);
+    });
+
+    btnRefresh.addEventListener("click", async () => {
+      await fvRefreshElevProgressionFromFirestore();
+    });
+
+    return box;
+  }
+
+  async function fvFetchResults(sharedId) {
+    if (!firebaseDbInstance) {
+      console.warn("[3Z] Ingen firebaseDbInstance – kan inte ladda elevresultat.");
+      return [];
+    }
+    const ref = firebaseDbInstance
+      .collection("sharedBanks")
+      .doc(sharedId)
+      .collection("results");
+
+    const snap = await ref.orderBy("createdAt", "desc").limit(500).get();
+    const entries = [];
+    snap.forEach((doc) => {
+      const d = doc.data() || {};
+      entries.push({
+        ...d,
+        id: doc.id,
+        createdAt: d.createdAt && d.createdAt.toDate ? d.createdAt.toDate() : null
       });
+    });
+    return entries;
+  }
 
-      updateElevProgressionUI(entries);
+  async function fvRefreshElevProgressionFromFirestore() {
+    try {
+      fvEnsureLinkUI();
 
-      const hs = entries.slice().sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 20);
-      updateHighscoreUI(hs);
+      const statusEl = document.getElementById("fvSharedIdStatus");
+      const sharedId = await fvResolveSharedBankId();
 
-      if (!entries.length) setStatus("Inga inlämningar hittades för denna bank ännu.");
-    } catch (err) {
-      console.error("[3Z] Fel vid laddning av elevprogression:", err);
-      setStatus("Fel vid laddning av elevprogression. Se konsolen för detaljer.");
+      if (!sharedId) {
+        console.warn("[3Z] Ingen sharedBankId hittades.");
+        if (statusEl) {
+          statusEl.textContent =
+            "Hittar ingen sharedBank-id. Skapa elevlänk (Publicera) eller klistra in en befintlig elevlänk/ID här ovan.";
+        }
+        return;
+      }
+
+      if (statusEl) statusEl.textContent = "Läser in elevresultat för: " + sharedId + " ...";
+
+      const entries = await fvFetchResults(sharedId);
+
+      if (statusEl) {
+        statusEl.textContent =
+          entries.length
+            ? "Elevresultat inlästa: " + entries.length + " st (sharedBank-id: " + sharedId + ")."
+            : "Inga inlämningar hittades för denna sharedBank-id: " + sharedId + ".";
+      }
+
+      // Uppdatera befintliga UI-funktioner om de finns
+      if (typeof updateElevProgressionUI === "function") {
+        try { updateElevProgressionUI(entries); } catch (e) { console.warn("[3Z] updateElevProgressionUI fel:", e); }
+      }
+      if (typeof updateHighscoreUI === "function") {
+        try {
+          const hs = entries
+            .slice()
+            .map((d) => ({
+              name: d.studentName || d.name || "",
+              className: d.studentClass || d.class || d.className || "",
+              level: d.levelId || d.level || "",
+              score:
+                typeof d.scorePercent === "number"
+                  ? d.scorePercent
+                  : typeof d.percent === "number"
+                  ? d.percent
+                  : 0,
+              createdAt: d.createdAt instanceof Date ? d.createdAt : null
+            }))
+            .sort((a, b) => (b.score || 0) - (a.score || 0))
+            .slice(0, 20);
+          updateHighscoreUI(hs);
+        } catch (e) {
+          console.warn("[3Z] updateHighscoreUI fel:", e);
+        }
+      }
+    } catch (e) {
+      console.error("[3Z] Fel vid refresh:", e);
     }
   }
 
-  function fvRefreshHighscoreFromFirestore(optionalBankId) {
-    fvRefreshElevProgressionFromFirestore(optionalBankId);
+  // Auto-spara koppling när en elevlänk skapas (sharedBankLinkOutput får ett värde)
+  function fvWatchPublishedLinkOutput() {
+    const out = document.getElementById("sharedBankLinkOutput");
+    if (!out) return;
+
+    let last = out.value || "";
+    const tick = () => {
+      const cur = out.value || "";
+      if (cur !== last) {
+        last = cur;
+        const sharedId = fvParseSharedIdFromText(cur);
+        if (sharedId) {
+          fvSetSharedIdLocally(sharedId);
+          fvTryPersistSharedIdToCloudBank(sharedId);
+          const input = document.getElementById("fvSharedIdInput");
+          const statusEl = document.getElementById("fvSharedIdStatus");
+          if (input && !input.value) input.value = sharedId;
+          if (statusEl) statusEl.textContent = "Kopplad sharedBank-id: " + sharedId;
+        }
+      }
+      window.requestAnimationFrame(tick);
+    };
+    window.requestAnimationFrame(tick);
   }
 
-  function rebindButton(btnId, handler) {
-    const btn = document.getElementById(btnId);
-    if (!btn || !btn.parentNode) return;
-    const clone = btn.cloneNode(true); // tar bort alla gamla listeners
-    btn.parentNode.replaceChild(clone, btn);
-    clone.addEventListener("click", handler);
+  function fvBindExistingRefreshButtons() {
+    const ids = ["btnRefreshProgression", "btnRefreshProgress", "fvBtnRefreshResults"];
+    ids.forEach((id) => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      if (btn.__fvLinkedTo3Z) return;
+      btn.__fvLinkedTo3Z = true;
+      btn.addEventListener("click", () => {
+        fvRefreshElevProgressionFromFirestore();
+      });
+    });
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    // OVERRIDA globalt så andra delar som ropar dessa hamnar rätt
-    window.refreshElevProgressionFromFirestore = fvRefreshElevProgressionFromFirestore;
-    window.refreshHighscoreFromFirestore = fvRefreshHighscoreFromFirestore;
+    fvEnsureLinkUI();
+    fvWatchPublishedLinkOutput();
+    fvBindExistingRefreshButtons();
 
-    // Koppla om knappar (tar bort gamla handlers)
-    rebindButton("btnRefreshProgression", function () {
-      fvRefreshElevProgressionFromFirestore();
-    });
-    rebindButton("btnRefreshProgress", function () {
-      fvRefreshElevProgressionFromFirestore();
-    });
-
-    // Försök auto om vi redan kan lista ut bankId
-    const id = fvResolveBankId();
-    if (id) {
-      fvRefreshElevProgressionFromFirestore(id);
-    } else {
-      setStatus("Redo. Publicera en bank (elevlänk) eller öppna med ?sharedBank=ID, sen tryck Uppdatera.");
-    }
+    // Försök auto-ladda om vi redan kan resolva ett sharedId
+    setTimeout(async () => {
+      const sharedId = await fvResolveSharedBankId();
+      if (sharedId) {
+        fvRefreshElevProgressionFromFirestore();
+      }
+    }, 600);
   });
+
+  // Exponera en säker global (så du kan köra i konsolen vid test)
+  window.fvRefreshElevProgressionFromFirestore = fvRefreshElevProgressionFromFirestore;
 })();
 </script>
-<!-- slut SEKTION 3Z: HOTFIX – ELEVPROGRESSION UTAN firebaseDbInstance -->
+<!-- slut SEKTION 3Z: KOPPLA SHAREDBANK-ID & LÄS ELEVRESULTAT -->
 
 
 
