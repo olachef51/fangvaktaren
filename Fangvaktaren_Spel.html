@@ -3767,6 +3767,187 @@ window.addEventListener("load", repositionOptionCheckboxes);
 <!-- slut SEKTION 3B: FRÅGEEDITORER, LÄRARLÄGE & NAVIGATION -->
 
 
+
+
+<!-- start SEKTION 3Y: AKTIVERA BANK FÖR ELEVPROGRESSION (KNAPP I FRÅGEBANK) -->
+<script>
+(function () {
+  "use strict";
+
+  function fvGetQueryParamSafe(key) {
+    try {
+      if (typeof getQueryParam === "function") return getQueryParam(key);
+    } catch (_) {}
+    try {
+      return new URL(window.location.href).searchParams.get(key);
+    } catch (_) {}
+    return null;
+  }
+
+  function fvLoadStateSafe() {
+    try {
+      if (typeof loadState === "function") return loadState();
+    } catch (_) {}
+    try {
+      const raw = localStorage.getItem("fangvaktaren-v17");
+      return raw ? (JSON.parse(raw) || {}) : {};
+    } catch (_) {}
+    return {};
+  }
+
+  function fvSaveStateSafe(s) {
+    try {
+      if (typeof saveState === "function") return saveState(s);
+    } catch (_) {}
+    try {
+      localStorage.setItem("fangvaktaren-v17", JSON.stringify(s || {}));
+    } catch (_) {}
+  }
+
+  function fvGetActiveBankIdFromBankTab() {
+    const s = fvLoadStateSafe();
+
+    // 1) Om bank finns i URL (elevlänk) – använd den
+    const fromUrl =
+      fvGetQueryParamSafe("sharedBank") ||
+      fvGetQueryParamSafe("sb") ||
+      fvGetQueryParamSafe("bank");
+    if (fromUrl) return String(fromUrl);
+
+    // 2) Om läraren laddat en moln-bank i lärarläget – använd den
+    if (window.activeCloudBankId) return String(window.activeCloudBankId);
+    if (s.activeCloudBankId) return String(s.activeCloudBankId);
+    if (s.activeCloudBank && s.activeCloudBank.id) return String(s.activeCloudBank.id);
+    if (s.cloud && s.cloud.activeBankId) return String(s.cloud.activeBankId);
+
+    // 3) Fallback om något redan är kopplat
+    if (window.activeSharedBankId) return String(window.activeSharedBankId);
+    if (s.linkedSharedBankId) return String(s.linkedSharedBankId);
+
+    return "";
+  }
+
+  function fvSetProgressionLink(bankId, sourceLabel) {
+    const id = (bankId || "").trim();
+    if (!id) return false;
+
+    // Sätt globalt
+    window.activeSharedBankId = id;
+
+    // Spara i state (så kopplingen överlever reload)
+    const s = fvLoadStateSafe();
+    s.linkedSharedBankId = id;
+    s.lastLinkedSharedSource = sourceLabel || "Frågebank-knapp";
+    fvSaveStateSafe(s);
+
+    // Uppdatera ev. input i progressionsfliken om den finns
+    const input = document.getElementById("fvProgressBankLinkInput");
+    if (input) input.value = id;
+
+    // Uppdatera status om den finns
+    const status = document.getElementById("fvProgressBankLinkStatus");
+    if (status) status.textContent = `Kopplad till sharedBank-id: ${id}`;
+
+    // Om du har helper-funktion (från tidigare kod), använd den också
+    try {
+      if (typeof fvSetProgressionSharedId === "function") {
+        fvSetProgressionSharedId(id, sourceLabel || "Frågebank-knapp");
+      }
+    } catch (_) {}
+
+    return true;
+  }
+
+  function fvRefreshProgression(bankId) {
+    try {
+      if (typeof refreshElevProgressionFromFirestore === "function") {
+        refreshElevProgressionFromFirestore(bankId);
+      }
+    } catch (e) {
+      console.warn("[3Y] refreshElevProgressionFromFirestore gav fel:", e);
+    }
+    try {
+      if (typeof refreshHighscoreFromFirestore === "function") {
+        refreshHighscoreFromFirestore(bankId);
+      }
+    } catch (_) {}
+  }
+
+  function fvAttachActivateButtonInBankTab() {
+    // Försök hitta en bra plats i "Frågebank"-fliken
+    const anchor =
+      document.getElementById("cloudBankStatus") ||
+      document.getElementById("bankStatus") ||
+      document.getElementById("mcqCount") ||
+      document.getElementById("imgCount") ||
+      document.getElementById("dragCount");
+
+    const host = anchor
+      ? (anchor.closest(".tab-panel") || anchor.parentElement || document.body)
+      : document.body;
+
+    if (!host) return;
+
+    // Undvik dubblett
+    if (document.getElementById("btnActivateBankForProgression")) return;
+
+    const wrap = document.createElement("div");
+    wrap.style.marginTop = "8px";
+    wrap.style.display = "flex";
+    wrap.style.flexDirection = "column";
+    wrap.style.gap = "6px";
+
+    const btn = document.createElement("button");
+    btn.id = "btnActivateBankForProgression";
+    btn.type = "button";
+    btn.className = "btn btn-sm btn-primary";
+    btn.textContent = "Aktivera denna bank för elevprogression";
+
+    const msg = document.createElement("div");
+    msg.id = "fvActivateBankForProgressionStatus";
+    msg.className = "mini";
+    msg.style.opacity = "0.9";
+    msg.textContent = "";
+
+    btn.addEventListener("click", function () {
+      const bankId = fvGetActiveBankIdFromBankTab();
+      if (!bankId) {
+        msg.textContent = "Hittar ingen aktiv bank. Ladda en moln-bank eller öppna elevlänk och försök igen.";
+        return;
+      }
+
+      const ok = fvSetProgressionLink(bankId, "Frågebank-knapp");
+      if (!ok) {
+        msg.textContent = "Kunde inte koppla bank-id till elevprogression.";
+        return;
+      }
+
+      msg.textContent = `Kopplad: ${bankId}. Laddar elevresultat...`;
+      fvRefreshProgression(bankId);
+    });
+
+    wrap.appendChild(btn);
+    wrap.appendChild(msg);
+
+    // Lägg under statusraden om den finns, annars sist i host
+    if (anchor && anchor.parentNode) {
+      anchor.parentNode.insertBefore(wrap, anchor.nextSibling);
+    } else {
+      host.appendChild(wrap);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    fvAttachActivateButtonInBankTab();
+  });
+})();
+</script>
+<!-- slut SEKTION 3Y: AKTIVERA BANK FÖR ELEVPROGRESSION (KNAPP I FRÅGEBANK) -->
+
+
+
+
+
 <!-- start SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK (STABIL LÄNK PER MOLN-BANK) -->
 <script>
 /*
