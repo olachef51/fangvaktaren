@@ -4256,6 +4256,273 @@ document.addEventListener("DOMContentLoaded", function () {
 <!-- slut SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK (STABIL LÄNK PER MOLN-BANK) -->
 
 
+
+
+<!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING – GLOBAL FIX) -->
+<script>
+"use strict";
+
+/* =========================
+   3D – Säkerställ global inlämningsfunktion
+   ========================= */
+
+// Hjälp: säkert hämta URL-param
+function fvGetQueryParam(name) {
+  try {
+    if (typeof getQueryParam === "function") return getQueryParam(name);
+  } catch (_) {}
+  try {
+    const url = new URL(window.location.href);
+    return url.searchParams.get(name);
+  } catch (_) {}
+  return null;
+}
+
+// Vilken publicerad bank gäller resultatet? (KRÄVER sharedBank-id i elevlänken)
+function fvGetSharedBankIdForSubmission() {
+  return (
+    fvGetQueryParam("sharedBank") ||
+    fvGetQueryParam("sb") ||
+    null
+  );
+}
+
+// Bygg starka/svaga delbitar ur state (kräver att progression fyllts under spel)
+function buildGoalStrengthSummary(state) {
+  const s = state || loadState();
+  const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+  const prog = s.progression || {};
+  const correctMap = prog.correctByGoalId || {};
+  const wrongMap = prog.wrongByGoalId || {};
+
+  const passThreshold = clampInt(
+    s.thres && typeof s.thres.E !== "undefined" ? s.thres.E : 70,
+    0,
+    100
+  );
+
+  const strongGoals = [];
+  const weakGoals = [];
+
+  const allIds = new Set([
+    ...Object.keys(correctMap),
+    ...Object.keys(wrongMap)
+  ]);
+
+  allIds.forEach((idStr) => {
+    const id = idStr;
+    const correct = Number(correctMap[id]) || 0;
+    const wrong = Number(wrongMap[id]) || 0;
+    const total = correct + wrong;
+    if (!total) return;
+
+    const percent = Math.round((correct * 100) / total);
+
+    const meta = goalsMap.find((g) => String(g.id) === String(id)) || {};
+    const entry = {
+      goalId: id,
+      goal: meta.goal || "",
+      parts: meta.parts || "",
+      percent,
+      correct,
+      wrong,
+      total
+    };
+
+    if (percent >= passThreshold) strongGoals.push(entry);
+    else if (wrong > 0) weakGoals.push(entry);
+  });
+
+  strongGoals.sort((a, b) => b.percent - a.percent);
+  weakGoals.sort((a, b) => a.percent - b.percent);
+
+  return { strongGoals, weakGoals, passThreshold };
+}
+
+// Tolka resultat från UI / lastSubmission
+function fvExtractResult() {
+  const scoreTextEl = document.getElementById("scoreText");
+  const scoreDetailEl = document.getElementById("scoreDetail");
+
+  const resultSummary = scoreTextEl ? (scoreTextEl.textContent || "") : "";
+  const resultDetail = scoreDetailEl ? (scoreDetailEl.textContent || "") : "";
+
+  let correct = null;
+  let total = null;
+  let percent = null;
+
+  if (resultDetail) {
+    const m = resultDetail.match(/(\d+)\s*\/\s*(\d+)/);
+    if (m) {
+      correct = parseInt(m[1], 10);
+      total = parseInt(m[2], 10);
+      if (!isNaN(correct) && !isNaN(total) && total > 0) {
+        percent = Math.round((correct * 100) / total);
+      }
+    }
+  }
+
+  if (percent == null && resultSummary) {
+    const m2 = resultSummary.match(/(\d+)\s*%/);
+    if (m2) {
+      const p = parseInt(m2[1], 10);
+      if (!isNaN(p)) percent = p;
+    }
+  }
+
+  let levelId = (typeof currentLevel !== "undefined" && currentLevel) ? currentLevel : null;
+
+  if (window.lastSubmission && typeof window.lastSubmission === "object") {
+    const ls = window.lastSubmission;
+    if (ls.level) levelId = ls.level;
+    if (ls.correct != null && ls.total != null) {
+      correct = ls.correct;
+      total = ls.total;
+    }
+    if (ls.percent != null && !isNaN(ls.percent)) {
+      percent = ls.percent;
+    }
+  }
+
+  return { resultSummary, resultDetail, correct, total, percent, levelId };
+}
+
+/* =========================
+   3D.1 – Spara elevens resultat till Firestore
+   ========================= */
+
+async function saveCurrentResultToFirestore() {
+  try {
+    if (!window.firebase || !firebaseDbInstance) {
+      console.warn("[3D] Firebase är inte redo – kan inte lämna in.");
+      alert("Kunde inte lämna in resultatet. Försök igen eller kontakta läraren.");
+      return;
+    }
+
+    const sharedBankId = fvGetSharedBankIdForSubmission();
+    if (!sharedBankId) {
+      console.warn("[3D] Ingen sharedBank-id i URL – inlämning stoppad.");
+      alert("Hittar ingen sharedBank-id. Öppna elevlänken som läraren skickat och försök igen.");
+      return;
+    }
+
+    const s = loadState();
+    const studentName = (s.student && s.student.name) || "";
+    const studentClass = (s.student && s.student.klass) || "";
+
+    if (!studentName || !studentClass) {
+      alert("Skriv namn och klass innan du lämnar in.");
+      return;
+    }
+
+    const { resultSummary, resultDetail, correct, total, percent, levelId } = fvExtractResult();
+
+    // Uppdatera lokala poäng + bästa per nivå
+    const sProgress = loadState();
+    if (!sProgress.progression || typeof sProgress.progression !== "object") {
+      sProgress.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} };
+    }
+
+    let addedPoints = 0;
+    if (typeof correct === "number" && !isNaN(correct)) {
+      let perCorrect = 1;
+      if (levelId === "C") perCorrect = 2;
+      else if (levelId === "A") perCorrect = 3;
+      addedPoints = correct * perCorrect;
+      sProgress.progression.totalPoints = (sProgress.progression.totalPoints || 0) + addedPoints;
+    }
+
+    if (!sProgress.best || typeof sProgress.best !== "object") {
+      sProgress.best = { E: 0, C: 0, A: 0 };
+    }
+    if (typeof percent === "number" && !isNaN(percent) && levelId) {
+      const currentBest = sProgress.best[levelId] || 0;
+      if (percent > currentBest) sProgress.best[levelId] = percent;
+    }
+
+    saveState(sProgress);
+
+    if (typeof syncUI === "function") {
+      try { syncUI(); } catch (_) {}
+    }
+
+    const goalSummary = buildGoalStrengthSummary(sProgress);
+
+    const resultDoc = {
+      studentName,
+      studentClass,
+      level: levelId,
+      percent: percent,
+      scorePercent: percent,
+      correct: correct,
+      total: total,
+      resultText: resultSummary,
+      detailText: resultDetail,
+      totalPoints: sProgress.progression.totalPoints || 0,
+      bestE: (sProgress.best && sProgress.best.E) || 0,
+      bestC: (sProgress.best && sProgress.best.C) || 0,
+      bestA: (sProgress.best && sProgress.best.A) || 0,
+      strongGoals: goalSummary.strongGoals,
+      weakGoals: goalSummary.weakGoals,
+      goalPassThreshold: goalSummary.passThreshold,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+
+    await firebaseDbInstance
+      .collection("sharedBanks")
+      .doc(sharedBankId)
+      .collection("results")
+      .add(resultDoc);
+
+    // Försök uppdatera lärarlistor om funktioner finns
+    if (typeof refreshHighscoreFromFirestore === "function") {
+      try { refreshHighscoreFromFirestore(sharedBankId); } catch (_) {}
+    }
+    if (typeof refreshElevProgressionFromFirestore === "function") {
+      try { refreshElevProgressionFromFirestore(sharedBankId); } catch (_) {}
+    }
+
+    alert("Ditt resultat har skickats till läraren.");
+  } catch (err) {
+    console.error("[3D] Fel vid inlämning:", err);
+    alert("Kunde inte lämna in resultatet. Försök igen eller kontakta läraren.");
+  }
+}
+
+// Gör globalt så finishLevel / knappar alltid hittar funktionen
+window.saveCurrentResultToFirestore = saveCurrentResultToFirestore;
+
+/* =========================
+   3D.2 – Koppla knappen ”Lämna in spel för poäng”
+   ========================= */
+
+function setupSubmitGameToFirestore() {
+  const btnSubmit = document.getElementById("btnSubmitGame");
+  if (!btnSubmit) return;
+
+  if (btnSubmit.__fvSubmitBound) return;
+  btnSubmit.__fvSubmitBound = true;
+
+  btnSubmit.addEventListener("click", function () {
+    try {
+      window.saveCurrentResultToFirestore();
+    } catch (e) {
+      console.error("[3D] Klick-inlämning gav fel:", e);
+      alert("Kunde inte lämna in resultatet. Försök igen eller kontakta läraren.");
+    }
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  setupSubmitGameToFirestore();
+});
+</script>
+<!-- slut SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING – GLOBAL FIX) -->
+
+
+
+
+
 <!-- start SEKTION 3X: AUTO-KOPPLA ELEVPROGRESSION TILL AKTIV BANK (STABIL ID = CLOUDBANKID) -->
 <script>
 /*
