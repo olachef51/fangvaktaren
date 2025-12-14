@@ -3767,6 +3767,245 @@ window.addEventListener("load", repositionOptionCheckboxes);
 <!-- slut SEKTION 3B: FRÅGEEDITORER, LÄRARLÄGE & NAVIGATION -->
 
 
+<!-- start SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK (FIX: ?bank=ID + AUTOLOAD bank/sharedBank/sb) -->
+<script>
+(function () {
+  "use strict";
+
+  /* =========================
+     3m – Publicera frågebank som elevlänk + autoload från URL
+     - Skapar elevlänk som: ?bank=ID (kompatibel med din GitHub-länk)
+     - Läser både: ?bank=ID, ?sharedBank=ID, ?sb=ID
+     ========================= */
+
+  if (window.__fvSharedV3CInit) return;
+  window.__fvSharedV3CInit = true;
+
+  function fvGetQueryParam(key) {
+    try {
+      if (typeof getQueryParam === "function") return getQueryParam(key);
+    } catch (_) {}
+    try {
+      return new URL(window.location.href).searchParams.get(key);
+    } catch (_) {}
+    return null;
+  }
+
+  function fvGetSharedIdFromUrl() {
+    return (
+      fvGetQueryParam("bank") ||
+      fvGetQueryParam("sharedBank") ||
+      fvGetQueryParam("sb") ||
+      null
+    );
+  }
+
+  function fvGetDb() {
+    try {
+      if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return firebaseDbInstance;
+    } catch (_) {}
+    try {
+      if (window.firebaseDbInstance) return window.firebaseDbInstance;
+    } catch (_) {}
+    try {
+      if (window.firebase && window.firebase.firestore) return window.firebase.firestore();
+    } catch (_) {}
+    return null;
+  }
+
+  function fvGetAuth() {
+    try {
+      if (typeof firebaseAuthInstance !== "undefined" && firebaseAuthInstance) return firebaseAuthInstance;
+    } catch (_) {}
+    try {
+      if (window.firebaseAuthInstance) return window.firebaseAuthInstance;
+    } catch (_) {}
+    return null;
+  }
+
+  function fvSetActiveSharedBankId(id) {
+    const clean = (id || "").trim();
+    try { window.activeSharedBankId = clean; } catch (_) {}
+    try { window.activeCloudBankId = null; } catch (_) {}
+
+    try {
+      const s = (typeof loadState === "function") ? loadState() : {};
+      s.linkedSharedBankId = clean;
+      s.activeSharedBankId = clean;
+      if (typeof saveState === "function") saveState(s);
+      else {
+        try { localStorage.setItem("fangvaktaren-v17", JSON.stringify(s)); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  async function fvAutoloadSharedBankFromUrl() {
+    try {
+      const sharedId = fvGetSharedIdFromUrl();
+      if (!sharedId) {
+        // Ingen parameter, helt OK
+        return;
+      }
+
+      if (window.__fvSharedBankLoadedId === sharedId) return;
+
+      const db = fvGetDb();
+      if (!db) {
+        // vänta på firebaseDbInstance
+        return;
+      }
+
+      const doc = await db.collection("sharedBanks").doc(sharedId).get();
+      if (!doc.exists) {
+        console.warn("autoLoadSharedBank: hittade ingen sharedBanks-dokument för ID:", sharedId);
+        return;
+      }
+
+      const data = doc.data() || {};
+      const bank = data.bank || null;
+
+      if (!bank) {
+        console.warn("autoLoadSharedBank: dokument finns men saknar bank:", sharedId);
+        return;
+      }
+
+      // Sätt aktiv bank-id så inlämning/progression kan hitta rätt direkt
+      fvSetActiveSharedBankId(sharedId);
+      window.__fvSharedBankLoadedId = sharedId;
+
+      // Lägg in bank i state (minsta kompatibla sätt)
+      try {
+        const s = (typeof loadState === "function") ? loadState() : {};
+        s.bank = bank;
+        s.bankMeta = s.bankMeta || {};
+        s.bankMeta.sharedBankId = sharedId;
+        s.bankMeta.name = data.name || s.bankMeta.name || "";
+        if (typeof saveState === "function") saveState(s);
+        else {
+          try { localStorage.setItem("fangvaktaren-v17", JSON.stringify(s)); } catch (_) {}
+        }
+      } catch (_) {}
+
+      // Försök uppdatera UI om funktioner finns
+      try {
+        if (typeof applyBankToEditorState === "function") applyBankToEditorState(bank);
+      } catch (_) {}
+      try {
+        if (typeof syncUI === "function") syncUI();
+      } catch (_) {}
+      try {
+        if (typeof updateBankStatusUI === "function") updateBankStatusUI();
+      } catch (_) {}
+
+      console.log("autoLoadSharedBank: laddade shared bank OK:", sharedId);
+    } catch (err) {
+      console.error("autoLoadSharedBank: fel:", err);
+    }
+  }
+
+  async function publishCurrentBankAsShared() {
+    const statusEl = document.getElementById("sharedBankStatus");
+    const linkOutput = document.getElementById("sharedBankLinkOutput");
+    const nameInput = document.getElementById("inputBankName");
+
+    function setStatus(msg) {
+      if (statusEl) statusEl.textContent = msg;
+    }
+
+    try {
+      const db = fvGetDb();
+      const auth = fvGetAuth();
+
+      if (!window.firebase || !db || !auth) {
+        setStatus("Firebase är inte redo. Logga in med Google och försök igen.");
+        return;
+      }
+
+      const user = auth.currentUser;
+      if (!user) {
+        setStatus("Du måste vara inloggad med Google för att skapa en elevlänk.");
+        return;
+      }
+
+      const s = (typeof loadState === "function") ? loadState() : {};
+      const rawBank = s.bank || {};
+      const bank = (typeof sanitizeForFirestore === "function") ? sanitizeForFirestore(rawBank) : rawBank;
+
+      const hasMcq = Array.isArray(bank.mcq) && bank.mcq.length > 0;
+      const hasImg = Array.isArray(bank.img) && bank.img.length > 0;
+      const hasDrag = Array.isArray(bank.drag) && bank.drag.length > 0;
+
+      if (!hasMcq && !hasImg && !hasDrag) {
+        setStatus("Det finns inga frågor i den aktuella banken att publicera.");
+        return;
+      }
+
+      const bankName = (nameInput && nameInput.value.trim()) || "Frågebank utan namn";
+      setStatus("Publicerar frågebank...");
+
+      const payload = {
+        ownerUid: user.uid,
+        ownerEmail: user.email || null,
+        name: bankName,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        bank: bank
+      };
+
+      const docRef = await db.collection("sharedBanks").add(payload);
+      const sharedId = docRef.id;
+
+      const baseUrl = window.location.origin + window.location.pathname;
+      const shareUrl = baseUrl + "?bank=" + encodeURIComponent(sharedId); // ✅ viktig fix
+
+      if (linkOutput) {
+        linkOutput.value = shareUrl;
+        try { linkOutput.focus(); linkOutput.select(); } catch (_) {}
+      } else {
+        try { prompt("Kopiera elevlänken:", shareUrl); } catch (_) {}
+      }
+
+      // Sätt aktivt så lärarfliken kan läsa resultat direkt utan extra steg
+      fvSetActiveSharedBankId(sharedId);
+
+      setStatus("Elevlänk skapad. Kopiera länken och skicka till eleverna.");
+    } catch (err) {
+      console.error("Fel vid publicering av frågebank:", err);
+      const statusMsg = err && err.message ? "Fel vid publicering: " + err.message : "Fel vid publicering. Se konsolen.";
+      if (statusEl) statusEl.textContent = statusMsg;
+    }
+  }
+
+  function setupPublishSharedBank() {
+    const btnPublish = document.getElementById("btnPublishSharedBank");
+    if (!btnPublish) return;
+
+    if (btnPublish.__fvBound) return;
+    btnPublish.__fvBound = true;
+
+    btnPublish.addEventListener("click", function () {
+      publishCurrentBankAsShared();
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    setupPublishSharedBank();
+
+    // Autoload direkt + retry medan firebase init:ar
+    fvAutoloadSharedBankFromUrl();
+    let tries = 25;
+    const t = setInterval(function () {
+      fvAutoloadSharedBankFromUrl();
+      tries--;
+      if (tries <= 0) clearInterval(t);
+    }, 250);
+  });
+
+  // Exponera (om andra sektioner anropar den)
+  window.publishCurrentBankAsShared = publishCurrentBankAsShared;
+  window.autoLoadSharedBank = fvAutoloadSharedBankFromUrl;
+})();
+</script>
+<!-- slut SEKTION 3C: PUBLIK FRÅGEBANK & ELEV-LÄNK (FIX: ?bank=ID + AUTOLOAD bank/sharedBank/sb) -->
 
 
 
