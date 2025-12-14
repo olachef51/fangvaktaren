@@ -3360,43 +3360,6 @@ document.addEventListener("DOMContentLoaded", function(){
    4a – Elevdata & UI-sync
    ========================= */
 
-function getStudentId(name, klass) {
-  return (name || "Elev") + "||" + (klass || "-");
-}
-
-function ensurePlayersStore(s) {
-  if (!s.players || typeof s.players !== "object") s.players = {};
-  return s.players;
-}
-
-function getProfileForId(s, id) {
-  const players = ensurePlayersStore(s);
-  if (id && players[id]) return players[id];
-  return {
-    student: { name: s.student?.name || "", klass: s.student?.klass || "" },
-    progression: s.progression || { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {}, lastResult: null },
-    best: s.best || { E: 0, C: 0, A: 0 },
-    unlocked: s.unlocked || { C: false, A: false }
-  };
-}
-
-function loadProfileIntoState(s, id) {
-  const players = ensurePlayersStore(s);
-  const p = id && players[id] ? players[id] : null;
-  if (!p) {
-    s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {}, lastResult: null };
-    s.best = { E: 0, C: 0, A: 0 };
-    s.unlocked = { C: false, A: false };
-    saveState(s);
-    return;
-  }
-  s.student = { name: p.student?.name || "", klass: p.student?.klass || "" };
-  s.progression = p.progression || { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {}, lastResult: null };
-  s.best = p.best || { E: 0, C: 0, A: 0 };
-  s.unlocked = p.unlocked || { C: false, A: false };
-  saveState(s);
-}
-
 function ensureStudentSet() {
   const s = loadState();
   if (!s.student.name || !s.student.klass) {
@@ -3413,185 +3376,251 @@ function handleSaveStudent() {
 
   s.student.name = (nameInput && nameInput.value.trim()) || "";
   s.student.klass = (classInput && classInput.value.trim()) || "";
-
-  const id = getStudentId(s.student.name, s.student.klass);
-  ensurePlayersStore(s);
-
-  // Om elevprofil finns: ladda den, annars initiera tom profil
-  if (s.players[id]) {
-    loadProfileIntoState(s, id);
-  } else {
-    s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {}, lastResult: null };
-    s.best = { E: 0, C: 0, A: 0 };
-    s.unlocked = { C: false, A: false };
-    s.players[id] = {
-      student: { name: s.student.name, klass: s.student.klass },
-      progression: s.progression,
-      best: s.best,
-      unlocked: s.unlocked,
-      updatedAt: new Date().toISOString()
-    };
-    saveState(s);
-  }
-
-  // Om ingen vald elev i lärarvyn: sätt till denna
-  if (!s.progressViewStudentId) {
-    s.progressViewStudentId = id;
-    saveState(s);
-  }
-
-  if (typeof populateProgressStudentList === "function") {
-    try { populateProgressStudentList(); } catch (e) {}
-  }
-
+  saveState(s);
   syncUI();
 }
 
-function updateProgressionNotice() {
-  const notice = getEl("progressionNotice");
-  if (notice) notice.remove();
+function updateStudentStatsUI() {
+  const s = loadState();
+  const ptsEl = getEl("studentPointsValue");
+  const hsEl = getEl("highscoreSummary");
+
+  const totalPoints = (s.progression && typeof s.progression.totalPoints === "number")
+    ? s.progression.totalPoints
+    : 0;
+
+  if (ptsEl) ptsEl.textContent = `${totalPoints} p`;
+
+  if (hsEl) {
+    const hs = Array.isArray(s.highscores) ? s.highscores.slice() : [];
+    if (!hs.length) {
+      hsEl.textContent = "Ingen highscore ännu.";
+      return;
+    }
+    hs.sort((a, b) => (b.points || 0) - (a.points || 0));
+    const studentId = (s.student.name || "Elev") + "||" + (s.student.klass || "-");
+    const idx = hs.findIndex((e) => e.id === studentId);
+    if (idx >= 0) {
+      hsEl.textContent = `Plats ${idx + 1} av ${hs.length} (${hs[idx].points || 0} p)`;
+    } else {
+      hsEl.textContent = `Highscorelista: ${hs.length} elever på denna enhet.`;
+    }
+  }
+}
+
+function normalizeGoalsMap(s) {
+  if (!s) return [];
+
+  // Stöd flera möjliga format
+  const raw =
+    (Array.isArray(s.goalsMap) && s.goalsMap) ||
+    (s.bank && Array.isArray(s.bank.goalsMap) && s.bank.goalsMap) ||
+    (s.bank && s.bank.meta && Array.isArray(s.bank.meta.goalsMap) && s.bank.meta.goalsMap) ||
+    [];
+
+  const out = [];
+
+  raw.forEach((g, i) => {
+    if (!g) return;
+
+    // Förväntat: { id, goal, part } eller { id, goalTitle, partText }
+    const id =
+      (g.id != null ? String(g.id) : null) ||
+      (g.partId != null ? String(g.partId) : null) ||
+      (g.delbit != null ? String(g.delbit) : null) ||
+      String(i + 1);
+
+    const goal =
+      (g.goal != null ? String(g.goal) : null) ||
+      (g.goalTitle != null ? String(g.goalTitle) : null) ||
+      (g.delmal != null ? String(g.delmal) : null) ||
+      "";
+
+    const part =
+      (g.part != null ? String(g.part) : null) ||
+      (g.partText != null ? String(g.partText) : null) ||
+      (g.text != null ? String(g.text) : null) ||
+      (g.delbitText != null ? String(g.delbitText) : null) ||
+      "";
+
+    out.push({ id, goal, part });
+  });
+
+  return out;
+}
+
+function renderGoalsListAndSelects() {
+  const s = loadState();
+  const goals = normalizeGoalsMap(s);
+
+  // Lista i Inställningar
+  const listEl = getEl("goalsList");
+  if (listEl) {
+    listEl.innerHTML = "";
+    if (!goals.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga delmål/delbitar sparade ännu.";
+      listEl.appendChild(li);
+    } else {
+      goals.forEach((g) => {
+        const li = document.createElement("li");
+        const left = g.goal ? `${g.goal}` : "Delmål";
+        const right = g.part ? ` – ${g.part}` : "";
+        li.textContent = `Delbit ${g.id}: ${left}${right}`;
+        listEl.appendChild(li);
+      });
+    }
+  }
+
+  // Selects i editorerna
+  const selectIds = ["mcqGoalPart", "imgGoalPart", "dragGoalPart", "mcqJsonGoalPart"];
+  selectIds.forEach((id) => {
+    const sel = getEl(id);
+    if (!sel) return;
+
+    const keepValue = sel.value || "";
+    sel.innerHTML = "";
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "Ingen koppling";
+    sel.appendChild(opt0);
+
+    goals.forEach((g) => {
+      const opt = document.createElement("option");
+      opt.value = String(g.id);
+      const goalTxt = (g.goal || "").trim();
+      const partTxt = (g.part || "").trim();
+      opt.textContent = goalTxt && partTxt
+        ? `Delbit ${g.id}: ${goalTxt} – ${partTxt}`
+        : goalTxt
+          ? `Delbit ${g.id}: ${goalTxt}`
+          : partTxt
+            ? `Delbit ${g.id}: ${partTxt}`
+            : `Delbit ${g.id}`;
+      sel.appendChild(opt);
+    });
+
+    if (keepValue) sel.value = keepValue;
+  });
 }
 
 function updateProgressionPanel() {
   const s = loadState();
-  ensurePlayersStore(s);
+  const prog = s.progression || {};
+  const best = s.best || {};
+  const thres = s.thres || {};
 
-  const viewId = s.progressViewStudentId || getStudentId(s.student?.name || "", s.student?.klass || "");
-  const prof = getProfileForId(s, viewId);
-
-  const th = s.thres || { E: 70, C: 70, A: 70 };
-  const best = prof.best || { E: 0, C: 0, A: 0 };
-  const prog = prof.progression || { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {}, lastResult: null };
-
-  // ---- Elevkortets topprutor (elevläge) ----
-  const pointsEl = getEl("studentPointsValue");
-  if (pointsEl) pointsEl.textContent = `${prog.totalPoints || 0} p`;
-
-  const highscoreEl = getEl("highscoreSummary");
-  if (highscoreEl) {
-    const hs = Array.isArray(s.highscores) ? s.highscores.slice() : [];
-    const id = getStudentId(prof.student?.name || "", prof.student?.klass || "");
-    if (!hs.length) {
-      highscoreEl.textContent = "Ingen highscore ännu.";
-    } else {
-      hs.sort((a, b) => (b.points || 0) - (a.points || 0));
-      const idx = hs.findIndex((e) => e.id === id);
-      if (idx >= 0) {
-        highscoreEl.textContent = `Plats ${idx + 1}/${hs.length} – ${hs[idx].points || 0} p`;
-      } else {
-        highscoreEl.textContent = `Highscorelista: ${hs.length} elever på denna enhet.`;
-      }
-    }
-  }
-
-  // ---- Lärarvy: Progress (VISAR VILKEN ELEV) ----
   const pointsText = getEl("progressPointsText");
-  const last = prog.lastResult || null;
-
-  if (pointsText) {
-    const nm = prof.student?.name || "-";
-    const kl = prof.student?.klass || "-";
-    const totalPts = prog.totalPoints || 0;
-
-    let lastTxt = "Ingen spelad omgång ännu.";
-    if (last) {
-      lastTxt =
-        `Senast: nivå ${last.level || "-"} – ${last.score || 0}% (${last.correct || 0}/${last.total || 0} rätt) +${last.pointsGained || 0}p.`;
-    }
-
-    const bestTxt =
-      `Bästa: E ${best.E || 0}% (gräns ${th.E ?? 70}%), ` +
-      `C ${best.C || 0}% (gräns ${th.C ?? 70}%), ` +
-      `A ${best.A || 0}% (gräns ${th.A ?? 70}%).`;
-
-    pointsText.textContent = `Elev: ${nm} (${kl}). Totalt: ${totalPts} p. ${lastTxt} ${bestTxt}`;
-  }
-
-  // ---- Starka / svaga delbitar ----
   const strongEl = getEl("progressStrongList");
   const weakEl = getEl("progressWeakList");
 
-  if (strongEl && weakEl) {
-    strongEl.innerHTML = "";
-    weakEl.innerHTML = "";
+  const last = prog.lastResult || null;
+  const totalPoints = typeof prog.totalPoints === "number" ? prog.totalPoints : 0;
 
-    const wrongByGoal = prog.wrongByGoalId || {};
-    const correctByGoal = prog.correctByGoalId || {};
-    const allIds = new Set([...Object.keys(wrongByGoal), ...Object.keys(correctByGoal)]);
+  const tE = (thres && typeof thres.E === "number") ? thres.E : 70;
+  const tC = (thres && typeof thres.C === "number") ? thres.C : 70;
+  const tA = (thres && typeof thres.A === "number") ? thres.A : 70;
 
-    if (!allIds.size) {
-      const li1 = document.createElement("li");
-      li1.textContent = "Inga starka delbitar inlästa ännu.";
-      strongEl.appendChild(li1);
-
-      const li2 = document.createElement("li");
-      li2.textContent = "Inga svaga delbitar inlästa ännu.";
-      weakEl.appendChild(li2);
+  if (pointsText) {
+    if (!last) {
+      pointsText.textContent = "Ingen data ännu. Låt eleven spela och lämna in nivåer.";
     } else {
-      const baseThres = (typeof th.E === "number" ? th.E : 70);
+      pointsText.textContent =
+        `Totalt: ${totalPoints} p. ` +
+        `Senast: nivå ${last.level} – ${last.score}% (${last.correct}/${last.total} rätt) +${last.pointsGained || 0}p. ` +
+        `Bästa: E ${best.E || 0}% (gräns ${tE}%), C ${best.C || 0}% (gräns ${tC}%), A ${best.A || 0}% (gräns ${tA}%).`;
+    }
+  }
 
-      const stats = [];
-      allIds.forEach((id) => {
-        const c = correctByGoal[id] || 0;
-        const w = wrongByGoal[id] || 0;
-        const total = c + w;
-        if (!total) return;
-        const acc = Math.round((c / total) * 100);
-        stats.push({ id, correct: c, wrong: w, total, acc });
-      });
+  if (strongEl) strongEl.innerHTML = "";
+  if (weakEl) weakEl.innerHTML = "";
 
-      const strong = stats
-        .filter((st) => st.acc >= baseThres && st.correct > 0)
-        .sort((a, b) => b.acc - a.acc || b.correct - a.correct)
-        .slice(0, 10);
+  const wrongByGoal = prog.wrongByGoalId || {};
+  const correctByGoal = prog.correctByGoalId || {};
 
-      const weak = stats
-        .filter((st) => st.acc < baseThres || st.wrong > 0)
-        .sort((a, b) => b.wrong - a.wrong || a.acc - b.acc)
-        .slice(0, 10);
+  const allIds = new Set([
+    ...Object.keys(wrongByGoal),
+    ...Object.keys(correctByGoal)
+  ]);
 
-      if (!strong.length) {
+  if (!allIds.size) {
+    if (strongEl) {
+      const li = document.createElement("li");
+      li.textContent = "Inga starka delbitar inlästa ännu.";
+      strongEl.appendChild(li);
+    }
+    if (weakEl) {
+      const li = document.createElement("li");
+      li.textContent = "Inga svaga delbitar inlästa ännu.";
+      weakEl.appendChild(li);
+    }
+    return;
+  }
+
+  const baseThres =
+    typeof thres.E === "number" ? thres.E :
+    typeof thres.C === "number" ? thres.C :
+    typeof thres.A === "number" ? thres.A : 70;
+
+  const stats = [];
+  allIds.forEach((id) => {
+    const c = correctByGoal[id] || 0;
+    const w = wrongByGoal[id] || 0;
+    const total = c + w;
+    if (!total) return;
+    const acc = Math.round((c / total) * 100);
+    stats.push({ id, correct: c, wrong: w, total, acc });
+  });
+
+  const strong = stats
+    .filter((st) => st.acc >= baseThres && st.correct > 0)
+    .sort((a, b) => b.acc - a.acc || b.correct - a.correct)
+    .slice(0, 12);
+
+  const weak = stats
+    .filter((st) => st.acc < baseThres || st.wrong > 0)
+    .sort((a, b) => b.wrong - a.wrong || a.acc - b.acc)
+    .slice(0, 12);
+
+  if (strongEl) {
+    if (!strong.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga tydliga styrkor ännu – fortsätt spela.";
+      strongEl.appendChild(li);
+    } else {
+      strong.forEach((st) => {
         const li = document.createElement("li");
-        li.textContent = "Inga starka delbitar inlästa ännu.";
+        li.textContent = `Delbit ${st.id} – ${st.acc}% rätt (${st.correct}/${st.total})`;
         strongEl.appendChild(li);
-      } else {
-        strong.forEach((st) => {
-          const li = document.createElement("li");
-          li.textContent = `Delbit ${st.id} – ${st.acc}% rätt (${st.correct}/${st.total})`;
-          strongEl.appendChild(li);
-        });
-      }
+      });
+    }
+  }
 
-      if (!weak.length) {
+  if (weakEl) {
+    if (!weak.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga tydliga svagheter – bra jobbat!";
+      weakEl.appendChild(li);
+    } else {
+      weak.forEach((st) => {
         const li = document.createElement("li");
-        li.textContent = "Inga svaga delbitar inlästa ännu.";
+        li.textContent = `Delbit ${st.id} – ${st.wrong} fel (${st.correct}/${st.total} rätt, ${st.acc}%)`;
         weakEl.appendChild(li);
-      } else {
-        weak.forEach((st) => {
-          const li = document.createElement("li");
-          li.textContent = `Delbit ${st.id} – ${st.wrong} fel (${st.correct}/${st.total} rätt, ${st.acc}%)`;
-          weakEl.appendChild(li);
-        });
-      }
+      });
     }
   }
 }
 
 function handleGenerateProgressJson() {
-  const output = getEl("progressExportJson");
   const s = loadState();
-  ensurePlayersStore(s);
-
-  if (!output) return;
-
-  const viewId = s.progressViewStudentId || getStudentId(s.student?.name || "", s.student?.klass || "");
-  const prof = getProfileForId(s, viewId);
-  const prog = prof.progression || {};
+  const prog = s.progression || {};
   const last = prog.lastResult || null;
+
+  const output = getEl("progressExportJson");
+  if (!output) return;
 
   if (!last) {
     output.value = "";
-    alert("Ingen spelomgång hittades för vald elev. Spela en nivå först.");
     return;
   }
 
@@ -3599,8 +3628,8 @@ function handleGenerateProgressJson() {
     source: "fangvaktaren",
     version: "v17",
     student: {
-      name: prof.student?.name || "",
-      klass: prof.student?.klass || ""
+      name: s.student.name || "",
+      klass: s.student.klass || ""
     },
     result: {
       level: last.level,
@@ -3612,8 +3641,8 @@ function handleGenerateProgressJson() {
       timestamp: last.timestamp
     },
     progression: {
-      totalPoints: prog.totalPoints || 0,
-      best: prof.best || {},
+      totalPoints: (prog.totalPoints || 0),
+      best: s.best || {},
       wrongByGoalId: prog.wrongByGoalId || {},
       correctByGoalId: prog.correctByGoalId || {}
     }
@@ -3627,43 +3656,30 @@ function handleCopyProgressJson() {
   if (!output) return;
 
   const text = output.value || "";
-  if (!text.trim()) {
-    alert("Ingen JSON att kopiera.");
-    return;
-  }
+  if (!text.trim()) return;
 
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(
-      () => alert("Kopierat till urklipp."),
-      () => alert("Kunde inte kopiera automatiskt – markera och kopiera manuellt.")
-    );
-  } else {
-    alert("Kunde inte kopiera automatiskt – markera och kopiera manuellt.");
+    navigator.clipboard.writeText(text).catch(() => {});
   }
 }
 
 function updateAllProgressionUI() {
-  updateProgressionNotice();
+  updateStudentStatsUI();
   updateProgressionPanel();
+  renderGoalsListAndSelects();
 }
 
 function handleClearStudentData() {
   const s = loadState();
-  if (!confirm("Detta rensar alla sparade elevuppgifter, profiler, highscore och progression på DENNA dator. Fortsätt?")) return;
+  if (!confirm("Detta rensar alla sparade elevuppgifter, highscore och progression på DENNA dator. Fortsätt?")) return;
 
   s.student = { name: "", klass: "" };
-  s.players = {};
-  s.progressViewStudentId = "";
   s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {}, lastResult: null };
   s.best = { E: 0, C: 0, A: 0 };
   s.unlocked = { C: false, A: false };
   s.highscores = [];
+
   saveState(s);
-
-  if (typeof populateProgressStudentList === "function") {
-    try { populateProgressStudentList(); } catch (e) {}
-  }
-
   updateAllProgressionUI();
   syncUI();
 
@@ -3673,48 +3689,23 @@ function handleClearStudentData() {
 
 function handleResetGameData() {
   const s = loadState();
-  if (!confirm("Detta nollställer poäng/progression för VALD elev i elevläget (behåller namn/klass). Fortsätt?")) return;
-
-  const id = getStudentId(s.student?.name || "", s.student?.klass || "");
-  ensurePlayersStore(s);
+  if (!confirm("Detta nollställer poäng, progression och highscore men behåller nuvarande elevnamn/klass. Fortsätt?")) return;
 
   s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {}, lastResult: null };
   s.best = { E: 0, C: 0, A: 0 };
   s.unlocked = { C: false, A: false };
-
-  s.players[id] = {
-    student: { name: s.student.name || "", klass: s.student.klass || "" },
-    progression: s.progression,
-    best: s.best,
-    unlocked: s.unlocked,
-    updatedAt: new Date().toISOString()
-  };
-
-  // behåll highscores, men uppdatera aktuell elevs entry till 0p
-  if (!Array.isArray(s.highscores)) s.highscores = [];
-  const idx = s.highscores.findIndex((e) => e.id === id);
-  const nowIso = new Date().toISOString();
-  const newEntry = { id, name: s.student.name || "Elev", klass: s.student.klass || "-", points: 0, level: "-", score: 0, updatedAt: nowIso };
-  if (idx >= 0) s.highscores[idx] = newEntry;
-  else s.highscores.push(newEntry);
+  s.highscores = [];
 
   saveState(s);
-
-  if (typeof populateProgressStudentList === "function") {
-    try { populateProgressStudentList(); } catch (e) {}
-  }
-
   updateAllProgressionUI();
   syncUI();
 
   const status = getEl("resetStatus");
-  if (status) status.textContent = "Spelpoäng och progression nollställd för vald elev.";
+  if (status) status.textContent = "Spelpoäng och progression nollställd.";
 }
 
 function syncUI() {
   const s = loadState();
-  ensurePlayersStore(s);
-
   const hasStudent = !!(s.student.name && s.student.klass);
 
   const nameInput = getEl("studentName");
@@ -3724,7 +3715,9 @@ function syncUI() {
 
   const studentSaved = getEl("studentSaved");
   if (studentSaved) {
-    studentSaved.textContent = hasStudent ? `Sparad: ${s.student.name} (${s.student.klass})` : "Ej sparad elev";
+    studentSaved.textContent = hasStudent
+      ? `Sparad: ${s.student.name} (${s.student.klass})`
+      : "Ej sparad elev";
   }
 
   const bestE = getEl("best-levelE");
@@ -3800,7 +3793,11 @@ function syncUI() {
   }
 
   const who = getEl("whoPlays");
-  if (who) who.textContent = hasStudent ? `${s.student.name} (${s.student.klass})` : "Ingen elev vald.";
+  if (who) {
+    who.textContent = hasStudent
+      ? `${s.student.name} (${s.student.klass})`
+      : "Ingen elev vald.";
+  }
 
   const playSection = getEl("play");
   const resultSection = getEl("result");
@@ -3809,7 +3806,9 @@ function syncUI() {
   const isPlaying = typeof currentLevel !== "undefined" && !!currentLevel;
   const isResultVisible = resultSection && !resultSection.classList.contains("hidden");
 
-  if (studentCard) studentCard.classList.toggle("hidden", isPlaying || isResultVisible);
+  if (studentCard) {
+    studentCard.classList.toggle("hidden", isPlaying || isResultVisible);
+  }
 
   updateAllProgressionUI();
 }
@@ -3910,7 +3909,10 @@ function renderDragQuestion(q, index, host) {
 
   setupDropTarget(srcZone, null);
 
-  sources.forEach((src) => srcZone.appendChild(makeDraggableChip(src)));
+  sources.forEach((src) => {
+    const chip = makeDraggableChip(src);
+    srcZone.appendChild(chip);
+  });
 
   targets.forEach((tgt) => {
     const box = document.createElement("div");
@@ -3986,7 +3988,9 @@ function renderQuestionItem(q, index, host) {
     input.type = "radio";
     input.name = `q-${index}`;
     input.value = String(optIndex);
-    input.addEventListener("change", () => { currentAnswers[index] = optIndex; });
+    input.addEventListener("change", () => {
+      currentAnswers[index] = optIndex;
+    });
 
     const span = document.createElement("span");
     span.textContent = opt;
@@ -4037,7 +4041,9 @@ function startLevel(level) {
     else if (level === "C") title.textContent = "Nivå 2 – Mellannivå (C)";
     else title.textContent = "Nivå 3 – Avancerad (A)";
   }
-  if (who) who.textContent = `${s.student.name} (${s.student.klass})`;
+  if (who) {
+    who.textContent = `${s.student.name} (${s.student.klass})`;
+  }
 
   syncUI();
 }
@@ -4049,9 +4055,7 @@ function finishLevel() {
   }
 
   const s = loadState();
-  ensurePlayersStore(s);
-
-  const goals = s.goalsMap || [];
+  const goals = normalizeGoalsMap(s);
   let correctCount = 0;
   let pointsGained = 0;
   let allCorrect = true;
@@ -4067,7 +4071,9 @@ function finishLevel() {
   const correctByGoal = s.progression.correctByGoalId;
 
   const lvl = currentLevel;
-  const basePointsPerQuestion = (lvl === "A" ? 3 : (lvl === "C" ? 2 : 1));
+  const basePointsPerQuestion =
+    lvl === "A" ? 3 :
+    lvl === "C" ? 2 : 1;
 
   currentQuestions.forEach((q, index) => {
     const ansVal = currentAnswers[index];
@@ -4076,18 +4082,23 @@ function finishLevel() {
     if (q.type === "drag") {
       const correctMap = q.correctMap || {};
       const keys = Object.keys(correctMap);
-      if (!keys.length) isCorrect = false;
-      else if (!ansVal || typeof ansVal !== "object") isCorrect = false;
-      else {
+      if (!keys.length) {
+        isCorrect = false;
+      } else if (!ansVal || typeof ansVal !== "object") {
+        isCorrect = false;
+      } else {
         let allOk = true;
         for (const itemId of keys) {
-          if (!ansVal[itemId] || ansVal[itemId] !== correctMap[itemId]) { allOk = false; break; }
+          if (!ansVal[itemId] || ansVal[itemId] !== correctMap[itemId]) {
+            allOk = false;
+            break;
+          }
         }
         isCorrect = allOk;
       }
     } else {
       if (ansVal != null) {
-        const correctIndex = (typeof q.answer === "number") ? q.answer : q.correct;
+        const correctIndex = typeof q.answer === "number" ? q.answer : q.correct;
         isCorrect = ansVal === correctIndex;
       } else {
         isCorrect = false;
@@ -4139,21 +4150,10 @@ function finishLevel() {
   };
   s.progression.lastResult = lastResult;
 
-  // ---- Spara elevprofil lokalt (per elev) ----
-  const sid = getStudentId(s.student.name, s.student.klass);
-  s.players[sid] = {
-    student: { name: s.student.name || "", klass: s.student.klass || "" },
-    progression: s.progression,
-    best: s.best,
-    unlocked: s.unlocked,
-    updatedAt: nowIso
-  };
-  if (!s.progressViewStudentId) s.progressViewStudentId = sid;
-
-  // ---- Uppdatera lokal highscore ----
   if (!Array.isArray(s.highscores)) s.highscores = [];
+  const id = (s.student.name || "Elev") + "||" + (s.student.klass || "-");
   const newEntry = {
-    id: sid,
+    id,
     name: s.student.name || "Elev",
     klass: s.student.klass || "-",
     points: totalPointsAfter,
@@ -4161,7 +4161,7 @@ function finishLevel() {
     score: percentage,
     updatedAt: nowIso
   };
-  const idx = s.highscores.findIndex((e) => e.id === sid);
+  const idx = s.highscores.findIndex((e) => e.id === id);
   if (idx >= 0) {
     if ((newEntry.points || 0) >= (s.highscores[idx].points || 0)) s.highscores[idx] = newEntry;
   } else {
@@ -4170,7 +4170,6 @@ function finishLevel() {
 
   saveState(s);
 
-  // ---- Global lastSubmission (för e-post) ----
   lastSubmission = {
     level: lvl,
     studentName: s.student.name,
@@ -4186,15 +4185,11 @@ function finishLevel() {
       q: q.q || q.text || "",
       type: q.type || "mcq",
       level: q.level || lvl,
-      answer: (typeof q.answer === "number") ? q.answer : q.correct,
+      answer: typeof q.answer === "number" ? q.answer : q.correct,
       goal: q.goal || null,
       parts: q.parts || null
     }))
   };
-
-  if (typeof populateProgressStudentList === "function") {
-    try { populateProgressStudentList(); } catch (e) {}
-  }
 
   const playSection = getEl("play");
   const resultSection = getEl("result");
@@ -4209,14 +4204,22 @@ function finishLevel() {
   const unlockText = getEl("unlockText");
 
   if (scoreText) scoreText.innerHTML = `${percentage}%<span> resultat</span>`;
-  if (scoreDetail) scoreDetail.textContent = `${correctCount}/${total} rätt – nivåpoäng: +${pointsGained}p, totalt: ${totalPointsAfter}p`;
+  if (scoreDetail) {
+    scoreDetail.textContent =
+      `${correctCount}/${total} rätt – nivåpoäng: +${pointsGained}p, totalt: ${totalPointsAfter}p`;
+  }
   if (resName) resName.textContent = s.student.name || "-";
   if (resClass) resClass.textContent = s.student.klass || "-";
 
   if (passBadge) {
     const passed = percentage >= threshold;
-    passBadge.className = passed ? "badge-pass" : "badge-fail";
-    passBadge.textContent = passed ? "Godkänd nivå" : "Inte godkänd ännu";
+    if (passed) {
+      passBadge.className = "badge-pass";
+      passBadge.textContent = "Godkänd nivå";
+    } else {
+      passBadge.className = "badge-fail";
+      passBadge.textContent = "Inte godkänd ännu";
+    }
   }
 
   if (unlockText) {
@@ -4235,8 +4238,6 @@ function finishLevel() {
 }
 </script>
 <!-- slut SEKTION 4: SCRIPT & LOGIK FÅNGVAKTAREN (elev, spel, progression & highscore) -->
-
-
 
 
 <!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering & knappar) -->
@@ -4316,7 +4317,6 @@ function handleTeacherConfirm() {
 
   const s = loadState();
 
-  // Första gången: sätt lösenordet
   if (!s.teacherPassword) {
     s.teacherPassword = entered;
     saveState(s);
@@ -4327,7 +4327,6 @@ function handleTeacherConfirm() {
     return;
   }
 
-  // Efteråt: kontrollera lösenordet
   if (s.teacherPassword === entered) {
     if (text) text.textContent = "Lösenord OK. Öppnar lärarläge.";
     closeTeacherGate();
@@ -4346,7 +4345,6 @@ function handleTeacherConfirm() {
 function setupTabNavigation() {
   const tabButtons = document.querySelectorAll(".tab-btn");
   const panels = document.querySelectorAll(".tab-panel");
-
   if (!tabButtons.length || !panels.length) return;
 
   function activateTab(tabId) {
@@ -4358,8 +4356,7 @@ function setupTabNavigation() {
 
     panels.forEach((panel) => {
       const panelId = panel.getAttribute("data-panel");
-      const shouldShow = panelId === tabId;
-      panel.classList.toggle("hidden", !shouldShow);
+      panel.classList.toggle("hidden", panelId !== tabId);
     });
   }
 
@@ -4383,7 +4380,6 @@ function updateBankStatusUI() {
   const listEl = getEl("cloudBankList");
   if (!listEl) return;
 
-  // Säkert: sätt status-raden i samma parent som listan (undvik insertBefore-fel)
   const parent = listEl.parentNode;
   if (!parent) return;
 
@@ -4403,12 +4399,16 @@ function updateBankStatusUI() {
   const dragCount = Array.isArray(bank.drag) ? bank.drag.length : 0;
   const total = mcqCount + imgCount + dragCount;
 
-  if (!total) {
-    statusEl.textContent = "Status: Ingen frågebank laddad.";
-  } else {
-    statusEl.textContent =
-      `Status: Aktiv bank med ${total} frågor ` +
-      `(MCQ: ${mcqCount}, bild: ${imgCount}, drag & drop: ${dragCount}).`;
+  if (!total) statusEl.textContent = "Status: Ingen frågebank laddad.";
+  else statusEl.textContent = `Status: Aktiv bank med ${total} frågor (MCQ: ${mcqCount}, bild: ${imgCount}, drag & drop: ${dragCount}).`;
+}
+
+function safeCall(fnName) {
+  if (typeof window[fnName] !== "function") return;
+  try {
+    window[fnName]();
+  } catch (e) {
+    console.error(`Fel i ${fnName}:`, e);
   }
 }
 
@@ -4419,7 +4419,7 @@ function updateBankStatusUI() {
 function initApp() {
   console.log("initApp start");
 
-  // 1. Säkerställ frågebank (merga embedded-data om tom)
+  // 1) Säkerställ frågebank (merga embedded-data om tom)
   let s = loadState();
   const hasBank =
     s.bank &&
@@ -4431,28 +4431,49 @@ function initApp() {
 
   if (!hasBank && typeof mergeEmbeddedBank === "function") {
     console.log("Ingen lokal bank – mergar embedded-data");
-    s = mergeEmbeddedBank(s);
-    saveState(s);
+    try {
+      s = mergeEmbeddedBank(s);
+      saveState(s);
+    } catch (e) {
+      console.error("Fel vid mergeEmbeddedBank:", e);
+    }
   }
 
-  // 2. Initiera inställningar / editorer om de finns
-  if (typeof initThresholdSettings === "function") initThresholdSettings();
-  if (typeof initTeacherPasswordSettings === "function") initTeacherPasswordSettings();
-  showTeacherPasswordInStatus();
+  // 2) Om bank innehåller goalsMap: spegla till s.goalsMap (krävs för UI)
+  s = loadState();
+  try {
+    const bankGoals =
+      (s.bank && Array.isArray(s.bank.goalsMap) && s.bank.goalsMap) ||
+      (s.bank && s.bank.meta && Array.isArray(s.bank.meta.goalsMap) && s.bank.meta.goalsMap) ||
+      null;
 
-  if (typeof initGoalsMap === "function") initGoalsMap();
-  if (typeof initQuestionForms === "function") initQuestionForms();
-  if (typeof initImageQuestionsEditor === "function") initImageQuestionsEditor();
-  if (typeof initDragDropQuestionsEditor === "function") initDragDropQuestionsEditor();
+    if (bankGoals && (!Array.isArray(s.goalsMap) || !s.goalsMap.length)) {
+      s.goalsMap = bankGoals;
+      saveState(s);
+    }
+  } catch (e) {
+    console.error("Fel vid spegling av goalsMap:", e);
+  }
 
-  // Fliknavigering
+  // 3) Initiera inställningar/editorer (varje del isolerat så inget stoppar allt)
+  safeCall("initThresholdSettings");
+  safeCall("initTeacherPasswordSettings");
+  try { showTeacherPasswordInStatus(); } catch (e) { console.error(e); }
+
+  safeCall("initGoalsMap");
+  safeCall("initQuestionForms");
+  safeCall("initImageQuestionsEditor");
+  safeCall("initDragDropQuestionsEditor");
+
   setupTabNavigation();
 
-  if (typeof setupCloudBankUI === "function") setupCloudBankUI();
-  if (typeof syncUI === "function") syncUI();
+  safeCall("setupCloudBankUI");
 
-  // Uppdatera visuell bankstatus
-  updateBankStatusUI();
+  try { if (typeof syncUI === "function") syncUI(); } catch (e) { console.error("Fel i syncUI:", e); }
+
+  // Uppdatera visuell bankstatus + mål/delbit-UI
+  try { updateBankStatusUI(); } catch (e) { console.error("Fel i updateBankStatusUI:", e); }
+  try { if (typeof updateAllProgressionUI === "function") updateAllProgressionUI(); } catch (e) { console.error(e); }
 
   /* ---------- Elevyta: knappar ---------- */
 
@@ -4541,18 +4562,35 @@ function initApp() {
 
   const btnAddGoalPart = getEl("btnAddGoalPart");
   if (btnAddGoalPart && typeof handleAddGoalPart === "function") {
-    btnAddGoalPart.addEventListener("click", handleAddGoalPart);
+    btnAddGoalPart.addEventListener("click", () => {
+      handleAddGoalPart();
+      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
+    });
   }
 
   const btnSaveGoalsMap = getEl("btnSaveGoalsMap");
   if (btnSaveGoalsMap && typeof handleSaveGoalsMap === "function") {
-    btnSaveGoalsMap.addEventListener("click", handleSaveGoalsMap);
+    btnSaveGoalsMap.addEventListener("click", () => {
+      handleSaveGoalsMap();
+      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
+    });
   }
 
   const btnClearGoalsMap = getEl("btnClearGoalsMap");
   if (btnClearGoalsMap && typeof handleClearGoalsMap === "function") {
-    btnClearGoalsMap.addEventListener("click", handleClearGoalsMap);
+    btnClearGoalsMap.addEventListener("click", () => {
+      handleClearGoalsMap();
+      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
+    });
   }
+
+  /* ---------- Progress: JSON ---------- */
+
+  const btnGenerateProgressJson = getEl("btnGenerateProgressJson");
+  if (btnGenerateProgressJson) btnGenerateProgressJson.addEventListener("click", handleGenerateProgressJson);
+
+  const btnCopyProgressJson = getEl("btnCopyProgressJson");
+  if (btnCopyProgressJson) btnCopyProgressJson.addEventListener("click", handleCopyProgressJson);
 
   /* ---------- Rensa / nollställ elevdata ---------- */
 
@@ -4570,17 +4608,30 @@ function initApp() {
 
   const btnLoadCloudBanks = getEl("btnLoadCloudBanks");
   if (btnLoadCloudBanks && typeof handleLoadCloudBanks === "function") {
-    btnLoadCloudBanks.addEventListener("click", () => {
-      handleLoadCloudBanks();
-      updateBankStatusUI();
+    btnLoadCloudBanks.addEventListener("click", async () => {
+      try {
+        await handleLoadCloudBanks();
+      } catch (e) {
+        console.error("Fel vid handleLoadCloudBanks:", e);
+      }
+      try { updateBankStatusUI(); } catch (e) {}
+      try { if (typeof updateAllProgressionUI === "function") updateAllProgressionUI(); } catch (e) {}
+      safeCall("initQuestionForms");
+      safeCall("initImageQuestionsEditor");
+      safeCall("initDragDropQuestionsEditor");
     });
   }
 
   const btnSaveToCloud = getEl("btnSaveToCloud");
   if (btnSaveToCloud && typeof handleSaveToCloud === "function") {
-    btnSaveToCloud.addEventListener("click", () => {
-      handleSaveToCloud();
-      updateBankStatusUI();
+    btnSaveToCloud.addEventListener("click", async () => {
+      try {
+        await handleSaveToCloud();
+      } catch (e) {
+        console.error("Fel vid handleSaveToCloud:", e);
+      }
+      try { updateBankStatusUI(); } catch (e) {}
+      try { if (typeof updateAllProgressionUI === "function") updateAllProgressionUI(); } catch (e) {}
     });
   }
 
@@ -4597,6 +4648,10 @@ function initApp() {
     fileImport.addEventListener("change", (evt) => {
       handleImportBank(evt);
       updateBankStatusUI();
+      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
+      safeCall("initQuestionForms");
+      safeCall("initImageQuestionsEditor");
+      safeCall("initDragDropQuestionsEditor");
     });
   }
 
