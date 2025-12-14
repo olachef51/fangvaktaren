@@ -3770,23 +3770,46 @@ window.addEventListener("load", repositionOptionCheckboxes);
 
 
 
-<!-- start SEKTION 3X: ELEVPROGRESSION (NY DESIGN + DELETE RESULTAT/ELEV) -->
+<!-- start SEKTION 3X: ELEVPROGRESSION (NY DESIGN + DELETE-KNAPPAR SYNLIGA) -->
 <script>
-/* FV 3X v7 (2025-12-14)
-   NYTT:
-   - Delete-knapp per elevrad (tar bort ALLA inlämningar för den elev+klass-kombon i denna sharedBank).
-   - Delete enskilt resultat från detaljvyn (tar bort just den inlämningen).
-   - Highscore uppdateras automatiskt efter delete (den bygger på samma data).
-   OBS: Byt ut hela din SEKTION 3X mot denna.
-*/
 (function () {
   "use strict";
 
-  if (window.__fvProgV7Init) return;
-  window.__fvProgV7Init = true;
+  // ====== VERSION: 3X v8 (fix: delete-knapp alltid synlig) ======
+  if (window.__fvProgV8Init) return;
+  window.__fvProgV8Init = true;
 
   const RESULTS_COLLECTION_NAME = "results";
 
+  // ---------- CSS-injektion för att delete-knappen alltid syns ----------
+  function fvEnsureStyles() {
+    if (document.getElementById("fvProgV8Styles")) return;
+    const st = document.createElement("style");
+    st.id = "fvProgV8Styles";
+    st.textContent = `
+      #fvStudentList li{ list-style:none; }
+      .fv-row{ display:flex !important; gap:8px !important; align-items:stretch !important; }
+      .fv-row .fv-pick{ flex:1 1 auto !important; text-align:left !important; white-space:normal !important; }
+      .fv-row .fv-del{
+        flex:0 0 auto !important;
+        display:inline-flex !important;
+        align-items:center !important;
+        justify-content:center !important;
+        min-width:44px !important;
+        padding:8px 10px !important;
+        border-radius:10px !important;
+        border:1px solid var(--border,#1f2937) !important;
+        background: transparent !important;
+        color: var(--text,#e5e7eb) !important;
+        cursor:pointer !important;
+      }
+      .fv-row .fv-del:hover{ filter:brightness(1.1); }
+      .fv-row .fv-del:active{ transform: translateY(1px); }
+    `;
+    document.head.appendChild(st);
+  }
+
+  // ---------- Safe state ----------
   function fvGetState() {
     try { if (typeof loadState === "function") return loadState(); } catch (_) {}
     try { const raw = localStorage.getItem("fangvaktaren-v17"); return raw ? JSON.parse(raw) : {}; } catch (_) {}
@@ -3796,21 +3819,25 @@ window.addEventListener("load", repositionOptionCheckboxes);
     try { if (typeof saveState === "function") return saveState(s); } catch (_) {}
     try { localStorage.setItem("fangvaktaren-v17", JSON.stringify(s || {})); } catch (_) {}
   }
+
+  // ---------- Safe query ----------
   function fvGetQueryParamSafe(key) {
     try { if (typeof getQueryParam === "function") return getQueryParam(key); } catch (_) {}
-    try { const u = new URL(window.location.href); return u.searchParams.get(key); } catch (_) {}
+    try { return new URL(window.location.href).searchParams.get(key); } catch (_) {}
     return null;
   }
+
+  // ---------- Firestore instance ----------
   function fvGetDb() {
     try { if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return firebaseDbInstance; } catch (_) {}
     try { if (window.firebaseDbInstance) return window.firebaseDbInstance; } catch (_) {}
     try { if (window.firebase && window.firebase.firestore) return window.firebase.firestore(); } catch (_) {}
     return null;
   }
+
   function fvToDate(v) {
     try { if (v && typeof v.toDate === "function") return v.toDate(); } catch (_) {}
-    if (v instanceof Date) return v;
-    return null;
+    return v instanceof Date ? v : null;
   }
   function fvFmtDate(d) {
     try { if (d instanceof Date) return d.toLocaleString("sv-SE"); } catch (_) {}
@@ -3823,14 +3850,11 @@ window.addEventListener("load", repositionOptionCheckboxes);
     return null;
   }
   function fvNormalizeEntry(docId, d) {
-    const createdAt = fvToDate(d.createdAt);
-    const level = d.level || d.levelId || d.levelName || null;
-
     return {
       id: docId,
       studentName: d.studentName || d.name || "",
       studentClass: d.studentClass || d.class || d.className || "",
-      level: level,
+      level: d.level || d.levelId || d.levelName || null,
       score: fvPickScore(d),
       correct: typeof d.correct === "number" ? d.correct : null,
       total: typeof d.total === "number" ? d.total : null,
@@ -3841,15 +3865,12 @@ window.addEventListener("load", repositionOptionCheckboxes);
       strongGoals: Array.isArray(d.strongGoals) ? d.strongGoals : [],
       weakGoals: Array.isArray(d.weakGoals) ? d.weakGoals : [],
       goalPassThreshold: typeof d.goalPassThreshold === "number" ? d.goalPassThreshold : null,
-      createdAt: createdAt
+      createdAt: fvToDate(d.createdAt)
     };
   }
 
   function fvKey(e) {
     return (e.studentName || "").trim().toLowerCase() + "|||" + (e.studentClass || "").trim().toLowerCase();
-  }
-  function fvDisplayKey(e) {
-    return (e.studentName || "").trim() + "|||" + (e.studentClass || "").trim();
   }
 
   function fvGetLinkedSharedBankId() {
@@ -3859,17 +3880,14 @@ window.addEventListener("load", repositionOptionCheckboxes);
       fvGetQueryParamSafe("sharedBank") ||
       fvGetQueryParamSafe("sb");
     if (fromUrl) return fromUrl;
-
     const s = fvGetState();
     if (s && s.linkedSharedBankId) return s.linkedSharedBankId;
-
     return "";
   }
 
   function fvSetLinkedSharedBankId(id) {
     const clean = (id || "").trim();
     try { window.activeSharedBankId = clean; } catch (_) {}
-
     const s = fvGetState();
     s.linkedSharedBankId = clean;
     fvSaveState(s);
@@ -3878,13 +3896,10 @@ window.addEventListener("load", repositionOptionCheckboxes);
     if (inp) inp.value = clean;
 
     const st = document.getElementById("fvLinkStatus");
-    if (st) {
-      st.textContent = clean
-        ? "Kopplad till sharedBank-id: " + clean
-        : "Ingen sharedBank kopplad ännu.";
-    }
+    if (st) st.textContent = clean ? ("Kopplad till sharedBank-id: " + clean) : "Ingen sharedBank kopplad ännu.";
   }
 
+  // ---------- Host ----------
   function fvFindProgressHost() {
     return (
       document.querySelector('.tab-panel[data-panel="progress"]') ||
@@ -3895,6 +3910,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
     );
   }
 
+  // ---------- Cleanup duplicates/old ----------
   function fvRemoveDuplicateLinkBoxesByTitle() {
     const titles = Array.from(document.querySelectorAll("h4"))
       .filter((h) => (h.textContent || "").trim() === "Koppla elevresultat (sharedBank-id)");
@@ -3908,7 +3924,6 @@ window.addEventListener("load", repositionOptionCheckboxes);
   function fvCleanupOldProgressStuff() {
     const killIds = [
       "progressStudentListBox","progressStudentPointsBox","progressStrongGoalsBox","progressWeakGoalsBox",
-      "studentResultsList","studentPointsSummary","studentStrongGoals","studentWeakGoals",
       "teacherStudentList","progressStudentDetail","teacherHighscoreList","progressHighscoreBox","progressStudentsBox",
       "fvProgRoot","fvBoxLink","fvBoxStudents","fvBoxHighscore","fvBoxStrong","fvBoxWeak","fvBoxExport",
       "fvLinkedSharedBankId","fvBtnLinkBank","fvBtnClearBank","fvBtnRefresh","fvLinkStatus",
@@ -3925,17 +3940,15 @@ window.addEventListener("load", repositionOptionCheckboxes);
     fvRemoveDuplicateLinkBoxesByTitle();
   }
 
+  // ---------- UI builders ----------
   function fvEnsureRoot() {
     const host = fvFindProgressHost();
     if (!host) return null;
-
     let root = document.getElementById("fvProgRoot");
     if (root) return root;
-
     root = document.createElement("div");
     root.id = "fvProgRoot";
     root.className = "progress-grid";
-
     try { host.prepend(root); } catch (_) { host.appendChild(root); }
     return root;
   }
@@ -3943,23 +3956,20 @@ window.addEventListener("load", repositionOptionCheckboxes);
   function fvBox(titleText, id) {
     const root = fvEnsureRoot();
     if (!root) return null;
-
     let box = document.getElementById(id);
     if (box) return box;
-
     box = document.createElement("div");
     box.id = id;
     box.className = "progress-box";
-
     const h = document.createElement("h4");
     h.textContent = titleText;
-
     box.appendChild(h);
     root.appendChild(box);
     return box;
   }
 
   function fvBuildUI() {
+    fvEnsureStyles();
     fvCleanupOldProgressStuff();
 
     const linkBox = fvBox("Koppla elevresultat (sharedBank-id)", "fvBoxLink");
@@ -4015,6 +4025,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
       const list = document.createElement("ul");
       list.id = "fvStudentList";
       list.className = "goals-list mini";
+
       const li = document.createElement("li");
       li.textContent = "Inga inlämningar inlästa ännu. Koppla sharedBank-id och klicka Uppdatera.";
       list.appendChild(li);
@@ -4026,7 +4037,6 @@ window.addEventListener("load", repositionOptionCheckboxes);
       detail.style.whiteSpace = "pre-line";
       detail.textContent = "Välj en elev för att se detaljer.";
 
-      // Actions för vald elev/resultat
       const actions = document.createElement("div");
       actions.id = "fvSelectedActions";
       actions.style.display = "flex";
@@ -4105,11 +4115,12 @@ window.addEventListener("load", repositionOptionCheckboxes);
     fvSetLinkedSharedBankId(fvGetLinkedSharedBankId());
   }
 
+  // ---------- Data + selection ----------
   let fvAllEntries = [];
   let fvLatestByStudent = [];
   let fvHighscore = [];
-  let fvSelected = null;     // vald elev (senaste)
-  let fvSelectedDocId = null; // docId för senaste inlämning
+  let fvSelected = null;
+  let fvSelectedDocId = null;
 
   function fvComputeLatest(entries) {
     const map = new Map();
@@ -4135,12 +4146,9 @@ window.addEventListener("load", repositionOptionCheckboxes);
       const k = fvKey(e);
       const prev = best.get(k);
       const score = typeof e.score === "number" ? e.score : -1;
-
       if (!prev) { best.set(k, e); return; }
-
       const prevScore = typeof prev.score === "number" ? prev.score : -1;
       if (score > prevScore) { best.set(k, e); return; }
-
       if (score === prevScore) {
         const a = prev.createdAt instanceof Date ? prev.createdAt : null;
         const b = e.createdAt instanceof Date ? e.createdAt : null;
@@ -4148,207 +4156,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
         else if (a && b && b > a) best.set(k, e);
       }
     });
-
-    return Array.from(best.values())
-      .sort((a, b) => (b.score || 0) - (a.score || 0))
-      .slice(0, 50);
-  }
-
-  function fvRenderStrongWeakFromEntry(entry) {
-    const strongList = document.getElementById("fvStrongList");
-    const weakList = document.getElementById("fvWeakList");
-    if (!strongList || !weakList) return;
-
-    strongList.innerHTML = "";
-    weakList.innerHTML = "";
-
-    const strong = entry && Array.isArray(entry.strongGoals) ? entry.strongGoals : [];
-    const weak = entry && Array.isArray(entry.weakGoals) ? entry.weakGoals : [];
-
-    if (!entry) {
-      const li1 = document.createElement("li");
-      li1.textContent = "Välj en elev för att se starka delbitar.";
-      strongList.appendChild(li1);
-
-      const li2 = document.createElement("li");
-      li2.textContent = "Välj en elev för att se delbitar att öva på.";
-      weakList.appendChild(li2);
-      return;
-    }
-
-    if (!strong.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga starka delbitar sparade i detta resultat (kan vara äldre inlämning utan delbitar).";
-      strongList.appendChild(li);
-    } else {
-      strong.slice(0, 60).forEach((g) => {
-        const li = document.createElement("li");
-        const goalTxt = g.goal || "(okänt delmål)";
-        const partsTxt = g.parts || "";
-        const pct = typeof g.percent === "number" ? g.percent : "?";
-        const corr = typeof g.correct === "number" ? g.correct : "?";
-        const tot = typeof g.total === "number" ? g.total : "?";
-        li.textContent = `${goalTxt}${partsTxt ? " – " + partsTxt : ""} (${pct}% rätt, ${corr}/${tot})`;
-        strongList.appendChild(li);
-      });
-    }
-
-    if (!weak.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga svaga delbitar sparade i detta resultat.";
-      weakList.appendChild(li);
-    } else {
-      weak.slice(0, 60).forEach((g) => {
-        const li = document.createElement("li");
-        const goalTxt = g.goal || "(okänt delmål)";
-        const partsTxt = g.parts || "";
-        const pct = typeof g.percent === "number" ? g.percent : "?";
-        const corr = typeof g.correct === "number" ? g.correct : "?";
-        const tot = typeof g.total === "number" ? g.total : "?";
-        li.textContent = `${goalTxt}${partsTxt ? " – " + partsTxt : ""} (${pct}% rätt, ${corr}/${tot})`;
-        weakList.appendChild(li);
-      });
-    }
-  }
-
-  function fvRenderSelected() {
-    const detail = document.getElementById("fvStudentDetail");
-    if (!detail) return;
-
-    if (!fvSelected) {
-      detail.textContent = "Välj en elev för att se detaljer.";
-      fvRenderStrongWeakFromEntry(null);
-      return;
-    }
-
-    const e = fvSelected;
-    fvSelectedDocId = e.id || null;
-
-    const lines = [];
-    const name = e.studentName || "-";
-    const cls = e.studentClass || "-";
-    const level = e.level || "?";
-    const score = typeof e.score === "number" ? Math.round(e.score) : "?";
-    const dt = fvFmtDate(e.createdAt);
-
-    lines.push(`Elev: ${name} (${cls})`);
-    lines.push(`Senaste resultat: ${score}% på nivå ${level}`);
-    if (e.correct != null && e.total != null) lines.push(`Rätt: ${e.correct} av ${e.total}`);
-    if (typeof e.totalPoints === "number") lines.push(`Total poäng: ${e.totalPoints}`);
-    if (e.bestE != null || e.bestC != null || e.bestA != null) {
-      lines.push(
-        `Bästa per nivå – E: ${e.bestE != null ? e.bestE + "%" : "-"}, ` +
-        `C: ${e.bestC != null ? e.bestC + "%" : "-"}, ` +
-        `A: ${e.bestA != null ? e.bestA + "%" : "-"}`
-      );
-    }
-    if (e.goalPassThreshold != null) lines.push(`Gräns godkänd delbit: ${e.goalPassThreshold}% rätt`);
-    if (dt) lines.push(`Inlämnad: ${dt}`);
-    if (fvSelectedDocId) lines.push(`Resultat-id: ${fvSelectedDocId}`);
-
-    detail.textContent = lines.join("\n");
-    fvRenderStrongWeakFromEntry(e);
-  }
-
-  function fvRenderStudents() {
-    const list = document.getElementById("fvStudentList");
-    const detail = document.getElementById("fvStudentDetail");
-    if (!list || !detail) return;
-
-    list.innerHTML = "";
-
-    if (!fvLatestByStudent.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu (för denna sharedBank).";
-      list.appendChild(li);
-      detail.textContent = "Välj en elev för att se detaljer.";
-      return;
-    }
-
-    detail.textContent = "Klicka på en elev-knapp för att se detaljer, starka/svaga delbitar och export.";
-
-    fvLatestByStudent.forEach((e) => {
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.style.display = "flex";
-      li.style.gap = "8px";
-      li.style.alignItems = "stretch";
-
-      const name = e.studentName || "-";
-      const cls = e.studentClass || "-";
-      const level = e.level || "?";
-      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
-      const dt = fvFmtDate(e.createdAt);
-
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn btn-sm btn-primary";
-      btn.style.flex = "1";
-      btn.style.textAlign = "left";
-      btn.style.whiteSpace = "normal";
-      btn.textContent = `${name} (${cls}) – ${score}% på nivå ${level}${dt ? " – " + dt : ""}`;
-
-      btn.addEventListener("click", () => {
-        fvSelected = e;
-        fvRenderSelected();
-      });
-
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "btn btn-sm btn-danger";
-      del.style.flex = "0 0 auto";
-      del.textContent = "🗑️";
-      del.title = "Ta bort ALLA inlämningar för denna elev (namn + klass)";
-
-      del.addEventListener("click", async () => {
-        try {
-          const bankId = fvGetLinkedSharedBankId();
-          if (!bankId) { alert("Ingen sharedBank kopplad."); return; }
-
-          const confirmMsg =
-            `Ta bort ALLA inlämningar för:\n` +
-            `${name} (${cls})\n\n` +
-            `Detta kan inte ångras.`;
-          if (!confirm(confirmMsg)) return;
-
-          await fvDeleteAllForStudent(bankId, e.studentName, e.studentClass);
-          await fvRefreshFromFirestore();
-        } catch (err) {
-          console.error("[3X] Delete elev fel:", err);
-          alert("Kunde inte ta bort elevens inlämningar. Se konsolen.");
-        }
-      });
-
-      li.appendChild(btn);
-      li.appendChild(del);
-      list.appendChild(li);
-    });
-  }
-
-  function fvRenderHighscore() {
-    const list = document.getElementById("fvHighscoreList");
-    if (!list) return;
-
-    list.innerHTML = "";
-
-    if (!fvHighscore.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu.";
-      list.appendChild(li);
-      return;
-    }
-
-    fvHighscore.slice(0, 20).forEach((e, i) => {
-      const li = document.createElement("li");
-      const pos = i + 1;
-      const name = e.studentName || "-";
-      const cls = e.studentClass || "-";
-      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
-      const level = e.level || "?";
-      const dt = fvFmtDate(e.createdAt);
-      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}${dt ? " – " + dt : ""}`;
-      list.appendChild(li);
-    });
+    return Array.from(best.values()).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 50);
   }
 
   function fvSetStatus(msg) {
@@ -4390,24 +4198,181 @@ window.addEventListener("load", repositionOptionCheckboxes);
     const nameKey = (studentName || "").trim().toLowerCase();
     const classKey = (studentClass || "").trim().toLowerCase();
 
-    // Hämta mycket (vi begränsar per bank ändå)
     const entries = await fvFetchEntries(bankId);
-
     const toDelete = entries
-      .filter((e) => {
-        const nk = (e.studentName || "").trim().toLowerCase();
-        const ck = (e.studentClass || "").trim().toLowerCase();
-        return nk === nameKey && ck === classKey;
-      })
+      .filter((e) => (e.studentName || "").trim().toLowerCase() === nameKey && (e.studentClass || "").trim().toLowerCase() === classKey)
       .map((e) => e.id)
       .filter(Boolean);
 
-    if (!toDelete.length) return;
-
-    // Radera i serie för att undvika batch-strul i äldre SDK
     for (const id of toDelete) {
       await fvDeleteDoc(bankId, id);
     }
+  }
+
+  function fvRenderStrongWeak(entry) {
+    const strongList = document.getElementById("fvStrongList");
+    const weakList = document.getElementById("fvWeakList");
+    if (!strongList || !weakList) return;
+
+    strongList.innerHTML = "";
+    weakList.innerHTML = "";
+
+    if (!entry) {
+      const li1 = document.createElement("li");
+      li1.textContent = "Välj en elev för att se starka delbitar.";
+      strongList.appendChild(li1);
+
+      const li2 = document.createElement("li");
+      li2.textContent = "Välj en elev för att se delbitar att öva på.";
+      weakList.appendChild(li2);
+      return;
+    }
+
+    const strong = Array.isArray(entry.strongGoals) ? entry.strongGoals : [];
+    const weak = Array.isArray(entry.weakGoals) ? entry.weakGoals : [];
+
+    if (!strong.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga starka delbitar sparade i detta resultat (kan vara äldre inlämning utan delbitar).";
+      strongList.appendChild(li);
+    } else {
+      strong.slice(0, 60).forEach((g) => {
+        const li = document.createElement("li");
+        li.textContent = `${g.goal || "(okänt delmål)"}${g.parts ? " – " + g.parts : ""} (${typeof g.percent === "number" ? g.percent : "?"}% rätt)`;
+        strongList.appendChild(li);
+      });
+    }
+
+    if (!weak.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga svaga delbitar sparade i detta resultat.";
+      weakList.appendChild(li);
+    } else {
+      weak.slice(0, 60).forEach((g) => {
+        const li = document.createElement("li");
+        li.textContent = `${g.goal || "(okänt delmål)"}${g.parts ? " – " + g.parts : ""} (${typeof g.percent === "number" ? g.percent : "?"}% rätt)`;
+        weakList.appendChild(li);
+      });
+    }
+  }
+
+  function fvRenderSelected() {
+    const detail = document.getElementById("fvStudentDetail");
+    if (!detail) return;
+
+    if (!fvSelected) {
+      detail.textContent = "Välj en elev för att se detaljer.";
+      fvSelectedDocId = null;
+      fvRenderStrongWeak(null);
+      return;
+    }
+
+    const e = fvSelected;
+    fvSelectedDocId = e.id || null;
+
+    const lines = [];
+    lines.push(`Elev: ${e.studentName || "-"} (${e.studentClass || "-"})`);
+    lines.push(`Senaste resultat: ${typeof e.score === "number" ? Math.round(e.score) : "?"}% på nivå ${e.level || "?"}`);
+    if (e.correct != null && e.total != null) lines.push(`Rätt: ${e.correct} av ${e.total}`);
+    if (e.totalPoints != null) lines.push(`Total poäng: ${e.totalPoints}`);
+    if (e.goalPassThreshold != null) lines.push(`Gräns godkänd delbit: ${e.goalPassThreshold}% rätt`);
+    if (e.createdAt instanceof Date) lines.push(`Inlämnad: ${fvFmtDate(e.createdAt)}`);
+    if (fvSelectedDocId) lines.push(`Resultat-id: ${fvSelectedDocId}`);
+
+    detail.textContent = lines.join("\n");
+    fvRenderStrongWeak(e);
+  }
+
+  function fvRenderStudents() {
+    const list = document.getElementById("fvStudentList");
+    const detail = document.getElementById("fvStudentDetail");
+    if (!list || !detail) return;
+
+    list.innerHTML = "";
+
+    if (!fvLatestByStudent.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga inlämningar sparade ännu (för denna sharedBank).";
+      list.appendChild(li);
+      detail.textContent = "Välj en elev för att se detaljer.";
+      return;
+    }
+
+    fvLatestByStudent.forEach((e) => {
+      const li = document.createElement("li");
+      li.className = "mini";
+
+      const row = document.createElement("div");
+      row.className = "fv-row";
+
+      const pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "btn btn-sm btn-primary fv-pick";
+      pick.textContent =
+        `${e.studentName || "-"} (${e.studentClass || "-"}) – ` +
+        `${typeof e.score === "number" ? Math.round(e.score) : "?"}% på nivå ${e.level || "?"}` +
+        `${e.createdAt instanceof Date ? " – " + fvFmtDate(e.createdAt) : ""}`;
+
+      pick.addEventListener("click", () => {
+        fvSelected = e;
+        fvRenderSelected();
+      });
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "fv-del";
+      del.textContent = "🗑️";
+      del.title = "Ta bort ALLA inlämningar för denna elev (namn + klass)";
+      del.setAttribute("aria-label", "Ta bort elevens inlämningar");
+
+      del.addEventListener("click", async () => {
+        try {
+          const bankId = fvGetLinkedSharedBankId();
+          if (!bankId) { alert("Ingen sharedBank kopplad."); return; }
+
+          const name = e.studentName || "-";
+          const cls = e.studentClass || "-";
+          const msg = `Ta bort ALLA inlämningar för:\n${name} (${cls})\n\nDetta kan inte ångras.`;
+          if (!confirm(msg)) return;
+
+          await fvDeleteAllForStudent(bankId, e.studentName, e.studentClass);
+          await fvRefreshFromFirestore();
+        } catch (err) {
+          console.error("[3X] Delete elev fel:", err);
+          alert("Kunde inte ta bort elevens inlämningar. Se konsolen.");
+        }
+      });
+
+      row.appendChild(pick);
+      row.appendChild(del);
+
+      li.appendChild(row);
+      list.appendChild(li);
+    });
+
+    detail.textContent = "Välj en elev för att se detaljer. 🗑️ tar bort ALLA elevens inlämningar i denna bank.";
+  }
+
+  function fvRenderHighscore() {
+    const list = document.getElementById("fvHighscoreList");
+    if (!list) return;
+
+    list.innerHTML = "";
+    if (!fvHighscore.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga inlämningar sparade ännu.";
+      list.appendChild(li);
+      return;
+    }
+
+    fvHighscore.slice(0, 20).forEach((e, i) => {
+      const li = document.createElement("li");
+      li.textContent =
+        `${i + 1}. ${e.studentName || "-"} (${e.studentClass || "-"}) – ` +
+        `${typeof e.score === "number" ? Math.round(e.score) : "?"}% på nivå ${e.level || "?"}` +
+        `${e.createdAt instanceof Date ? " – " + fvFmtDate(e.createdAt) : ""}`;
+      list.appendChild(li);
+    });
   }
 
   async function fvRefreshFromFirestore() {
@@ -4435,6 +4400,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
 
       fvSelected = null;
       fvSelectedDocId = null;
+
       fvRenderStudents();
       fvRenderHighscore();
       fvRenderSelected();
@@ -4444,17 +4410,6 @@ window.addEventListener("load", repositionOptionCheckboxes);
       console.error("[3X] Fel vid laddning av elevresultat:", err);
       fvSetStatus("Fel vid laddning av elevresultat. Se konsolen.");
     }
-  }
-
-  function fvWaitForDbThenAutoRefresh(tries) {
-    const t = typeof tries === "number" ? tries : 25;
-    if (fvGetDb()) {
-      const id = fvGetLinkedSharedBankId();
-      if (id) fvRefreshFromFirestore();
-      return;
-    }
-    if (t <= 0) return;
-    setTimeout(() => fvWaitForDbThenAutoRefresh(t - 1), 250);
   }
 
   function fvBuildExportJson(entry) {
@@ -4483,27 +4438,13 @@ window.addEventListener("load", repositionOptionCheckboxes);
     };
   }
 
-  function fvDoExport() {
-    const out = document.getElementById("fvExportOutput");
-    if (!out) return;
-
-    if (!fvSelected) {
-      out.value = "";
-      alert("Välj en elev först (i elevlistan).");
-      return;
-    }
-
-    const obj = fvBuildExportJson(fvSelected);
-    out.value = JSON.stringify(obj, null, 2);
-    try { out.focus(); out.select(); } catch (_) {}
-  }
-
   function fvBindUI() {
+    const inp = document.getElementById("fvLinkedSharedBankId");
     const btnLink = document.getElementById("fvBtnLinkBank");
     const btnClear = document.getElementById("fvBtnClearBank");
     const btnRefresh = document.getElementById("fvBtnRefresh");
     const btnExport = document.getElementById("fvBtnExport");
-    const inp = document.getElementById("fvLinkedSharedBankId");
+    const out = document.getElementById("fvExportOutput");
     const btnDeleteSelected = document.getElementById("fvBtnDeleteSelected");
 
     if (btnLink && !btnLink.__fvBound) {
@@ -4528,6 +4469,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
         fvRenderStudents();
         fvRenderHighscore();
         fvRenderSelected();
+        if (out) out.value = "";
       });
     }
 
@@ -4541,7 +4483,14 @@ window.addEventListener("load", repositionOptionCheckboxes);
     if (btnExport && !btnExport.__fvBound) {
       btnExport.__fvBound = true;
       btnExport.addEventListener("click", function () {
-        fvDoExport();
+        if (!out) return;
+        if (!fvSelected) {
+          out.value = "";
+          alert("Välj en elev först.");
+          return;
+        }
+        out.value = JSON.stringify(fvBuildExportJson(fvSelected), null, 2);
+        try { out.focus(); out.select(); } catch (_) {}
       });
     }
 
@@ -4555,12 +4504,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
 
           const name = fvSelected?.studentName || "-";
           const cls = fvSelected?.studentClass || "-";
-
-          const msg =
-            `Ta bort vald inlämning (senaste) för:\n` +
-            `${name} (${cls})\n\n` +
-            `Resultat-id: ${fvSelectedDocId}\n\n` +
-            `Detta kan inte ångras.`;
+          const msg = `Ta bort vald inlämning (senaste) för:\n${name} (${cls})\n\nResultat-id: ${fvSelectedDocId}\n\nDetta kan inte ångras.`;
           if (!confirm(msg)) return;
 
           await fvDeleteDoc(bankId, fvSelectedDocId);
@@ -4573,15 +4517,27 @@ window.addEventListener("load", repositionOptionCheckboxes);
     }
   }
 
+  // ---------- Exponera alias (kompatibilitet) ----------
   window.refreshElevProgressionFromFirestore = function (optionalBankId) {
     if (optionalBankId) fvSetLinkedSharedBankId(optionalBankId);
     fvRefreshFromFirestore();
   };
-
   window.refreshHighscoreFromFirestore = function (optionalBankId) {
     if (optionalBankId) fvSetLinkedSharedBankId(optionalBankId);
     fvRefreshFromFirestore();
   };
+
+  // ---------- Boot ----------
+  function fvWaitForDbThenAutoRefresh(tries) {
+    const t = typeof tries === "number" ? tries : 25;
+    if (fvGetDb()) {
+      const id = fvGetLinkedSharedBankId();
+      if (id) fvRefreshFromFirestore();
+      return;
+    }
+    if (t <= 0) return;
+    setTimeout(() => fvWaitForDbThenAutoRefresh(t - 1), 250);
+  }
 
   document.addEventListener("DOMContentLoaded", function () {
     fvBuildUI();
@@ -4594,7 +4550,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
   });
 })();
 </script>
-<!-- slut SEKTION 3X: ELEVPROGRESSION (NY DESIGN + DELETE RESULTAT/ELEV) -->
+<!-- slut SEKTION 3X: ELEVPROGRESSION (NY DESIGN + DELETE-KNAPPAR SYNLIGA) -->
 
 
 
