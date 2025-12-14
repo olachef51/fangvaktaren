@@ -3770,526 +3770,507 @@ window.addEventListener("load", repositionOptionCheckboxes);
 
 
 
-<!-- start SEKTION 3X: LÄRARDASHBOARD (AUTO-KOPPLA VID BANKLADDNING) -->
+<!-- start SEKTION 3X: FIRESTORE-INLÄMNING, LÄRAR-HIGHSCORELISTA & ELEVPROGRESSION (FIX DUBLETTER) -->
 <script>
-/* ============================================================
-   - Auto-koppla rätt sharedBankId när banken laddas/publiseras
-   - Läraren ska inte behöva klistra in ID manuellt i normalfallet
-   ============================================================ */
-
 (function () {
   "use strict";
 
-  const FV_RESULTS_SUBCOL = "results";
-  const FV_STATE_SHARED_KEY = "linkedSharedBankId";
-  const FV_STATE_LAST_PUBLISHED_KEY = "lastPublishedSharedBankId";
+  const RESULTS_COLLECTION_NAME = "results";
 
-  function fvGetDb() {
-    try { if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return firebaseDbInstance; } catch (_) {}
-    try { if (window.firebase && typeof firebase.firestore === "function") return firebase.firestore(); } catch (_) {}
-    return null;
-  }
-
-  function fvParseSharedIdFromText(txt) {
-    const s = (txt || "").trim();
-    if (!s) return null;
-
+  /* --------------------------------------
+     Hjälpfunktion – hitta aktiv bank-id (sharedBank)
+     -------------------------------------- */
+  function fvGetActiveSharedBankId() {
     try {
-      const u = new URL(s);
-      const p = u.searchParams;
-      return p.get("sharedBank") || p.get("bank") || p.get("sb") || null;
-    } catch (_) {}
+      if (window.activeSharedBankId) return window.activeSharedBankId;
 
-    const m = s.match(/(?:\?|&)?(?:sharedBank|bank|sb)=([^&\s]+)/i);
-    if (m && m[1]) return decodeURIComponent(m[1]);
-
-    if (/^[A-Za-z0-9_-]{10,}$/.test(s)) return s;
-
-    return null;
-  }
-
-  function fvGetSharedIdFromUrl() {
-    try {
-      const href = String(window.location.href || "");
-      const search = String(window.location.search || "");
-      return fvParseSharedIdFromText(href) || fvParseSharedIdFromText(search);
-    } catch (_) {
-      return null;
+      // URL-parametrar
+      if (typeof getQueryParam === "function") {
+        return (
+          getQueryParam("bank") ||
+          getQueryParam("sharedBank") ||
+          getQueryParam("sb")
+        );
+      }
+    } catch (e) {
+      console.warn("[3X] fvGetActiveSharedBankId fel:", e);
     }
-  }
-
-  function fvGetSharedIdFromState() {
-    try {
-      const st = loadState();
-      // PRIORITET: bankens egen _sharedBankId (kopplas när banken publiceras)
-      const fromBank = st && st.bank && st.bank._sharedBankId ? st.bank._sharedBankId : null;
-      if (fromBank) return fromBank;
-
-      // annars explicit koppling
-      if (st && st[FV_STATE_SHARED_KEY]) return st[FV_STATE_SHARED_KEY];
-
-      // fallback: senaste publicerade
-      if (st && st[FV_STATE_LAST_PUBLISHED_KEY]) return st[FV_STATE_LAST_PUBLISHED_KEY];
-    } catch (_) {}
     return null;
   }
 
-  function fvSetSharedId(sharedId) {
-    if (!sharedId) return;
-    window.activeSharedBankId = sharedId;
-    try {
-      const st = loadState();
-      st[FV_STATE_SHARED_KEY] = sharedId;
-      if (!st.bank) st.bank = {};
-      st.bank._sharedBankId = st.bank._sharedBankId || sharedId;
-      saveState(st);
-    } catch (_) {}
+  /* --------------------------------------
+     Städning: ta bort gamla/dubbla rutor från äldre kod
+     -------------------------------------- */
+  function fvCleanupDuplicates() {
+    const idsToRemove = [
+      "progressStudentListBox",
+      "progressStudentPointsBox",
+      "progressStrongGoalsBox",
+      "progressWeakGoalsBox",
+      "studentResultsList",
+      "studentPointsSummary",
+      "studentStrongGoals",
+      "studentWeakGoals"
+    ];
+
+    idsToRemove.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+
+    // Ta bort gamla extra .progress-grid som innehåller gamla boxar
+    const grids = Array.from(document.querySelectorAll(".progress-grid"));
+    grids.forEach((g) => {
+      if (g.id === "fvTeacherProgressRoot") return;
+
+      const hasOld =
+        g.querySelector(
+          "#progressHighscoreBox, #progressStudentsBox, #progressStudentListBox, #progressStudentPointsBox, #progressStrongGoalsBox, #progressWeakGoalsBox"
+        ) || null;
+
+      if (hasOld && g.parentNode) {
+        g.parentNode.removeChild(g);
+      }
+    });
   }
 
-  async function fvResolveSharedId() {
-    if (window.activeSharedBankId) return window.activeSharedBankId;
+  /* --------------------------------------
+     UI: root-grid (EN enda)
+     -------------------------------------- */
+  function fvEnsureTeacherProgressRoot() {
+    // Försök hitta progress-flik i lärarmodalen
+    const modal = document.getElementById("teacherModal");
+    const panel =
+      document.querySelector('.tab-panel[data-panel="progress"]') ||
+      document.querySelector('.tab-panel[data-panel="elevprogression"]') ||
+      null;
 
-    const fromUrl = fvGetSharedIdFromUrl();
-    if (fromUrl) {
-      fvSetSharedId(fromUrl);
-      return fromUrl;
-    }
-
-    const fromState = fvGetSharedIdFromState();
-    if (fromState) {
-      fvSetSharedId(fromState);
-      return fromState;
-    }
-
-    return null;
-  }
-
-  function fvEnsureProgressGrid() {
-    let grid = document.querySelector("#teacherModal .progress-grid");
-    if (grid) return grid;
-
-    const modalBody =
-      document.querySelector("#teacherModal .modal-body") ||
-      document.getElementById("teacherModal") ||
+    const host =
+      (panel && panel.closest("#teacherModal") && panel) ||
+      (modal && (modal.querySelector(".modal-body") || modal)) ||
       document.body;
 
-    grid = document.createElement("div");
-    grid.className = "progress-grid";
-    modalBody.appendChild(grid);
-    return grid;
+    let root = document.getElementById("fvTeacherProgressRoot");
+    if (root) return root;
+
+    root = document.createElement("div");
+    root.id = "fvTeacherProgressRoot";
+    root.className = "progress-grid";
+    host.appendChild(root);
+
+    return root;
   }
 
-  function fvEnsureStatusBox(grid) {
-    let box = document.getElementById("fvAutoLinkStatusBox");
+  /* --------------------------------------
+     Highscore-box (EN enda)
+     -------------------------------------- */
+  function fvEnsureHighscoreBox() {
+    const root = fvEnsureTeacherProgressRoot();
+    if (!root) return null;
+
+    let box = document.getElementById("progressHighscoreBox");
     if (box) return box;
 
     box = document.createElement("div");
-    box.id = "fvAutoLinkStatusBox";
+    box.id = "progressHighscoreBox";
     box.className = "progress-box";
 
     const title = document.createElement("h4");
-    title.textContent = "Elevprogression – kopplad bank";
-
-    const status = document.createElement("div");
-    status.id = "fvAutoLinkStatus";
-    status.className = "mini";
-    status.textContent = "Ingen koppling ännu.";
-
-    const btn = document.createElement("button");
-    btn.id = "fvBtnReloadResults";
-    btn.className = "btn btn-sm";
-    btn.textContent = "Uppdatera elevresultat";
-
-    btn.addEventListener("click", () => {
-      fvRefreshTeacherDashboard();
-    });
-
-    box.appendChild(title);
-    box.appendChild(status);
-    box.appendChild(btn);
-
-    grid.prepend(box);
-    return box;
-  }
-
-  function fvEnsureHighscoreBox(grid) {
-    let hsBox = document.getElementById("fvHighscoreBox");
-    if (hsBox) return hsBox;
-
-    hsBox = document.createElement("div");
-    hsBox.id = "fvHighscoreBox";
-    hsBox.className = "progress-box";
-
-    const title = document.createElement("h4");
-    title.textContent = "Highscore (poäng – en rad per elev)";
+    title.textContent = "Highscore (sparat i molnet)";
 
     const list = document.createElement("ul");
-    list.id = "fvHighscoreList";
+    list.id = "teacherHighscoreList";
     list.className = "goals-list mini";
 
     const li = document.createElement("li");
     li.textContent = "Inga inlämningar sparade ännu.";
     list.appendChild(li);
 
-    hsBox.appendChild(title);
-    hsBox.appendChild(list);
-    grid.appendChild(hsBox);
-    return hsBox;
-  }
-
-  function fvEnsureStudentsBox(grid) {
-    let box = document.getElementById("fvStudentsBox");
-    if (box) return box;
-
-    box = document.createElement("div");
-    box.id = "fvStudentsBox";
-    box.className = "progress-box";
-
-    const title = document.createElement("h4");
-    title.textContent = "Elever (flikar)";
-
-    const tabs = document.createElement("div");
-    tabs.id = "fvStudentTabs";
-    tabs.style.display = "flex";
-    tabs.style.flexWrap = "wrap";
-    tabs.style.gap = "6px";
-    tabs.style.marginTop = "6px";
-
-    const panel = document.createElement("div");
-    panel.id = "fvStudentPanel";
-    panel.className = "mini";
-    panel.style.marginTop = "10px";
-    panel.textContent = "Välj en elevflik för att se detaljer.";
-
-    const strongTitle = document.createElement("h4");
-    strongTitle.textContent = "Starka delbitar";
-
-    const strongList = document.createElement("ul");
-    strongList.id = "fvStrongList";
-    strongList.className = "goals-list mini";
-
-    const weakTitle = document.createElement("h4");
-    weakTitle.textContent = "Delbitar att öva på";
-
-    const weakList = document.createElement("ul");
-    weakList.id = "fvWeakList";
-    weakList.className = "goals-list mini";
-
     box.appendChild(title);
-    box.appendChild(tabs);
-    box.appendChild(panel);
-    box.appendChild(strongTitle);
-    box.appendChild(strongList);
-    box.appendChild(weakTitle);
-    box.appendChild(weakList);
+    box.appendChild(list);
+    root.appendChild(box);
 
-    grid.appendChild(box);
     return box;
   }
 
-  async function fvFetchAllResults(sharedId) {
-    const db = fvGetDb();
-    if (!db) return null;
+  /* --------------------------------------
+     Elevlista + detaljvy-box (EN enda)
+     -------------------------------------- */
+  function fvEnsureStudentsBox() {
+    const root = fvEnsureTeacherProgressRoot();
+    if (!root) return null;
 
-    const ref = db.collection("sharedBanks").doc(sharedId).collection(FV_RESULTS_SUBCOL);
-    const snap = await ref.orderBy("createdAt", "desc").limit(1000).get();
+    let box = document.getElementById("progressStudentsBox");
+    if (box) return box;
 
-    const rows = [];
-    snap.forEach((doc) => {
-      const d = doc.data() || {};
-      const dt = d.createdAt && typeof d.createdAt.toDate === "function" ? d.createdAt.toDate() : null;
-      rows.push({ id: doc.id, ...d, createdAt: dt });
-    });
-    return rows;
+    box = document.createElement("div");
+    box.id = "progressStudentsBox";
+    box.className = "progress-box";
+
+    const title = document.createElement("h4");
+    title.textContent = "Elever (senaste inlämning per elev)";
+
+    const btn = document.createElement("button");
+    btn.id = "btnRefreshProgression";
+    btn.className = "btn btn-sm";
+    btn.textContent = "Uppdatera elevprogression";
+
+    const list = document.createElement("ul");
+    list.id = "teacherStudentList";
+    list.className = "goals-list mini";
+
+    const li = document.createElement("li");
+    li.textContent = "Inga inlämningar sparade ännu.";
+    list.appendChild(li);
+
+    const detail = document.createElement("div");
+    detail.id = "progressStudentDetail";
+    detail.className = "mini";
+    detail.style.marginTop = "8px";
+    detail.style.whiteSpace = "pre-line";
+    detail.textContent = "Välj en elev i listan för att se detaljer.";
+
+    box.appendChild(title);
+    box.appendChild(btn);
+    box.appendChild(list);
+    box.appendChild(detail);
+
+    root.appendChild(box);
+
+    return box;
   }
 
-  function fvStudentKey(d) {
-    const name = (d.studentName || d.name || "").trim();
-    const cls = (d.studentClass || d.className || d.class || "").trim();
-    return name + "|||" + cls;
+  /* --------------------------------------
+     Helpers: normalisering & sortering
+     -------------------------------------- */
+  function fvFormatDate(d) {
+    try {
+      if (d instanceof Date) return d.toLocaleString("sv-SE");
+    } catch (_) {}
+    return "";
   }
 
-  function fvNormalizePercent(d) {
-    const p =
-      (typeof d.scorePercent === "number" ? d.scorePercent : null) ??
-      (typeof d.percent === "number" ? d.percent : null);
-    return typeof p === "number" && !isNaN(p) ? p : null;
+  function fvPickScore(d) {
+    if (typeof d.scorePercent === "number") return d.scorePercent;
+    if (typeof d.percent === "number") return d.percent;
+    if (typeof d.score === "number") return d.score;
+    return null;
   }
 
-  function fvNormalizeLevel(d) {
-    const lvl = d.levelId || d.level || null;
-    if (!lvl) return null;
-    const t = String(lvl).trim().toUpperCase();
-    if (t === "E" || t === "C" || t === "A") return t;
-    return t || null;
+  function fvNormalizeEntry(docId, d) {
+    const createdAt =
+      d.createdAt && typeof d.createdAt.toDate === "function"
+        ? d.createdAt.toDate()
+        : d.createdAt instanceof Date
+        ? d.createdAt
+        : null;
+
+    const level = d.level || d.levelId || d.levelName || null;
+
+    return {
+      id: docId,
+      studentName: d.studentName || d.name || "",
+      studentClass: d.studentClass || d.class || d.className || "",
+      level: level,
+      score: fvPickScore(d),
+      correct: typeof d.correct === "number" ? d.correct : null,
+      total: typeof d.total === "number" ? d.total : null,
+      totalPoints: typeof d.totalPoints === "number" ? d.totalPoints : null,
+      bestE: d.bestE != null ? d.bestE : null,
+      bestC: d.bestC != null ? d.bestC : null,
+      bestA: d.bestA != null ? d.bestA : null,
+      strongGoals: Array.isArray(d.strongGoals) ? d.strongGoals : [],
+      weakGoals: Array.isArray(d.weakGoals) ? d.weakGoals : [],
+      goalPassThreshold: typeof d.goalPassThreshold === "number" ? d.goalPassThreshold : null,
+      createdAt
+    };
   }
 
-  function fvAggregateByStudent(rows) {
+  function fvBuildLatestByStudent(entries) {
     const map = new Map();
-
-    rows.forEach((d) => {
-      const key = fvStudentKey(d);
-      if (!key || key.startsWith("|||")) return;
-
+    entries.forEach((e) => {
+      const key = (e.studentName || "") + "|||" + (e.studentClass || "");
       const prev = map.get(key);
-      const dt = d.createdAt instanceof Date ? d.createdAt : null;
-
-      const totalPoints = typeof d.totalPoints === "number" ? d.totalPoints : null;
-      const bestE = typeof d.bestE === "number" ? d.bestE : null;
-      const bestC = typeof d.bestC === "number" ? d.bestC : null;
-      const bestA = typeof d.bestA === "number" ? d.bestA : null;
-
-      const percent = fvNormalizePercent(d);
-      const level = fvNormalizeLevel(d);
-
       if (!prev) {
-        map.set(key, {
-          key: key,
-          studentName: (d.studentName || d.name || "").trim(),
-          studentClass: (d.studentClass || d.className || d.class || "").trim(),
-          latest: d,
-          latestAt: dt,
-          latestPercent: percent,
-          latestLevel: level,
-          totalPointsMax: totalPoints != null ? totalPoints : 0,
-          bestEmax: bestE != null ? bestE : 0,
-          bestCmax: bestC != null ? bestC : 0,
-          bestAmax: bestA != null ? bestA : 0
-        });
+        map.set(key, e);
+        return;
+      }
+      const a = prev.createdAt instanceof Date ? prev.createdAt : null;
+      const b = e.createdAt instanceof Date ? e.createdAt : null;
+      if (!a && b) map.set(key, e);
+      else if (a && b && b > a) map.set(key, e);
+    });
+    return Array.from(map.values());
+  }
+
+  function fvBuildHighscore(entries) {
+    // En rad per elev: bästa score (tie-break: senast)
+    const bestByStudent = new Map();
+
+    entries.forEach((e) => {
+      const key = (e.studentName || "") + "|||" + (e.studentClass || "");
+      const prev = bestByStudent.get(key);
+
+      const score = typeof e.score === "number" ? e.score : -1;
+      if (!prev) {
+        bestByStudent.set(key, e);
         return;
       }
 
-      if (typeof totalPoints === "number" && totalPoints > (prev.totalPointsMax || 0)) prev.totalPointsMax = totalPoints;
-      if (typeof bestE === "number" && bestE > (prev.bestEmax || 0)) prev.bestEmax = bestE;
-      if (typeof bestC === "number" && bestC > (prev.bestCmax || 0)) prev.bestCmax = bestC;
-      if (typeof bestA === "number" && bestA > (prev.bestAmax || 0)) prev.bestAmax = bestA;
+      const prevScore = typeof prev.score === "number" ? prev.score : -1;
+      if (score > prevScore) {
+        bestByStudent.set(key, e);
+        return;
+      }
 
-      const prevAt = prev.latestAt instanceof Date ? prev.latestAt : null;
-      if (!prevAt || (dt && dt > prevAt)) {
-        prev.latest = d;
-        prev.latestAt = dt;
-        prev.latestPercent = percent;
-        prev.latestLevel = level;
+      if (score === prevScore) {
+        const a = prev.createdAt instanceof Date ? prev.createdAt : null;
+        const b = e.createdAt instanceof Date ? e.createdAt : null;
+        if (!a && b) bestByStudent.set(key, e);
+        else if (a && b && b > a) bestByStudent.set(key, e);
       }
     });
 
-    const students = Array.from(map.values());
-    students.sort((a, b) => {
-      const an = (a.studentClass || "") + " " + (a.studentName || "");
-      const bn = (b.studentClass || "") + " " + (b.studentName || "");
-      return an.localeCompare(bn, "sv-SE");
-    });
-
-    return students;
+    return Array.from(bestByStudent.values())
+      .sort((a, b) => (b.score || 0) - (a.score || 0))
+      .slice(0, 20);
   }
 
-  function fvRenderHighscore(students) {
-    const list = document.getElementById("fvHighscoreList");
+  /* --------------------------------------
+     UI: Highscore
+     -------------------------------------- */
+  function fvUpdateHighscoreUI(entries) {
+    fvEnsureHighscoreBox();
+    const list = document.getElementById("teacherHighscoreList");
     if (!list) return;
 
     list.innerHTML = "";
 
-    if (!students || !students.length) {
+    if (!entries || !entries.length) {
       const li = document.createElement("li");
       li.textContent = "Inga inlämningar sparade ännu.";
       list.appendChild(li);
       return;
     }
 
-    const sorted = students.slice().sort((a, b) => (b.totalPointsMax || 0) - (a.totalPointsMax || 0));
-    const top = sorted.slice(0, 20);
-
-    top.forEach((s, idx) => {
+    entries.forEach((e, i) => {
       const li = document.createElement("li");
-      const rank = idx + 1;
-      const name = s.studentName || "-";
-      const cls = s.studentClass || "-";
-      const points = (s.totalPointsMax || 0);
-      const pct = (typeof s.latestPercent === "number") ? Math.round(s.latestPercent) : "?";
-      const lvl = s.latestLevel || "?";
-      const dt = (s.latestAt instanceof Date) ? " – " + s.latestAt.toLocaleString("sv-SE") : "";
-      li.textContent = `${rank}. ${name} (${cls}) – ${points}p – senaste: ${pct}% nivå ${lvl}${dt}`;
+      const pos = i + 1;
+      const name = e.studentName || "-";
+      const cls = e.studentClass || "-";
+      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
+      const level = e.level || "?";
+      const dateStr = fvFormatDate(e.createdAt);
+      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}${
+        dateStr ? " – " + dateStr : ""
+      }`;
       list.appendChild(li);
     });
   }
 
-  function fvRenderStudentTabs(students) {
-    const tabs = document.getElementById("fvStudentTabs");
-    const panel = document.getElementById("fvStudentPanel");
-    const strongList = document.getElementById("fvStrongList");
-    const weakList = document.getElementById("fvWeakList");
-    if (!tabs || !panel || !strongList || !weakList) return;
+  /* --------------------------------------
+     UI: Elevdetaljer (inkl. delbitar) – EN detaljruta, inga extra boxar
+     -------------------------------------- */
+  function fvRenderStudentDetail(e) {
+    const detail = document.getElementById("progressStudentDetail");
+    if (!detail) return;
 
-    tabs.innerHTML = "";
-    strongList.innerHTML = "";
-    weakList.innerHTML = "";
-    panel.textContent = "Välj en elevflik för att se detaljer.";
+    const lines = [];
+    const name = e.studentName || "-";
+    const cls = e.studentClass || "-";
+    const level = e.level || "?";
+    const score = typeof e.score === "number" ? Math.round(e.score) : "?";
 
-    if (!students || !students.length) return;
+    lines.push(`Elev: ${name}`);
+    lines.push(`Klass: ${cls}`);
+    lines.push(`Senaste resultat: ${score}% på nivå ${level}`);
 
-    function renderLists(latest) {
-      const strong = Array.isArray(latest.strongGoals) ? latest.strongGoals : [];
-      const weak = Array.isArray(latest.weakGoals) ? latest.weakGoals : [];
-
-      strongList.innerHTML = "";
-      if (!strong.length) {
-        const li = document.createElement("li");
-        li.textContent = "Inga starka delbitar för senaste inlämningen.";
-        strongList.appendChild(li);
-      } else {
-        strong.forEach((g) => {
-          const li = document.createElement("li");
-          const goalTxt = g.goal || "(okänt delmål)";
-          const partsTxt = g.parts || "";
-          const pct2 = (typeof g.percent === "number") ? Math.round(g.percent) : "?";
-          const corr = (typeof g.correct === "number") ? g.correct : "?";
-          const tot = (typeof g.total === "number") ? g.total : "?";
-          li.textContent = `${goalTxt} – ${partsTxt} (${pct2}% rätt, ${corr}/${tot})`;
-          strongList.appendChild(li);
-        });
-      }
-
-      weakList.innerHTML = "";
-      if (!weak.length) {
-        const li = document.createElement("li");
-        li.textContent = "Inga svaga delbitar för senaste inlämningen.";
-        weakList.appendChild(li);
-      } else {
-        weak.forEach((g) => {
-          const li = document.createElement("li");
-          const goalTxt = g.goal || "(okänt delmål)";
-          const partsTxt = g.parts || "";
-          const pct2 = (typeof g.percent === "number") ? Math.round(g.percent) : "?";
-          const corr = (typeof g.correct === "number") ? g.correct : "?";
-          const tot = (typeof g.total === "number") ? g.total : "?";
-          li.textContent = `${goalTxt} – ${partsTxt} (${pct2}% rätt, ${corr}/${tot})`;
-          weakList.appendChild(li);
-        });
-      }
+    if (e.correct != null && e.total != null) {
+      lines.push(`Rätt: ${e.correct} av ${e.total}`);
     }
 
-    function selectStudent(st) {
-      const latest = st.latest || {};
-      const name = st.studentName || "-";
-      const cls = st.studentClass || "-";
-      const pts = st.totalPointsMax || 0;
-      const pct = (typeof st.latestPercent === "number") ? Math.round(st.latestPercent) : "?";
-      const lvl = st.latestLevel || "?";
-      const dt = (st.latestAt instanceof Date) ? st.latestAt.toLocaleString("sv-SE") : "okänt datum";
-
-      panel.textContent =
-        `Elev: ${name} (${cls})\n` +
-        `Total poäng: ${pts}\n` +
-        `Senaste resultat: ${pct}% på nivå ${lvl}\n` +
-        `Bästa per nivå – E: ${Math.round(st.bestEmax || 0)}%, C: ${Math.round(st.bestCmax || 0)}%, A: ${Math.round(st.bestAmax || 0)}%\n` +
-        `Senast inlämnat: ${dt}`;
-
-      renderLists(latest);
+    if (typeof e.totalPoints === "number") {
+      lines.push(`Total poäng: ${e.totalPoints}`);
     }
 
-    students.forEach((st, idx) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn btn-sm";
-      btn.textContent = `${st.studentName || "-"} (${st.studentClass || "-"})`;
+    if (e.bestE != null || e.bestC != null || e.bestA != null) {
+      lines.push(
+        `Bästa per nivå – E: ${e.bestE != null ? e.bestE + "%" : "-"}, ` +
+          `C: ${e.bestC != null ? e.bestC + "%" : "-"}, ` +
+          `A: ${e.bestA != null ? e.bestA + "%" : "-"}`
+      );
+    }
 
-      btn.addEventListener("click", () => {
-        Array.from(tabs.querySelectorAll("button")).forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        selectStudent(st);
+    if (e.goalPassThreshold != null) {
+      lines.push(`Gräns godkänd delbit: ${e.goalPassThreshold}% rätt`);
+    }
+
+    const dateStr = fvFormatDate(e.createdAt);
+    if (dateStr) lines.push(`Inlämnad: ${dateStr}`);
+
+    // Delbitar
+    if (e.strongGoals && e.strongGoals.length) {
+      lines.push("");
+      lines.push("Starka delbitar:");
+      e.strongGoals.slice(0, 20).forEach((g) => {
+        const goal = g.goal || "(okänt delmål)";
+        const parts = g.parts ? " – " + g.parts : "";
+        const pct = typeof g.percent === "number" ? g.percent : "?";
+        const corr = typeof g.correct === "number" ? g.correct : "?";
+        const tot = typeof g.total === "number" ? g.total : "?";
+        lines.push(`• ${goal}${parts} (${pct}% rätt, ${corr}/${tot})`);
       });
+    }
 
-      tabs.appendChild(btn);
+    if (e.weakGoals && e.weakGoals.length) {
+      lines.push("");
+      lines.push("Delbitar att öva på:");
+      e.weakGoals.slice(0, 20).forEach((g) => {
+        const goal = g.goal || "(okänt delmål)";
+        const parts = g.parts ? " – " + g.parts : "";
+        const pct = typeof g.percent === "number" ? g.percent : "?";
+        const corr = typeof g.correct === "number" ? g.correct : "?";
+        const tot = typeof g.total === "number" ? g.total : "?";
+        lines.push(`• ${goal}${parts} (${pct}% rätt, ${corr}/${tot})`);
+      });
+    }
 
-      if (idx === 0) {
-        btn.classList.add("active");
-        selectStudent(st);
-      }
+    if (
+      (!e.strongGoals || !e.strongGoals.length) &&
+      (!e.weakGoals || !e.weakGoals.length)
+    ) {
+      lines.push("");
+      lines.push("Delbitar: saknas i denna inlämning (äldre resultat kan vara sparade utan delbitar).");
+    }
+
+    detail.textContent = lines.join("\n");
+  }
+
+  /* --------------------------------------
+     UI: Elevlista (senaste per elev)
+     -------------------------------------- */
+  function fvUpdateStudentListUI(entriesAll) {
+    fvEnsureStudentsBox();
+
+    const list = document.getElementById("teacherStudentList");
+    const detail = document.getElementById("progressStudentDetail");
+    if (!list || !detail) return;
+
+    list.innerHTML = "";
+
+    if (!entriesAll || !entriesAll.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga inlämningar sparade ännu.";
+      list.appendChild(li);
+      detail.textContent = "Välj en elev i listan för att se detaljer.";
+      return;
+    }
+
+    const latest = fvBuildLatestByStudent(entriesAll);
+
+    latest.sort((a, b) => {
+      const an = (a.studentClass || "") + " " + (a.studentName || "");
+      const bn = (b.studentClass || "") + " " + (b.studentName || "");
+      return an.localeCompare(bn, "sv-SE");
+    });
+
+    detail.textContent = "Klicka på en elev för att se detaljer (inkl. delbitar).";
+
+    latest.forEach((e) => {
+      const li = document.createElement("li");
+      li.className = "clickable mini";
+
+      const name = e.studentName || "-";
+      const cls = e.studentClass || "-";
+      const level = e.level || "?";
+      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
+      const dateStr = fvFormatDate(e.createdAt);
+
+      li.textContent = `${name} (${cls}) – ${score}% på nivå ${level}${
+        dateStr ? " – " + dateStr : ""
+      }`;
+
+      li.addEventListener("click", () => fvRenderStudentDetail(e));
+      list.appendChild(li);
     });
   }
 
-  async function fvRefreshTeacherDashboard() {
-    const statusEl = document.getElementById("fvAutoLinkStatus");
-    const sharedId = await fvResolveSharedId();
-
-    if (!sharedId) {
-      if (statusEl) statusEl.textContent = "Hittar ingen sharedBank-id. Publicera banken (skapa elevlänk) så kopplas den automatiskt.";
-      fvRenderHighscore([]);
-      fvRenderStudentTabs([]);
+  /* --------------------------------------
+     Firestore: Läs resultat och uppdatera UI
+     -------------------------------------- */
+  function refreshElevProgressionFromFirestore(optionalBankId) {
+    if (!window.firebaseDbInstance) {
+      console.warn("[3X] Ingen firebaseDbInstance – kan inte ladda elevprogression.");
       return;
     }
 
-    const db = fvGetDb();
-    if (!db) {
-      if (statusEl) statusEl.textContent = "Tekniskt fel: kan inte nå Firestore (db saknas).";
-      return;
-    }
-
-    if (statusEl) statusEl.textContent = "Kopplad bank: " + sharedId + " – läser in elevresultat...";
-
-    let rows = null;
-    try {
-      rows = await fvFetchAllResults(sharedId);
-    } catch (e) {
-      console.error("[3X] Fel vid inläsning av resultat:", e);
-      if (statusEl) statusEl.textContent = "Fel vid inläsning. Se konsolen.";
-      return;
-    }
-
-    const students = fvAggregateByStudent(rows || []);
-    fvRenderHighscore(students);
-    fvRenderStudentTabs(students);
-
-    if (statusEl) {
-      statusEl.textContent =
-        (rows && rows.length)
-          ? `Kopplad bank: ${sharedId} – Inläst: ${rows.length} inlämningar (${students.length} elever)`
-          : `Kopplad bank: ${sharedId} – Inga inlämningar hittades`;
-    }
-  }
-
-  function fvAutoBindOnBankLoadTick() {
-    // kör en stund efter init: om banken laddas/publiseras så dyker _sharedBankId upp i state
-    try {
-      const fromState = fvGetSharedIdFromState();
-      if (fromState && (!window.activeSharedBankId || window.activeSharedBankId !== fromState)) {
-        fvSetSharedId(fromState);
+    const bankId = optionalBankId || fvGetActiveSharedBankId();
+    if (!bankId) {
+      console.warn("[3X] Ingen bankId – kan inte läsa elevprogression.");
+      const detail = document.getElementById("progressStudentDetail");
+      if (detail) {
+        detail.textContent =
+          "Hittar ingen sharedBank-id. Öppna spelet med ?bank=ID eller ?sharedBank=ID.";
       }
-    } catch (_) {}
+      return;
+    }
+
+    const resultsRef = window.firebaseDbInstance
+      .collection("sharedBanks")
+      .doc(bankId)
+      .collection(RESULTS_COLLECTION_NAME);
+
+    resultsRef
+      .orderBy("createdAt", "desc")
+      .limit(500)
+      .get()
+      .then((snapshot) => {
+        const entries = [];
+        snapshot.forEach((doc) => {
+          const d = doc.data() || {};
+          entries.push(fvNormalizeEntry(doc.id, d));
+        });
+
+        fvUpdateStudentListUI(entries);
+
+        const hs = fvBuildHighscore(entries);
+        fvUpdateHighscoreUI(hs);
+      })
+      .catch((err) => {
+        console.error("[3X] Fel vid elevprogression-laddning:", err);
+      });
   }
 
+  // Kompatibilitet: andra delar kan anropa dessa
+  window.refreshElevProgressionFromFirestore = refreshElevProgressionFromFirestore;
+  window.refreshHighscoreFromFirestore = function (optionalBankId) {
+    refreshElevProgressionFromFirestore(optionalBankId);
+  };
+
+  /* --------------------------------------
+     Init
+     -------------------------------------- */
   document.addEventListener("DOMContentLoaded", function () {
-    const grid = fvEnsureProgressGrid();
-    fvEnsureStatusBox(grid);
-    fvEnsureHighscoreBox(grid);
-    fvEnsureStudentsBox(grid);
+    fvCleanupDuplicates();
+    fvEnsureHighscoreBox();
+    fvEnsureStudentsBox();
 
-    // Aliases så andra delar kan trigga refresh utan att veta intern funktion
-    window.fvRefreshTeacherDashboard = fvRefreshTeacherDashboard;
-    window.refreshHighscoreFromFirestore = function () { fvRefreshTeacherDashboard(); };
-    window.refreshElevProgressionFromFirestore = function () { fvRefreshTeacherDashboard(); };
+    const btn = document.getElementById("btnRefreshProgression");
+    if (btn && !btn.__fvBound) {
+      btn.__fvBound = true;
+      btn.addEventListener("click", function () {
+        refreshElevProgressionFromFirestore();
+      });
+    }
 
-    // Auto-bind direkt
-    setTimeout(() => {
-      const urlId = fvGetSharedIdFromUrl();
-      if (urlId) fvSetSharedId(urlId);
-      fvRefreshTeacherDashboard();
-    }, 350);
-
-    // Auto-bind även efter att läraren laddat/publiserat bank (minskar risken för fel progression)
-    let ticks = 0;
-    const iv = setInterval(() => {
-      ticks++;
-      fvAutoBindOnBankLoadTick();
-      if (ticks === 2 || ticks === 4 || ticks === 8) {
-        fvRefreshTeacherDashboard();
-      }
-      if (ticks > 12) clearInterval(iv);
-    }, 800);
+    const bankId = fvGetActiveSharedBankId();
+    if (bankId) {
+      refreshElevProgressionFromFirestore(bankId);
+    }
   });
 })();
 </script>
-<!-- slut SEKTION 3X: LÄRARDASHBOARD (AUTO-KOPPLA VID BANKLADDNING) -->
+<!-- slut SEKTION 3X: FIRESTORE-INLÄMNING, LÄRAR-HIGHSCORELISTA & ELEVPROGRESSION (FIX DUBLETTER) -->
 
 
 
