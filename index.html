@@ -3772,13 +3772,18 @@ window.addEventListener("load", repositionOptionCheckboxes);
 
 <!-- start SEKTION 3X: ELEVPROGRESSION (NY DESIGN + MANUELL KOPPLING SHARED BANK ID) -->
 <script>
-/* FV 3X v5 (2025-12-14)
-   FIX: "Välj elev"-knappar tillbaka (renderar varje elevrad som en riktig <button>).
+/* FV 3X v6 (2025-12-14)
+   FIX:
+   - Tar bort dublett av "Koppla elevresultat (sharedBank-id)" (behåller första).
+   - Elevrader renderas som riktiga <button> (synliga/clickbara).
+   - Skydd mot dubbel init om SEKTION 3X råkat ligga två gånger.
    OBS: Byt ut hela din SEKTION 3X mot denna.
 */
-
 (function () {
   "use strict";
+
+  if (window.__fvProgV6Init) return;
+  window.__fvProgV6Init = true;
 
   const RESULTS_COLLECTION_NAME = "results";
 
@@ -3882,17 +3887,30 @@ window.addEventListener("load", repositionOptionCheckboxes);
   }
 
   function fvFindProgressHost() {
-    const panel =
+    return (
       document.querySelector('.tab-panel[data-panel="progress"]') ||
       document.querySelector('.tab-panel[data-panel="elevprogression"]') ||
       document.querySelector("#teacherModal .modal-body") ||
       document.getElementById("teacherModal") ||
-      document.body;
-    return panel;
+      document.body
+    );
+  }
+
+  function fvRemoveDuplicateLinkBoxesByTitle() {
+    const titles = Array.from(document.querySelectorAll("h4"))
+      .filter((h) => (h.textContent || "").trim() === "Koppla elevresultat (sharedBank-id)");
+    if (titles.length <= 1) return;
+
+    // Ta bort ALLA utom första (”ta bort den sista” + ev fler)
+    for (let i = titles.length - 1; i >= 1; i--) {
+      const box = titles[i].closest(".progress-box") || titles[i].parentElement;
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+    }
   }
 
   function fvCleanupOldProgressStuff() {
     const killIds = [
+      // gamla rutor
       "progressStudentListBox",
       "progressStudentPointsBox",
       "progressStrongGoalsBox",
@@ -3906,9 +3924,29 @@ window.addEventListener("load", repositionOptionCheckboxes);
       "teacherHighscoreList",
       "progressHighscoreBox",
       "progressStudentsBox",
-      "fvTeacherProgressRoot",
-      "fvProgRoot"
+
+      // våra nya rutor
+      "fvProgRoot",
+      "fvBoxLink",
+      "fvBoxStudents",
+      "fvBoxHighscore",
+      "fvBoxStrong",
+      "fvBoxWeak",
+      "fvBoxExport",
+      "fvLinkedSharedBankId",
+      "fvBtnLinkBank",
+      "fvBtnClearBank",
+      "fvBtnRefresh",
+      "fvLinkStatus",
+      "fvStudentList",
+      "fvStudentDetail",
+      "fvHighscoreList",
+      "fvStrongList",
+      "fvWeakList",
+      "fvBtnExport",
+      "fvExportOutput"
     ];
+
     killIds.forEach((id) => {
       const el = document.getElementById(id);
       if (el && el.parentNode) el.parentNode.removeChild(el);
@@ -3917,6 +3955,9 @@ window.addEventListener("load", repositionOptionCheckboxes);
     Array.from(document.querySelectorAll(".progress-grid")).forEach((g) => {
       if (g && g.parentNode) g.parentNode.removeChild(g);
     });
+
+    // extra säkerhet: ta bort dublett-rubriker om de kommer från annan sektion
+    fvRemoveDuplicateLinkBoxesByTitle();
   }
 
   function fvEnsureRoot() {
@@ -3929,7 +3970,10 @@ window.addEventListener("load", repositionOptionCheckboxes);
     root = document.createElement("div");
     root.id = "fvProgRoot";
     root.className = "progress-grid";
-    host.appendChild(root);
+
+    // placera först så ordningen blir korrekt
+    try { host.prepend(root); } catch (_) { host.appendChild(root); }
+
     return root;
   }
 
@@ -3969,22 +4013,25 @@ window.addEventListener("load", repositionOptionCheckboxes);
       const inp = document.createElement("input");
       inp.id = "fvLinkedSharedBankId";
       inp.className = "input";
-      inp.placeholder = "Klistra in sharedBank-id (t.ex. ?bank=ID)";
+      inp.placeholder = "Klistra in sharedBank-id (t.ex. från ?bank=ID)";
       inp.style.flex = "1";
       inp.autocomplete = "off";
 
       const btnLink = document.createElement("button");
       btnLink.id = "fvBtnLinkBank";
+      btnLink.type = "button";
       btnLink.className = "btn btn-sm btn-primary";
       btnLink.textContent = "Koppla";
 
       const btnClear = document.createElement("button");
       btnClear.id = "fvBtnClearBank";
+      btnClear.type = "button";
       btnClear.className = "btn btn-sm";
       btnClear.textContent = "Rensa";
 
       const btnRefresh = document.createElement("button");
       btnRefresh.id = "fvBtnRefresh";
+      btnRefresh.type = "button";
       btnRefresh.className = "btn btn-sm";
       btnRefresh.textContent = "Uppdatera";
 
@@ -4060,6 +4107,7 @@ window.addEventListener("load", repositionOptionCheckboxes);
     if (expBox) {
       const btn = document.createElement("button");
       btn.id = "fvBtnExport";
+      btn.type = "button";
       btn.className = "btn btn-sm btn-primary";
       btn.textContent = "Skapa JSON för vald elev";
 
@@ -4075,6 +4123,9 @@ window.addEventListener("load", repositionOptionCheckboxes);
       expBox.appendChild(btn);
       expBox.appendChild(out);
     }
+
+    // ta bort dublett om någon annan sektion hunnit skapa en extra
+    fvRemoveDuplicateLinkBoxesByTitle();
 
     fvSetLinkedSharedBankId(fvGetLinkedSharedBankId());
   }
@@ -4129,77 +4180,6 @@ window.addEventListener("load", repositionOptionCheckboxes);
     return Array.from(best.values())
       .sort((a, b) => (b.score || 0) - (a.score || 0))
       .slice(0, 50);
-  }
-
-  function fvRenderStudents() {
-    const list = document.getElementById("fvStudentList");
-    const detail = document.getElementById("fvStudentDetail");
-    if (!list || !detail) return;
-
-    list.innerHTML = "";
-
-    if (!fvLatestByStudent.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu (för denna sharedBank).";
-      list.appendChild(li);
-      detail.textContent = "Välj en elev för att se detaljer.";
-      return;
-    }
-
-    detail.textContent = "Klicka på en elev-knapp för att se detaljer, starka/svaga delbitar och export.";
-
-    fvLatestByStudent.forEach((e) => {
-      const li = document.createElement("li");
-      li.className = "mini";
-
-      const name = e.studentName || "-";
-      const cls = e.studentClass || "-";
-      const level = e.level || "?";
-      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
-      const dt = fvFmtDate(e.createdAt);
-
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn btn-sm";
-      btn.style.width = "100%";
-      btn.style.textAlign = "left";
-      btn.style.whiteSpace = "normal";
-      btn.textContent = `${name} (${cls}) – ${score}% på nivå ${level}${dt ? " – " + dt : ""}`;
-
-      btn.addEventListener("click", () => {
-        fvSelected = e;
-        fvRenderSelected();
-      });
-
-      li.appendChild(btn);
-      list.appendChild(li);
-    });
-  }
-
-  function fvRenderHighscore() {
-    const list = document.getElementById("fvHighscoreList");
-    if (!list) return;
-
-    list.innerHTML = "";
-
-    if (!fvHighscore.length) {
-      const li = document.createElement("li");
-      li.textContent = "Inga inlämningar sparade ännu.";
-      list.appendChild(li);
-      return;
-    }
-
-    fvHighscore.slice(0, 20).forEach((e, i) => {
-      const li = document.createElement("li");
-      const pos = i + 1;
-      const name = e.studentName || "-";
-      const cls = e.studentClass || "-";
-      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
-      const level = e.level || "?";
-      const dt = fvFmtDate(e.createdAt);
-      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}${dt ? " – " + dt : ""}`;
-      list.appendChild(li);
-    });
   }
 
   function fvRenderStrongWeakFromEntry(entry) {
@@ -4293,6 +4273,77 @@ window.addEventListener("load", repositionOptionCheckboxes);
 
     detail.textContent = lines.join("\n");
     fvRenderStrongWeakFromEntry(e);
+  }
+
+  function fvRenderStudents() {
+    const list = document.getElementById("fvStudentList");
+    const detail = document.getElementById("fvStudentDetail");
+    if (!list || !detail) return;
+
+    list.innerHTML = "";
+
+    if (!fvLatestByStudent.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga inlämningar sparade ännu (för denna sharedBank).";
+      list.appendChild(li);
+      detail.textContent = "Välj en elev för att se detaljer.";
+      return;
+    }
+
+    detail.textContent = "Klicka på en elev-knapp för att se detaljer, starka/svaga delbitar och export.";
+
+    fvLatestByStudent.forEach((e) => {
+      const li = document.createElement("li");
+      li.className = "mini";
+
+      const name = e.studentName || "-";
+      const cls = e.studentClass || "-";
+      const level = e.level || "?";
+      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
+      const dt = fvFmtDate(e.createdAt);
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-sm btn-primary";
+      btn.style.width = "100%";
+      btn.style.textAlign = "left";
+      btn.style.whiteSpace = "normal";
+      btn.textContent = `${name} (${cls}) – ${score}% på nivå ${level}${dt ? " – " + dt : ""}`;
+
+      btn.addEventListener("click", () => {
+        fvSelected = e;
+        fvRenderSelected();
+      });
+
+      li.appendChild(btn);
+      list.appendChild(li);
+    });
+  }
+
+  function fvRenderHighscore() {
+    const list = document.getElementById("fvHighscoreList");
+    if (!list) return;
+
+    list.innerHTML = "";
+
+    if (!fvHighscore.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga inlämningar sparade ännu.";
+      list.appendChild(li);
+      return;
+    }
+
+    fvHighscore.slice(0, 20).forEach((e, i) => {
+      const li = document.createElement("li");
+      const pos = i + 1;
+      const name = e.studentName || "-";
+      const cls = e.studentClass || "-";
+      const score = typeof e.score === "number" ? Math.round(e.score) : "?";
+      const level = e.level || "?";
+      const dt = fvFmtDate(e.createdAt);
+      li.textContent = `${pos}. ${name} (${cls}) – ${score}% på nivå ${level}${dt ? " – " + dt : ""}`;
+      list.appendChild(li);
+    });
   }
 
   function fvSetStatus(msg) {
@@ -4457,6 +4508,11 @@ window.addEventListener("load", repositionOptionCheckboxes);
     fvBuildUI();
     fvBindUI();
     fvWaitForDbThenAutoRefresh(25);
+
+    // sista säkerheten: om någon annan sektion skapar en extra "Koppla"-ruta efteråt
+    setTimeout(fvRemoveDuplicateLinkBoxesByTitle, 0);
+    setTimeout(fvRemoveDuplicateLinkBoxesByTitle, 250);
+    setTimeout(fvRemoveDuplicateLinkBoxesByTitle, 1000);
   });
 })();
 </script>
