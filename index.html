@@ -2574,12 +2574,8 @@ function setupCloudBankUI() {
 
 /* =========================================================
    3B – Robust UI för moln-banker (utan beroenden på $/escapeHtml)
-   - Skapar alltid en egen yta i lärarmodalen
-   - Visar varje bank i egen ruta (kort)
-   - 3 knappar per bank: Aktivera bank, Ta bort, Kopiera elevlänk
-   - Aktiv bank markeras grönt
-   - Visar full elevlänk i en egen ruta
-   - Stabil sharedBank-id per teacher-bank (sparas på teacher-bankdoc)
+   FIX: Stabil elevlänk per moln-bank = sharedBanks/{cloudBankId}
+   - Ingen slumpad add()-id längre (förhindrar att resultat hamnar "fel")
    ========================================================= */
 
 (function () {
@@ -2645,16 +2641,12 @@ function setupCloudBankUI() {
   }
 
   function fvLoadStateSafe() {
-    try {
-      if (typeof loadState === "function") return loadState();
-    } catch (_) {}
+    try { if (typeof loadState === "function") return loadState(); } catch (_) {}
     return {};
   }
 
   function fvSaveStateSafe(s) {
-    try {
-      if (typeof saveState === "function") saveState(s);
-    } catch (_) {}
+    try { if (typeof saveState === "function") saveState(s); } catch (_) {}
   }
 
   function fvSetActiveIds(cloudBankId, sharedBankId, bankName) {
@@ -2692,7 +2684,6 @@ function setupCloudBankUI() {
   function fvEnsureUI() {
     const teacherModal = document.getElementById("teacherModal") || document.body;
 
-    // Försök lägga i en "banks"-panel om den finns, annars i modal-body, annars i modalen
     const target =
       document.querySelector('.tab-panel[data-panel="banks"]') ||
       document.querySelector('.tab-panel[data-panel="bank"]') ||
@@ -2731,7 +2722,6 @@ function setupCloudBankUI() {
     status.style.marginTop = "6px";
     status.textContent = "Logga in med Google för att se dina bankar.";
 
-    // Elevlänk-ruta
     const linkBox = document.createElement("div");
     linkBox.id = "fvActiveLinkBox";
     linkBox.style.border = "1px solid rgba(148,163,184,0.5)";
@@ -2761,7 +2751,6 @@ function setupCloudBankUI() {
     linkBox.appendChild(linkMeta);
     linkBox.appendChild(linkInput);
 
-    // Lista med kort
     const list = document.createElement("div");
     list.id = "fvCloudBanksCards";
     list.style.display = "grid";
@@ -2776,7 +2765,6 @@ function setupCloudBankUI() {
 
     target.appendChild(host);
 
-    // Bind reload
     btnReload.addEventListener("click", function () {
       fvRefreshCloudBanks();
     });
@@ -2796,54 +2784,36 @@ function setupCloudBankUI() {
     if (i) i.value = url || "";
   }
 
-  async function fvEnsureSharedIdForTeacherBank(userUid, teacherBankDocId, teacherBankData) {
+  async function fvUpsertSharedBankStable(userUid, sharedId, name, bankObj) {
     const db = fvGetDb();
     if (!db) throw new Error("Ingen firebaseDbInstance.");
 
-    const existing = teacherBankData && teacherBankData.sharedBankId ? String(teacherBankData.sharedBankId) : null;
-
-    const bankObj = teacherBankData && teacherBankData.bank ? teacherBankData.bank : null;
     const payloadBank = fvSanitize(bankObj || { mcq: [], img: [], drag: [] });
 
-    const name = teacherBankData && (teacherBankData.name || teacherBankData.title) ? (teacherBankData.name || teacherBankData.title) : "Frågebank";
+    const sharedRef = db.collection("sharedBanks").doc(String(sharedId));
+    const existing = await sharedRef.get();
 
-    if (existing) {
-      await db.collection("sharedBanks").doc(existing).set(
-        {
-          ownerUid: userUid,
-          name: name,
-          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-          bank: payloadBank
-        },
-        { merge: true }
-      );
-      return existing;
-    }
-
-    const docRef = await db.collection("sharedBanks").add({
+    const payload = {
       ownerUid: userUid,
-      name: name,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      bank: payloadBank
-    });
+      name: name || "Frågebank",
+      bank: payloadBank,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    if (!existing.exists) payload.createdAt = firebase.firestore.FieldValue.serverTimestamp();
 
-    const newId = docRef.id;
+    await sharedRef.set(payload, { merge: true });
 
-    await db
-      .collection("teachers")
-      .doc(userUid)
-      .collection("banks")
-      .doc(teacherBankDocId)
-      .set(
-        {
-          sharedBankId: newId,
+    // Skriv tillbaka sharedBankId = cloudBankId på teacher-bank (för tydlighet)
+    try {
+      await db.collection("teachers")
+        .doc(userUid)
+        .collection("banks")
+        .doc(String(sharedId))
+        .set({
+          sharedBankId: String(sharedId),
           sharedBankUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        },
-        { merge: true }
-      );
-
-    return newId;
+        }, { merge: true });
+    } catch (_) {}
   }
 
   function fvCountFromBank(bankObj) {
@@ -2895,7 +2865,7 @@ function setupCloudBankUI() {
       mid.style.opacity = "0.95";
       mid.innerHTML = `
         <div>Frågor: ${counts.total} (MCQ: ${counts.mcq}, bild: ${counts.img}, drag: ${counts.drag})</div>
-        <div>Bank-ID: ${fvEsc(b.id)}${b.sharedBankId ? " | sharedBank: " + fvEsc(b.sharedBankId) : ""}</div>
+        <div>Bank-ID: ${fvEsc(b.id)} | sharedBank: ${fvEsc(b.id)}</div>
       `;
 
       const btnRow = document.createElement("div");
@@ -2938,7 +2908,6 @@ function setupCloudBankUI() {
             return;
           }
 
-          // Hämta färsk teacher-bank
           const docRef = db.collection("teachers").doc(user.uid).collection("banks").doc(b.id);
           const snap = await docRef.get();
           if (!snap.exists) {
@@ -2951,24 +2920,20 @@ function setupCloudBankUI() {
             id: b.id,
             name: data.name || data.title || b.name || "Frågebank",
             createdAt: data.createdAt || b.createdAt || null,
-            sharedBankId: data.sharedBankId || b.sharedBankId || null,
             bank: data.bank || data.payload || b.bank || { mcq: [], img: [], drag: [] }
           };
 
-          // Stabil sharedBankId
-          const sharedId = await fvEnsureSharedIdForTeacherBank(user.uid, b.id, merged);
+          const sharedId = String(b.id); // STABILT = cloudBankId
+          await fvUpsertSharedBankStable(user.uid, sharedId, merged.name, merged.bank);
 
-          // Aktivera lokalt
           fvSetActiveIds(b.id, sharedId, merged.name);
           fvApplyBankToLocal(merged.bank);
 
           const url = fvStudentUrl(sharedId);
           fvSetActiveLink(`Aktiv bank: ${merged.name} | sharedBank-id: ${sharedId}`, url);
 
-          // Refresh list (så sharedBankId syns + aktiv grön)
           await fvRefreshCloudBanks();
 
-          // Trigger progression
           if (typeof refreshElevProgressionFromFirestore === "function") {
             try { refreshElevProgressionFromFirestore(sharedId); } catch (_) {}
           }
@@ -2995,21 +2960,17 @@ function setupCloudBankUI() {
             return;
           }
 
-          // Säkerställ sharedId (skapa om saknas)
-          let sharedId = b.sharedBankId ? String(b.sharedBankId) : null;
-          if (!sharedId) {
+          const sharedId = String(b.id); // STABILT = cloudBankId
+
+          // Säkerställ att shared doc är uppdaterad innan kopiering
+          try {
             const docRef = db.collection("teachers").doc(user.uid).collection("banks").doc(b.id);
             const snap = await docRef.get();
             const data = snap.exists ? (snap.data() || {}) : {};
-            const merged = {
-              id: b.id,
-              name: data.name || data.title || b.name || "Frågebank",
-              createdAt: data.createdAt || b.createdAt || null,
-              sharedBankId: data.sharedBankId || null,
-              bank: data.bank || data.payload || b.bank || { mcq: [], img: [], drag: [] }
-            };
-            sharedId = await fvEnsureSharedIdForTeacherBank(user.uid, b.id, merged);
-          }
+            const bankObj = data.bank || data.payload || b.bank || { mcq: [], img: [], drag: [] };
+            const bankName = data.name || data.title || b.name || "Frågebank";
+            await fvUpsertSharedBankStable(user.uid, sharedId, bankName, bankObj);
+          } catch (_) {}
 
           const url = fvStudentUrl(sharedId);
           fvSetActiveLink(`Elevlänk för: ${b.name || "Frågebank"} | sharedBank-id: ${sharedId}`, url);
@@ -3023,7 +2984,6 @@ function setupCloudBankUI() {
             alert("Kunde inte auto-kopiera. Markera länken och kopiera manuellt.");
           }
 
-          // Uppdatera listan så sharedBankId syns om den just skapades
           await fvRefreshCloudBanks();
         } catch (e) {
           console.error("[3B] Kopiera elevlänk fel:", e);
@@ -3063,7 +3023,6 @@ function setupCloudBankUI() {
       });
     });
 
-    // Visa elevlänk om aktiv sharedId finns
     const activeNow = fvGetActiveFromState();
     if (activeNow.activeSharedBankId) {
       const activeBank = banks.find((x) => activeNow.activeCloudBankId && String(x.id) === String(activeNow.activeCloudBankId));
@@ -3108,7 +3067,7 @@ function setupCloudBankUI() {
           id: doc.id,
           name: d.name || d.title || "Frågebank",
           createdAt: d.createdAt || null,
-          sharedBankId: d.sharedBankId || null,
+          sharedBankId: String(doc.id), // STABILT
           bank: d.bank || d.payload || { mcq: [], img: [], drag: [] }
         });
       });
@@ -3124,13 +3083,11 @@ function setupCloudBankUI() {
     }
   }
 
-  // Exponera (om du vill trigga från andra delar)
   window.fvRefreshCloudBanks = fvRefreshCloudBanks;
 
   function fvInitNow() {
     fvEnsureUI();
 
-    // Auto-refresh om redan inloggad eller när auth ändras
     try {
       const auth = fvGetAuth();
       if (auth && typeof auth.onAuthStateChanged === "function") {
@@ -3140,11 +3097,9 @@ function setupCloudBankUI() {
       }
     } catch (_) {}
 
-    // Direkt försök (ifall auth redan är klar)
     fvRefreshCloudBanks();
   }
 
-  // Kör oavsett om DOMContentLoaded redan passerat
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", fvInitNow);
   } else {
@@ -3153,6 +3108,9 @@ function setupCloudBankUI() {
 })();
 </script>
 <!-- slut SEKTION 3B: FRÅGEBANKER (MOLN) – BANKKORT + KNAPPAR + AKTIV GRÖN + ELEVLÄNK (KOMPLETT) -->
+
+
+
 
 
 
@@ -5563,7 +5521,6 @@ function handleTeacherConfirm() {
 
   const s = loadState();
 
-  // Första gången: sätt lösenordet
   if (!s.teacherPassword) {
     s.teacherPassword = entered;
     saveState(s);
@@ -5574,7 +5531,6 @@ function handleTeacherConfirm() {
     return;
   }
 
-  // Efteråt: kontrollera lösenordet
   if (s.teacherPassword === entered) {
     if (text) text.textContent = "Lösenord OK. Öppnar lärarläge.";
     closeTeacherGate();
@@ -5621,7 +5577,6 @@ function setupTabNavigation() {
     });
   });
 
-  // Säkerställ att "settings" är aktiv som start (om den finns)
   const defaultTab = document.querySelector('.tab-btn[data-tab="settings"]');
   if (defaultTab) {
     activateTab("settings");
@@ -5636,7 +5591,6 @@ function updateBankStatusUI() {
   const listEl = getEl("cloudBankList");
   if (!listEl) return;
 
-  // Hitta kortet runt "Ladda frågebank från molnet"
   const hostCard = listEl.closest(".card");
   if (!hostCard) return;
 
@@ -5646,7 +5600,6 @@ function updateBankStatusUI() {
     statusEl.id = "bankStatus";
     statusEl.className = "mini";
     statusEl.style.marginTop = "6px";
-    // Lägg status-raden precis ovanför listan med moln-bankar
     hostCard.insertBefore(statusEl, listEl);
   }
 
@@ -5673,7 +5626,6 @@ function updateBankStatusUI() {
 function initApp() {
   console.log("initApp start");
 
-  // 1. Säkerställ frågebank (merga embedded-data om tom)
   let s = loadState();
   const hasBank =
     s.bank &&
@@ -5689,7 +5641,6 @@ function initApp() {
     saveState(s);
   }
 
-  // 2. Initiera inställningsdelar om de finns
   if (typeof initTeacherEmailSettings === "function") initTeacherEmailSettings();
   if (typeof initThresholdSettings === "function") initThresholdSettings();
   if (typeof initTeacherPasswordSettings === "function") initTeacherPasswordSettings();
@@ -5700,16 +5651,12 @@ function initApp() {
   if (typeof initImageQuestionsEditor === "function") initImageQuestionsEditor();
   if (typeof initDragDropQuestionsEditor === "function") initDragDropQuestionsEditor();
 
-  // Fliknavigering
   setupTabNavigation();
 
   if (typeof setupCloudBankUI === "function") setupCloudBankUI();
   if (typeof syncUI === "function") syncUI();
 
-  // Uppdatera visuell bankstatus
   updateBankStatusUI();
-
-  /* ---------- Elevyta: knappar ---------- */
 
   const btnSaveStudent = getEl("btnSaveStudent");
   if (btnSaveStudent) {
@@ -5755,21 +5702,19 @@ function initApp() {
     });
   }
 
+  // FIX: bind inte btnSubmitGame här om SEKTION 3D redan bundit (annars dubbel inlämning/alert)
   const btnSubmitGame = getEl("btnSubmitGame");
-  if (btnSubmitGame) {
+  if (btnSubmitGame && !btnSubmitGame.__fvSubmitBound && !btnSubmitGame.__fvSubmitBoundLocal) {
+    btnSubmitGame.__fvSubmitBoundLocal = true;
     btnSubmitGame.addEventListener("click", async () => {
       try {
         await saveCurrentResultToFirestore();
-        alert("Ditt resultat är inlämnat till läraren.");
       } catch (err) {
         console.error("Fel vid inlämning:", err);
         alert("Kunde inte lämna in resultatet. Försök igen eller kontakta läraren.");
       }
     });
   }
-
-
-  /* ---------- Lärarläge: knappar ---------- */
 
   const btnTeacherMode = getEl("btnTeacherMode");
   if (btnTeacherMode) {
@@ -5791,8 +5736,6 @@ function initApp() {
     btnCloseTeacher.addEventListener("click", closeTeacherModal);
   }
 
-  /* ---------- Inställningar: trösklar, e-post, lösen ---------- */
-
   const btnSaveThresholds = getEl("btnSaveThresholds");
   if (btnSaveThresholds && typeof handleSaveThresholds === "function") {
     btnSaveThresholds.addEventListener("click", handleSaveThresholds);
@@ -5807,8 +5750,6 @@ function initApp() {
   if (btnChangeTeacherPassword && typeof handleChangeTeacherPassword === "function") {
     btnChangeTeacherPassword.addEventListener("click", handleChangeTeacherPassword);
   }
-
-  /* ---------- Delmål/delbitar ---------- */
 
   const btnAddGoalPart = getEl("btnAddGoalPart");
   if (btnAddGoalPart && typeof handleAddGoalPart === "function") {
@@ -5825,8 +5766,6 @@ function initApp() {
     btnClearGoalsMap.addEventListener("click", handleClearGoalsMap);
   }
 
-  /* ---------- Rensa / nollställ elevdata ---------- */
-
   const btnClearStudentData = getEl("btnClearStudentData");
   if (btnClearStudentData && typeof handleClearStudentData === "function") {
     btnClearStudentData.addEventListener("click", handleClearStudentData);
@@ -5836,8 +5775,6 @@ function initApp() {
   if (btnResetGameData && typeof handleResetGameData === "function") {
     btnResetGameData.addEventListener("click", handleResetGameData);
   }
-
-  /* ---------- Frågebank & Firebase ---------- */
 
   const btnLoadCloudBanks = getEl("btnLoadCloudBanks");
   if (btnLoadCloudBanks && typeof handleLoadCloudBanks === "function") {
@@ -5851,7 +5788,6 @@ function initApp() {
   if (btnSaveToCloud && typeof handleSaveToCloud === "function") {
     btnSaveToCloud.addEventListener("click", () => {
       handleSaveToCloud();
-      // Efter ev. ändringar i bank – uppdatera status
       updateBankStatusUI();
     });
   }
@@ -5860,7 +5796,6 @@ function initApp() {
   if (btnExportBank && typeof handleExportBank === "function") {
     btnExportBank.addEventListener("click", () => {
       handleExportBank();
-      // Export ändrar inte banken, men det är ofarligt att fräscha status
       updateBankStatusUI();
     });
   }
