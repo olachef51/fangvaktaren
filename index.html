@@ -2757,193 +2757,84 @@ window.handleImportBank = handleImportBank;
 <!-- slut SEKTION 3C: SPARA/LADDA/EXPORT/IMPORT (BANK + GOALSMAP) -->
 
 
-<!-- start SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
-<script>
-"use strict";
+<!-- start SEKTION 3D: MAPPNING FRÅGA -> DELBIT/DELMÅL (ERSÄTT HELA BLOCKET) -->
+/* =========================
+   Mappa fråga -> delbit/delmål
+   (SEKTION 4 anropar getLinksForQuestion)
+   ========================= */
 
-(function(){
-  function fvGetSharedId(){
-    const fromUrl = (getQueryParam("bank") || getQueryParam("sharedBank") || getQueryParam("sb") || "").trim();
-    if(fromUrl){
-      window.activeSharedBankId = fromUrl;
-      const st = loadState();
-      st.linkedSharedBankId = fromUrl;
-      st.lastLinkedSharedSource = "URL";
-      saveState(st);
-      return fromUrl;
-    }
-    const st2 = loadState();
-    const fromState = (window.activeSharedBankId || st2.linkedSharedBankId || st2.activeSharedBankId || "").trim();
-    if(fromState){
-      window.activeSharedBankId = fromState;
-      return fromState;
-    }
-    return "";
+function _normTxt(v){
+  return (v == null ? "" : String(v))
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function _pickFirst(obj, keys){
+  if(!obj) return null;
+  for(const k of keys){
+    if(obj[k] != null && String(obj[k]).trim() !== "") return obj[k];
+  }
+  return null;
+}
+
+function getLinksForQuestion(q, goals){
+  const links = [];
+  if(!q) return links;
+
+  // 1) Direkt id-koppling (prioriteras)
+  const direct = _pickFirst(q, [
+    "goalPartId","goalId","goalPart","linkId","delbitId","delbit","partId","goalPartID"
+  ]);
+  if(direct != null && String(direct).trim() !== ""){
+    links.push({ id: String(direct).trim() });
+    return links;
   }
 
-  function buildGoalStrengthSummary(state){
-    const s = state || loadState();
-    const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-    const prog = s.progression || {};
-    const correctMap = prog.correctByGoalId || {};
-    const wrongMap = prog.wrongByGoalId || {};
-
-    const passThreshold = clampInt((s.thres && s.thres.E!=null) ? s.thres.E : 70, 0, 100);
-
-    const strongGoals = [];
-    const weakGoals = [];
-
-    const allIds = new Set([ ...Object.keys(correctMap), ...Object.keys(wrongMap) ]);
-    allIds.forEach((id)=>{
-      const correct = Number(correctMap[id]) || 0;
-      const wrong = Number(wrongMap[id]) || 0;
-      const total = correct + wrong;
-      if(!total) return;
-
-      const percent = Math.round((correct*100)/total);
-      const meta = goalsMap.find(g => String(g.id) === String(id)) || {};
-      const entry = { goalId: id, goal: meta.goal || "", parts: meta.parts || "", percent, correct, wrong, total };
-
-      if(percent >= passThreshold) strongGoals.push(entry);
-      else if(wrong > 0) weakGoals.push(entry);
-    });
-
-    strongGoals.sort((a,b)=>b.percent-a.percent);
-    weakGoals.sort((a,b)=>a.percent-b.percent);
-
-    return { strongGoals, weakGoals, passThreshold };
+  // 2) Om q.goal råkar vara ett rent nummer (delbit-id)
+  if(q.goal != null){
+    const g = String(q.goal).trim();
+    if(g && /^[0-9]+$/.test(g)){
+      links.push({ id: g });
+      return links;
+    }
   }
 
-  async function saveCurrentResultToFirestore(){
-    initFirebase();
+  // 3) Textmatchning mot goalsMap (tål både part/parts/text osv)
+  const gm = Array.isArray(goals) && goals.length
+    ? goals
+    : (Array.isArray(loadState().goalsMap) ? loadState().goalsMap : []);
 
-    const db = window.firebaseDbInstance || (window.firebase && firebase.firestore ? firebase.firestore() : null);
-    if(!window.firebase || !db){
-      alert("Tekniskt fel: Firebase/Firestore är inte redo.");
-      return;
-    }
+  const qGoalTxt = _normTxt(_pickFirst(q, ["goal","goalTitle","delmal","delmål"]));
+  const qPartTxt = _normTxt(_pickFirst(q, ["part","parts","partText","delbitText","delbit","partsText"]));
 
-    const sharedBankId = fvGetSharedId();
-    if(!sharedBankId){
-      alert("Hittar ingen bank-id. Öppna elevlänken som läraren skickat (…?bank=ID).");
-      return;
-    }
+  if(!qGoalTxt && !qPartTxt) return links;
 
-    const s = loadState();
-    const studentName = (s.student && s.student.name) || "";
-    const studentClass = (s.student && s.student.klass) || "";
-    if(!studentName || !studentClass){
-      alert("Skriv namn och klass innan du lämnar in.");
-      return;
-    }
+  // försök hitta exakt match (goal + part), annars goal-only
+  let hit = null;
 
-    const scoreTextEl = document.getElementById("scoreText");
-    const scoreDetailEl = document.getElementById("scoreDetail");
-    const resultSummary = scoreTextEl ? (scoreTextEl.textContent || "") : "";
-    const resultDetail = scoreDetailEl ? (scoreDetailEl.textContent || "") : "";
-
-    let correct = null, total = null, percent = null;
-
-    if(resultDetail){
-      const m = resultDetail.match(/(\d+)\s*\/\s*(\d+)/);
-      if(m){
-        correct = parseInt(m[1],10);
-        total = parseInt(m[2],10);
-        if(!isNaN(correct) && !isNaN(total) && total>0){
-          percent = Math.round((correct*100)/total);
-        }
-      }
-    }
-    if(percent==null && resultSummary){
-      const m2 = resultSummary.match(/(\d+)\s*%/);
-      if(m2){
-        const p = parseInt(m2[1],10);
-        if(!isNaN(p)) percent = p;
-      }
-    }
-
-    let levelId = window.currentLevel || null;
-
-    if(window.lastSubmission && typeof window.lastSubmission === "object"){
-      const ls = window.lastSubmission;
-      if(ls.level) levelId = ls.level;
-      if(ls.correct!=null && ls.total!=null){
-        correct = ls.correct;
-        total = ls.total;
-      }
-      if(ls.score!=null && !isNaN(ls.score)) percent = ls.score;
-      if(ls.percent!=null && !isNaN(ls.percent)) percent = ls.percent;
-    }
-
-    const sp = loadState();
-    if(!sp.progression || typeof sp.progression !== "object"){
-      sp.progression = { totalPoints:0, wrongByGoalId:{}, correctByGoalId:{}, lastResult:null };
-    }
-    if(!sp.best || typeof sp.best !== "object") sp.best = { E:0, C:0, A:0 };
-
-    let addedPoints = 0;
-    if(typeof correct === "number" && !isNaN(correct)){
-      let per = 1;
-      if(levelId==="C") per = 2;
-      else if(levelId==="A") per = 3;
-      addedPoints = correct * per;
-      sp.progression.totalPoints = (sp.progression.totalPoints || 0) + addedPoints;
-    }
-    if(typeof percent === "number" && !isNaN(percent) && levelId){
-      const bestNow = sp.best[levelId] || 0;
-      if(percent > bestNow) sp.best[levelId] = percent;
-    }
-
-    saveState(sp);
-    try { if(typeof syncUI === "function") syncUI(); } catch(_){}
-
-    const goalSummary = buildGoalStrengthSummary(sp);
-
-    const resultDoc = {
-      studentName,
-      studentClass,
-      level: levelId,
-      percent: percent,
-      scorePercent: percent,
-      correct: correct,
-      total: total,
-      resultText: resultSummary,
-      detailText: resultDetail,
-      totalPoints: sp.progression.totalPoints || 0,
-      bestE: (sp.best && sp.best.E) || 0,
-      bestC: (sp.best && sp.best.C) || 0,
-      bestA: (sp.best && sp.best.A) || 0,
-      strongGoals: goalSummary.strongGoals,
-      weakGoals: goalSummary.weakGoals,
-      goalPassThreshold: goalSummary.passThreshold,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    };
-
-    await db.collection("sharedBanks").doc(String(sharedBankId)).collection("results").add(resultDoc);
-
-    try { if(typeof fvRefreshElevProgressionFromFirestore === "function") fvRefreshElevProgressionFromFirestore(sharedBankId); } catch(_){}
-    try { if(typeof refreshElevProgressionFromFirestore === "function") refreshElevProgressionFromFirestore(sharedBankId); } catch(_){}
-    try { if(typeof refreshHighscoreFromFirestore === "function") refreshHighscoreFromFirestore(sharedBankId); } catch(_){}
-
-    alert("Ditt resultat har skickats till läraren.");
+  if(qGoalTxt && qPartTxt){
+    hit = gm.find((x) => {
+      const g = _normTxt(_pickFirst(x, ["goal","goalTitle","delmal","delmål","title"]));
+      const p = _normTxt(_pickFirst(x, ["part","parts","partText","text","delbitText","delbit"]));
+      return g === qGoalTxt && p === qPartTxt;
+    }) || null;
   }
 
-  function setupSubmitGameToFirestore(){
-    const btn = document.getElementById("btnSubmitGame");
-    if(!btn) return;
-    if(btn.__fvSubmitBound) return;
-    btn.__fvSubmitBound = true;
-    btn.addEventListener("click", function(){ saveCurrentResultToFirestore(); });
+  if(!hit && qGoalTxt){
+    hit = gm.find((x) => {
+      const g = _normTxt(_pickFirst(x, ["goal","goalTitle","delmal","delmål","title"]));
+      return g === qGoalTxt;
+    }) || null;
   }
 
-  window.saveCurrentResultToFirestore = saveCurrentResultToFirestore;
+  if(hit && hit.id != null && String(hit.id).trim() !== ""){
+    links.push({ id: String(hit.id).trim() });
+  }
 
-  document.addEventListener("DOMContentLoaded", function(){
-    setupSubmitGameToFirestore();
-  });
-})();
-</script>
-<!-- slut SEKTION 3D: ELEVRESULTAT TILL FIRESTORE (INLÄMNING) -->
+  return links;
+}
+<!-- slut SEKTION 3D: MAPPNING FRÅGA -> DELBIT/DELMÅL (ERSÄTT HELA BLOCKET) -->
 
 
 <!-- start SEKTION 3E: LÄRARVY – KOPPLA SHAREDBANK-ID & LÄS ELEVRESULTAT -->
@@ -4244,27 +4135,435 @@ function finishLevel() {
 <script>
 "use strict";
 
-/* Hjälpfunktion för att slippa getElementById överallt */
-function getEl(id) {
-  return document.getElementById(id);
+/* Hjälpfunktion */
+function getEl(id) { return document.getElementById(id); }
+
+/* =========================
+   5a – Hjälp: goalsMap lookup & snygg visning
+   ========================= */
+
+function buildGoalsLookup() {
+  const s = loadState();
+  const goals =
+    (typeof normalizeGoalsMap === "function")
+      ? normalizeGoalsMap(s)
+      : (Array.isArray(s.goalsMap) ? s.goalsMap : []);
+
+  const map = {};
+  goals.forEach((g) => {
+    const id = (g && g.id != null) ? String(g.id) : null;
+    if (!id) return;
+    map[id] = {
+      goal: (g.goal || g.goalTitle || g.delmal || "").toString(),
+      part: (g.part || g.partText || g.text || g.delbitText || "").toString()
+    };
+  });
+  return map;
+}
+
+function getQuestionGoalPartId(q) {
+  if (!q) return "";
+  const v =
+    q.goalPartId ??
+    q.goalPart ??
+    q.partId ??
+    q.delbit ??
+    q.goalPartKey ??
+    q.goalPartValue ??
+    "";
+  return v === null || v === undefined ? "" : String(v);
+}
+
+function renderGoalPartBlock(goalPartId, goalsLookup) {
+  const info = goalsLookup && goalPartId ? goalsLookup[String(goalPartId)] : null;
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexDirection = "column";
+  wrap.style.gap = "2px";
+  wrap.style.marginTop = "6px";
+
+  const title = document.createElement("div");
+  title.style.fontWeight = "700";
+  title.textContent = info && info.goal ? info.goal : "Delmål: (ingen koppling)";
+  wrap.appendChild(title);
+
+  const sub = document.createElement("div");
+  sub.className = "mini";
+  sub.textContent = info && info.part
+    ? `Delbit ${goalPartId}: ${info.part}`
+    : (goalPartId ? `Delbit ${goalPartId}` : "Delbit: (ingen vald)");
+  wrap.appendChild(sub);
+
+  return wrap;
+}
+
+/* Override: gör "Aktuella delmål och delbitar" två-radigt (delmål + delbit) */
+function renderGoalsListAndSelects() {
+  const s = loadState();
+  const goals =
+    (typeof normalizeGoalsMap === "function")
+      ? normalizeGoalsMap(s)
+      : (Array.isArray(s.goalsMap) ? s.goalsMap : []);
+
+  const listEl = getEl("goalsList");
+  if (listEl) {
+    listEl.innerHTML = "";
+    if (!goals.length) {
+      const li = document.createElement("li");
+      li.textContent = "Inga delmål/delbitar sparade ännu.";
+      listEl.appendChild(li);
+    } else {
+      goals.forEach((g, i) => {
+        const id = (g && g.id != null) ? String(g.id) : String(i + 1);
+        const goal = (g.goal || g.goalTitle || g.delmal || "").toString();
+        const part = (g.part || g.partText || g.text || g.delbitText || "").toString();
+
+        const li = document.createElement("li");
+        li.style.padding = "8px";
+        li.style.border = "1px solid #1f2937";
+        li.style.borderRadius = "10px";
+        li.style.marginBottom = "8px";
+
+        const h = document.createElement("div");
+        h.style.fontWeight = "700";
+        h.textContent = goal ? goal : "Delmål";
+        li.appendChild(h);
+
+        const p = document.createElement("div");
+        p.className = "mini";
+        p.textContent = part ? `Delbit ${id}: ${part}` : `Delbit ${id}`;
+        li.appendChild(p);
+
+        listEl.appendChild(li);
+      });
+    }
+  }
+
+  const selectIds = ["mcqGoalPart", "imgGoalPart", "dragGoalPart", "mcqJsonGoalPart"];
+  selectIds.forEach((id) => {
+    const sel = getEl(id);
+    if (!sel) return;
+
+    const keepValue = sel.value || "";
+    sel.innerHTML = "";
+
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "Ingen koppling";
+    sel.appendChild(opt0);
+
+    goals.forEach((g, i) => {
+      const gid = (g && g.id != null) ? String(g.id) : String(i + 1);
+      const goal = (g.goal || g.goalTitle || g.delmal || "").toString();
+      const part = (g.part || g.partText || g.text || g.delbitText || "").toString();
+
+      const opt = document.createElement("option");
+      opt.value = gid;
+      opt.textContent = goal && part
+        ? `Delbit ${gid}: ${goal} – ${part}`
+        : goal
+          ? `Delbit ${gid}: ${goal}`
+          : part
+            ? `Delbit ${gid}: ${part}`
+            : `Delbit ${gid}`;
+      sel.appendChild(opt);
+    });
+
+    if (keepValue) sel.value = keepValue;
+  });
 }
 
 /* =========================
-   5a – Lärarlösenord & status
+   5b – Rendera befintliga frågor (MCQ/IMG/DRAG)
+   ========================= */
+
+function refreshAllQuestionLists() {
+  const s = loadState();
+  const bank = s.bank || {};
+  const goalsLookup = buildGoalsLookup();
+
+  renderMcqList(Array.isArray(bank.mcq) ? bank.mcq : [], goalsLookup);
+  renderImgList(Array.isArray(bank.img) ? bank.img : [], goalsLookup);
+  renderDragList(Array.isArray(bank.drag) ? bank.drag : [], goalsLookup);
+
+  const mcqCount = getEl("mcqCount");
+  const imgCount = getEl("imgCount");
+  const dragCount = getEl("dragCount");
+  if (mcqCount) mcqCount.textContent = (Array.isArray(bank.mcq) ? bank.mcq.length : 0);
+  if (imgCount) imgCount.textContent = (Array.isArray(bank.img) ? bank.img.length : 0);
+  if (dragCount) dragCount.textContent = (Array.isArray(bank.drag) ? bank.drag.length : 0);
+}
+
+function makeListItemShell() {
+  const li = document.createElement("li");
+  li.style.border = "1px solid #1f2937";
+  li.style.borderRadius = "12px";
+  li.style.padding = "10px";
+  li.style.marginBottom = "10px";
+  li.style.display = "flex";
+  li.style.gap = "12px";
+  li.style.alignItems = "flex-start";
+  return li;
+}
+
+function makeActionsCol(onDelete) {
+  const col = document.createElement("div");
+  col.style.display = "flex";
+  col.style.flexDirection = "column";
+  col.style.gap = "6px";
+  col.style.marginLeft = "auto";
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "btn btn-sm btn-danger";
+  del.textContent = "🗑️ Ta bort";
+  del.addEventListener("click", onDelete);
+  col.appendChild(del);
+
+  return col;
+}
+
+function renderMcqList(items, goalsLookup) {
+  const ul = getEl("mcqList");
+  if (!ul) return;
+
+  ul.innerHTML = "";
+  if (!items.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga flervalsfrågor i banken.";
+    ul.appendChild(li);
+    return;
+  }
+
+  items.forEach((q, idx) => {
+    const li = makeListItemShell();
+
+    const main = document.createElement("div");
+    main.style.flex = "1 1 auto";
+
+    const top = document.createElement("div");
+    top.style.display = "flex";
+    top.style.flexWrap = "wrap";
+    top.style.gap = "8px";
+    top.style.alignItems = "baseline";
+
+    const title = document.createElement("div");
+    title.style.fontWeight = "700";
+    title.textContent = `(${q.level || "E"}) ${q.q || q.text || ""}`;
+    top.appendChild(title);
+
+    const meta = document.createElement("div");
+    meta.className = "mini";
+    meta.textContent = `MCQ #${idx + 1}`;
+    top.appendChild(meta);
+
+    main.appendChild(top);
+
+    const options = Array.isArray(q.options) ? q.options : [];
+    const correctIndex = (typeof q.answer === "number") ? q.answer : (typeof q.correct === "number" ? q.correct : -1);
+
+    const optBox = document.createElement("div");
+    optBox.style.marginTop = "8px";
+    optBox.style.display = "grid";
+    optBox.style.gap = "4px";
+
+    options.forEach((opt, oi) => {
+      const row = document.createElement("div");
+      row.className = "mini";
+      row.textContent = `${oi + 1}. ${opt}`;
+      optBox.appendChild(row);
+    });
+    main.appendChild(optBox);
+
+    const correct = document.createElement("div");
+    correct.className = "mini";
+    correct.style.marginTop = "8px";
+    if (correctIndex >= 0 && options[correctIndex] != null) {
+      correct.textContent = `Rätt svar: ${correctIndex + 1} – ${options[correctIndex]}`;
+    } else {
+      correct.textContent = "Rätt svar: (saknas)";
+    }
+    main.appendChild(correct);
+
+    const gpId = getQuestionGoalPartId(q);
+    main.appendChild(renderGoalPartBlock(gpId, goalsLookup));
+
+    li.appendChild(main);
+
+    li.appendChild(makeActionsCol(() => {
+      if (!confirm("Ta bort denna flervalsfråga?")) return;
+      const s = loadState();
+      if (!s.bank) s.bank = { mcq: [], img: [], drag: [] };
+      if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
+      s.bank.mcq.splice(idx, 1);
+      saveState(s);
+      refreshAllQuestionLists();
+      updateBankStatusUI();
+    }));
+
+    ul.appendChild(li);
+  });
+}
+
+function renderImgList(items, goalsLookup) {
+  const ul = getEl("imgList");
+  if (!ul) return;
+
+  ul.innerHTML = "";
+  if (!items.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga bildfrågor i banken.";
+    ul.appendChild(li);
+    return;
+  }
+
+  items.forEach((q, idx) => {
+    const li = makeListItemShell();
+
+    const thumb = document.createElement("div");
+    thumb.style.flex = "0 0 78px";
+    thumb.style.width = "78px";
+
+    const img = document.createElement("img");
+    img.src = q.imgDataUrl || "";
+    img.alt = "Bildfråga";
+    img.style.width = "78px";
+    img.style.height = "78px";
+    img.style.objectFit = "cover";
+    img.style.borderRadius = "10px";
+    img.style.border = "1px solid #1f2937";
+    thumb.appendChild(img);
+
+    li.appendChild(thumb);
+
+    const main = document.createElement("div");
+    main.style.flex = "1 1 auto";
+
+    const title = document.createElement("div");
+    title.style.fontWeight = "700";
+    title.textContent = `(${q.level || "E"}) ${q.q || q.text || ""}`;
+    main.appendChild(title);
+
+    const options = Array.isArray(q.options) ? q.options : [];
+    const correctIndex = (typeof q.answer === "number") ? q.answer : (typeof q.correct === "number" ? q.correct : -1);
+
+    const optBox = document.createElement("div");
+    optBox.style.marginTop = "8px";
+    optBox.style.display = "grid";
+    optBox.style.gap = "4px";
+    options.forEach((opt, oi) => {
+      const row = document.createElement("div");
+      row.className = "mini";
+      row.textContent = `${oi + 1}. ${opt}`;
+      optBox.appendChild(row);
+    });
+    main.appendChild(optBox);
+
+    const correct = document.createElement("div");
+    correct.className = "mini";
+    correct.style.marginTop = "8px";
+    if (correctIndex >= 0 && options[correctIndex] != null) {
+      correct.textContent = `Rätt svar: ${correctIndex + 1} – ${options[correctIndex]}`;
+    } else {
+      correct.textContent = "Rätt svar: (saknas)";
+    }
+    main.appendChild(correct);
+
+    const gpId = getQuestionGoalPartId(q);
+    main.appendChild(renderGoalPartBlock(gpId, goalsLookup));
+
+    li.appendChild(main);
+
+    li.appendChild(makeActionsCol(() => {
+      if (!confirm("Ta bort denna bildfråga?")) return;
+      const s = loadState();
+      if (!s.bank) s.bank = { mcq: [], img: [], drag: [] };
+      if (!Array.isArray(s.bank.img)) s.bank.img = [];
+      s.bank.img.splice(idx, 1);
+      saveState(s);
+      refreshAllQuestionLists();
+      updateBankStatusUI();
+    }));
+
+    ul.appendChild(li);
+  });
+}
+
+function renderDragList(items, goalsLookup) {
+  const ul = getEl("dragList");
+  if (!ul) return;
+
+  ul.innerHTML = "";
+  if (!items.length) {
+    const li = document.createElement("li");
+    li.textContent = "Inga drag & drop-frågor i banken.";
+    ul.appendChild(li);
+    return;
+  }
+
+  items.forEach((q, idx) => {
+    const li = makeListItemShell();
+
+    const main = document.createElement("div");
+    main.style.flex = "1 1 auto";
+
+    const title = document.createElement("div");
+    title.style.fontWeight = "700";
+    title.textContent = `(${q.level || "E"}) ${q.q || q.text || ""}`;
+    main.appendChild(title);
+
+    const cols = document.createElement("div");
+    cols.className = "mini";
+    cols.style.marginTop = "6px";
+    const t = Array.isArray(q.dragTargets) ? q.dragTargets : [];
+    cols.textContent = t.length
+      ? `Kolumner: ${t.map((x) => x.label).join(" | ")}`
+      : "Kolumner: (saknas)";
+    main.appendChild(cols);
+
+    const src = Array.isArray(q.dragSources) ? q.dragSources : [];
+    const srcLine = document.createElement("div");
+    srcLine.className = "mini";
+    srcLine.style.marginTop = "6px";
+    srcLine.textContent = src.length
+      ? `Objekt: ${src.map((x) => x.label).join(", ")}`
+      : "Objekt: (saknas)";
+    main.appendChild(srcLine);
+
+    const gpId = getQuestionGoalPartId(q);
+    main.appendChild(renderGoalPartBlock(gpId, goalsLookup));
+
+    li.appendChild(main);
+
+    li.appendChild(makeActionsCol(() => {
+      if (!confirm("Ta bort denna drag & drop-fråga?")) return;
+      const s = loadState();
+      if (!s.bank) s.bank = { mcq: [], img: [], drag: [] };
+      if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
+      s.bank.drag.splice(idx, 1);
+      saveState(s);
+      refreshAllQuestionLists();
+      updateBankStatusUI();
+    }));
+
+    ul.appendChild(li);
+  });
+}
+
+/* =========================
+   5c – Lärarlösenord & status
    ========================= */
 
 function showTeacherPasswordInStatus() {
   const s = loadState();
   const statusEl = getEl("passwordStatus");
-  if (statusEl && s.teacherPassword) {
-    statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
-  } else if (statusEl) {
-    statusEl.textContent = "";
-  }
+  if (statusEl && s.teacherPassword) statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
+  else if (statusEl) statusEl.textContent = "";
 }
 
 /* =========================
-   5b – Lärarläge: gate + modal
+   5d – Lärarläge: gate + modal
    ========================= */
 
 function openTeacherGate() {
@@ -4274,18 +4573,12 @@ function openTeacherGate() {
   const s = loadState();
 
   if (gate) gate.classList.remove("hidden");
-  if (input) {
-    input.value = "";
-    input.type = "password";
-    input.focus();
-  }
+  if (input) { input.value = ""; input.type = "password"; input.focus(); }
 
   if (text) {
-    if (s.teacherPassword) {
-      text.textContent = "Ange lärarlösenord för att öppna lärarläget.";
-    } else {
-      text.textContent = "Första gången du loggar in blir lösenordet det du skriver här.";
-    }
+    text.textContent = s.teacherPassword
+      ? "Ange lärarlösenord för att öppna lärarläget."
+      : "Första gången du loggar in blir lösenordet det du skriver här.";
   }
 }
 
@@ -4297,6 +4590,9 @@ function closeTeacherGate() {
 function openTeacherModal() {
   const modal = getEl("teacherModal");
   if (modal) modal.classList.remove("hidden");
+  renderGoalsListAndSelects();
+  refreshAllQuestionLists();
+  updateBankStatusUI();
 }
 
 function closeTeacherModal() {
@@ -4310,10 +4606,7 @@ function handleTeacherConfirm() {
   if (!input) return;
 
   const entered = input.value.trim();
-  if (!entered) {
-    alert("Skriv in ett lösenord.");
-    return;
-  }
+  if (!entered) { alert("Skriv in ett lösenord."); return; }
 
   const s = loadState();
 
@@ -4339,7 +4632,7 @@ function handleTeacherConfirm() {
 }
 
 /* =========================
-   5c – Fliknavigering i lärarmodal
+   5e – Fliknavigering i lärarmodal
    ========================= */
 
 function setupTabNavigation() {
@@ -4350,14 +4643,20 @@ function setupTabNavigation() {
   function activateTab(tabId) {
     tabButtons.forEach((btn) => {
       const isActive = btn.getAttribute("data-tab") === tabId;
-      if (isActive) btn.classList.add("active");
-      else btn.classList.remove("active");
+      btn.classList.toggle("active", isActive);
     });
 
     panels.forEach((panel) => {
       const panelId = panel.getAttribute("data-panel");
       panel.classList.toggle("hidden", panelId !== tabId);
     });
+
+    if (tabId === "questions" || tabId === "images" || tabId === "dragdrop") {
+      refreshAllQuestionLists();
+    }
+    if (tabId === "settings") {
+      renderGoalsListAndSelects();
+    }
   }
 
   tabButtons.forEach((btn) => {
@@ -4373,7 +4672,7 @@ function setupTabNavigation() {
 }
 
 /* =========================
-   5d – Bankstatus (UI)
+   5f – Bankstatus (UI)
    ========================= */
 
 function updateBankStatusUI() {
@@ -4399,27 +4698,24 @@ function updateBankStatusUI() {
   const dragCount = Array.isArray(bank.drag) ? bank.drag.length : 0;
   const total = mcqCount + imgCount + dragCount;
 
-  if (!total) statusEl.textContent = "Status: Ingen frågebank laddad.";
-  else statusEl.textContent = `Status: Aktiv bank med ${total} frågor (MCQ: ${mcqCount}, bild: ${imgCount}, drag & drop: ${dragCount}).`;
+  statusEl.textContent = total
+    ? `Status: Aktiv bank med ${total} frågor (MCQ: ${mcqCount}, bild: ${imgCount}, drag & drop: ${dragCount}).`
+    : "Status: Ingen frågebank laddad.";
 }
 
 function safeCall(fnName) {
   if (typeof window[fnName] !== "function") return;
-  try {
-    window[fnName]();
-  } catch (e) {
-    console.error(`Fel i ${fnName}:`, e);
-  }
+  try { window[fnName](); } catch (e) { console.error(`Fel i ${fnName}:`, e); }
 }
 
 /* =========================
-   5e – Initiering & knappar
+   5g – Initiering & knappar
    ========================= */
 
 function initApp() {
   console.log("initApp start");
 
-  // 1) Säkerställ frågebank (merga embedded-data om tom)
+  // 1) Säkerställ bank (embedded om tom)
   let s = loadState();
   const hasBank =
     s.bank &&
@@ -4430,7 +4726,6 @@ function initApp() {
     );
 
   if (!hasBank && typeof mergeEmbeddedBank === "function") {
-    console.log("Ingen lokal bank – mergar embedded-data");
     try {
       s = mergeEmbeddedBank(s);
       saveState(s);
@@ -4439,7 +4734,7 @@ function initApp() {
     }
   }
 
-  // 2) Om bank innehåller goalsMap: spegla till s.goalsMap (krävs för UI)
+  // 2) Spegla goalsMap om den ligger i bank
   s = loadState();
   try {
     const bankGoals =
@@ -4455,25 +4750,24 @@ function initApp() {
     console.error("Fel vid spegling av goalsMap:", e);
   }
 
-  // 3) Initiera inställningar/editorer (varje del isolerat så inget stoppar allt)
+  // 3) Init-delar
   safeCall("initThresholdSettings");
   safeCall("initTeacherPasswordSettings");
-  try { showTeacherPasswordInStatus(); } catch (e) { console.error(e); }
+  try { showTeacherPasswordInStatus(); } catch (e) {}
 
   safeCall("initGoalsMap");
   safeCall("initQuestionForms");
   safeCall("initImageQuestionsEditor");
   safeCall("initDragDropQuestionsEditor");
-
   setupTabNavigation();
 
   safeCall("setupCloudBankUI");
+  safeCall("syncUI");
 
-  try { if (typeof syncUI === "function") syncUI(); } catch (e) { console.error("Fel i syncUI:", e); }
-
-  // Uppdatera visuell bankstatus + mål/delbit-UI
-  try { updateBankStatusUI(); } catch (e) { console.error("Fel i updateBankStatusUI:", e); }
-  try { if (typeof updateAllProgressionUI === "function") updateAllProgressionUI(); } catch (e) { console.error(e); }
+  // 4) FORCE render: delbitar + befintliga frågor (detta var det som saknades)
+  renderGoalsListAndSelects();
+  refreshAllQuestionLists();
+  updateBankStatusUI();
 
   /* ---------- Elevyta: knappar ---------- */
 
@@ -4499,7 +4793,7 @@ function initApp() {
       if (play) play.classList.add("hidden");
       const studentCard = getEl("studentCard");
       if (studentCard) studentCard.classList.remove("hidden");
-      if (typeof syncUI === "function") syncUI();
+      safeCall("syncUI");
     });
   }
 
@@ -4515,7 +4809,7 @@ function initApp() {
       if (result) result.classList.add("hidden");
       const studentCard = getEl("studentCard");
       if (studentCard) studentCard.classList.remove("hidden");
-      if (typeof syncUI === "function") syncUI();
+      safeCall("syncUI");
     });
   }
 
@@ -4550,12 +4844,18 @@ function initApp() {
 
   const btnSaveThresholds = getEl("btnSaveThresholds");
   if (btnSaveThresholds && typeof handleSaveThresholds === "function") {
-    btnSaveThresholds.addEventListener("click", handleSaveThresholds);
+    btnSaveThresholds.addEventListener("click", () => {
+      handleSaveThresholds();
+      safeCall("syncUI");
+    });
   }
 
   const btnChangeTeacherPassword = getEl("btnChangeTeacherPassword");
   if (btnChangeTeacherPassword && typeof handleChangeTeacherPassword === "function") {
-    btnChangeTeacherPassword.addEventListener("click", handleChangeTeacherPassword);
+    btnChangeTeacherPassword.addEventListener("click", () => {
+      handleChangeTeacherPassword();
+      showTeacherPasswordInStatus();
+    });
   }
 
   /* ---------- Delmål/delbitar ---------- */
@@ -4564,44 +4864,8 @@ function initApp() {
   if (btnAddGoalPart && typeof handleAddGoalPart === "function") {
     btnAddGoalPart.addEventListener("click", () => {
       handleAddGoalPart();
-      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
+      renderGoalsListAndSelects();
     });
-  }
-
-  const btnSaveGoalsMap = getEl("btnSaveGoalsMap");
-  if (btnSaveGoalsMap && typeof handleSaveGoalsMap === "function") {
-    btnSaveGoalsMap.addEventListener("click", () => {
-      handleSaveGoalsMap();
-      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
-    });
-  }
-
-  const btnClearGoalsMap = getEl("btnClearGoalsMap");
-  if (btnClearGoalsMap && typeof handleClearGoalsMap === "function") {
-    btnClearGoalsMap.addEventListener("click", () => {
-      handleClearGoalsMap();
-      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
-    });
-  }
-
-  /* ---------- Progress: JSON ---------- */
-
-  const btnGenerateProgressJson = getEl("btnGenerateProgressJson");
-  if (btnGenerateProgressJson) btnGenerateProgressJson.addEventListener("click", handleGenerateProgressJson);
-
-  const btnCopyProgressJson = getEl("btnCopyProgressJson");
-  if (btnCopyProgressJson) btnCopyProgressJson.addEventListener("click", handleCopyProgressJson);
-
-  /* ---------- Rensa / nollställ elevdata ---------- */
-
-  const btnClearStudentData = getEl("btnClearStudentData");
-  if (btnClearStudentData && typeof handleClearStudentData === "function") {
-    btnClearStudentData.addEventListener("click", handleClearStudentData);
-  }
-
-  const btnResetGameData = getEl("btnResetGameData");
-  if (btnResetGameData && typeof handleResetGameData === "function") {
-    btnResetGameData.addEventListener("click", handleResetGameData);
   }
 
   /* ---------- Frågebank & Firebase ---------- */
@@ -4609,29 +4873,18 @@ function initApp() {
   const btnLoadCloudBanks = getEl("btnLoadCloudBanks");
   if (btnLoadCloudBanks && typeof handleLoadCloudBanks === "function") {
     btnLoadCloudBanks.addEventListener("click", async () => {
-      try {
-        await handleLoadCloudBanks();
-      } catch (e) {
-        console.error("Fel vid handleLoadCloudBanks:", e);
-      }
-      try { updateBankStatusUI(); } catch (e) {}
-      try { if (typeof updateAllProgressionUI === "function") updateAllProgressionUI(); } catch (e) {}
-      safeCall("initQuestionForms");
-      safeCall("initImageQuestionsEditor");
-      safeCall("initDragDropQuestionsEditor");
+      try { await handleLoadCloudBanks(); } catch (e) { console.error(e); }
+      renderGoalsListAndSelects();
+      refreshAllQuestionLists();
+      updateBankStatusUI();
     });
   }
 
   const btnSaveToCloud = getEl("btnSaveToCloud");
   if (btnSaveToCloud && typeof handleSaveToCloud === "function") {
     btnSaveToCloud.addEventListener("click", async () => {
-      try {
-        await handleSaveToCloud();
-      } catch (e) {
-        console.error("Fel vid handleSaveToCloud:", e);
-      }
-      try { updateBankStatusUI(); } catch (e) {}
-      try { if (typeof updateAllProgressionUI === "function") updateAllProgressionUI(); } catch (e) {}
+      try { await handleSaveToCloud(); } catch (e) { console.error(e); }
+      updateBankStatusUI();
     });
   }
 
@@ -4647,18 +4900,9 @@ function initApp() {
   if (fileImport && typeof handleImportBank === "function") {
     fileImport.addEventListener("change", (evt) => {
       handleImportBank(evt);
+      renderGoalsListAndSelects();
+      refreshAllQuestionLists();
       updateBankStatusUI();
-      if (typeof updateAllProgressionUI === "function") updateAllProgressionUI();
-      safeCall("initQuestionForms");
-      safeCall("initImageQuestionsEditor");
-      safeCall("initDragDropQuestionsEditor");
-    });
-  }
-
-  const btnPublishSharedBank = getEl("btnPublishSharedBank");
-  if (btnPublishSharedBank && typeof handlePublishSharedBank === "function") {
-    btnPublishSharedBank.addEventListener("click", () => {
-      handlePublishSharedBank();
     });
   }
 
@@ -4676,24 +4920,17 @@ function initApp() {
 }
 
 /* =========================
-   5f – DOMContentLoaded
+   5h – DOMContentLoaded
    ========================= */
 
 document.addEventListener("DOMContentLoaded", function () {
   if (typeof initFirebase === "function") {
-    try {
-      initFirebase();
-      console.log("Firebase init OK");
-    } catch (e) {
-      console.error("Fel vid initFirebase:", e);
-    }
+    try { initFirebase(); console.log("Firebase init OK"); }
+    catch (e) { console.error("Fel vid initFirebase:", e); }
   }
 
-  try {
-    initApp();
-  } catch (e) {
-    console.error("Fel vid initApp:", e);
-  }
+  try { initApp(); }
+  catch (e) { console.error("Fel vid initApp:", e); }
 });
 </script>
 <!-- slut SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering & knappar) -->
