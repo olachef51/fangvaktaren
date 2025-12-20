@@ -2284,576 +2284,222 @@ async function handleGoogleLogout() {
 
 
 
-<!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA & TOKENS (UI v4) -->
-<!-- ÄNDRAT: Fixar att “Ladda moln-bankar/Ladda banken” faktiskt kör (SEKTION 3D låg utanför <script>), lägger in robust fallback-loader + grön markering för aktiv bank | OMSKRIVNA RADER: 571 -->
+<!-- start SEKTION 3D: MOLNBANKAR – Ladda & aktivera (FIX) -->
 <script>
 "use strict";
+/* ÄNDRAT: Fixar “☁️ Ladda moln-bankar” genom att (1) använda rätt HTML-id (#cloudBankList/#cloudBankStatus), (2) åtgärda syntaxfelet i template-string (tog bort \\\"), (3) binda knappen direkt till loadCloudBanksListV4 + robust felstatus; 196 rader omskrivna */
 
-(() => {
-  /* =========================
-     3D – Moln-banker + Elevlista (lokalt) + tokens (GDPR-säkert) – UI v4
-     - Namn/klass/e-post lagras ENDAST lokalt på lärardatorn
-     - Molnet sparar bara token + resultat/progression per token
-     - Fix: SEKTION 3D är en riktig <script>-sektion (ingen “text som blöder”)
-     - Fix: Robust binding på “Ladda ...” + fallback loadCloudBanksList om den saknas
-     ========================= */
+(function () {
+  // ------- Lokala helpers (utan att redeklarera globala const) -------
+  const _escape = (typeof window.escapeHtml === "function")
+    ? window.escapeHtml
+    : (str) => String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  // ====== Local roster key (unik key så du slipper “already declared”) ======
-  const TEACHER_LOCAL_ROSTER_KEY_V4 = STORAGE_KEY + "::teacherRosterByBankId_v4";
-
-  // ====== Helpers (egna namn för att inte krocka med 3A) ======
-  function genTokenLocal(len = 10) {
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let out = "";
-    const bytes = new Uint8Array(len);
-    (window.crypto || window.msCrypto).getRandomValues(bytes);
-    for (let i = 0; i < len; i++) out += chars[bytes[i] % chars.length];
-    return out;
-  }
-
-  function loadTeacherRosterMapV4() {
+  function _ensureBankShape(bank) {
     try {
-      const raw = localStorage.getItem(TEACHER_LOCAL_ROSTER_KEY_V4);
-      if (!raw) return {};
-      const obj = JSON.parse(raw);
-      return obj && typeof obj === "object" ? obj : {};
+      return (typeof window.ensureBankShape === "function")
+        ? window.ensureBankShape(bank)
+        : (function () {
+            const b = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
+            if (!Array.isArray(b.mcq)) b.mcq = [];
+            if (!Array.isArray(b.img)) b.img = [];
+            if (!Array.isArray(b.drag)) b.drag = [];
+            return b;
+          })();
     } catch {
-      return {};
+      return { mcq: [], img: [], drag: [] };
     }
   }
 
-  function saveTeacherRosterMapV4(mapObj) {
-    try {
-      localStorage.setItem(TEACHER_LOCAL_ROSTER_KEY_V4, JSON.stringify(mapObj || {}));
-    } catch (e) {
-      console.warn("Kunde inte spara lärarens elevlista lokalt:", e);
+  function _getState() {
+    return (typeof window.loadState === "function") ? window.loadState() : null;
+  }
+
+  function _saveState(s) {
+    if (typeof window.saveState === "function") window.saveState(s);
+  }
+
+  function _setActiveBankMeta(meta) {
+    if (typeof window.setActiveBankMeta === "function") window.setActiveBankMeta(meta);
+    else {
+      const s = _getState();
+      if (!s) return;
+      s.activeBank = Object.assign({ mode: "", ownerUid: "", bankId: "", publicId: "" }, s.activeBank || {}, meta || {});
+      _saveState(s);
     }
   }
 
-  function ensureCloudStylesV4() {
-    if (document.getElementById("cloudStylesV4")) return;
-    const style = document.createElement("style");
-    style.id = "cloudStylesV4";
-    style.textContent = `
-      .cloud-bank-item{
-        border-radius:12px;
-        border:1px solid rgba(31,41,55,1);
-        background:#020617;
-        padding:8px 9px;
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:8px;
-        box-shadow:0 0 0 1px rgba(15,23,42,1), 0 10px 24px rgba(15,23,42,.9);
-        margin:6px 0;
-      }
-      .cloud-bank-item.active{
-        border-color: rgba(34,197,94,1);
-        box-shadow: 0 0 0 1px rgba(22,163,74,1), 0 0 22px rgba(34,197,94,.75);
-        background: radial-gradient(circle at top, rgba(22,163,74,.25), rgba(2,6,23,1) 55%, rgba(0,0,0,1) 100%);
-      }
-      .btn-xxs{ padding:3px 8px !important; font-size:.72rem !important; }
-      .modal-close-x{
-        width:34px; height:34px; border-radius:999px;
-        display:inline-flex; align-items:center; justify-content:center;
-        padding:0 !important; line-height:1;
-      }
-      .roster-grid{ display:grid; grid-template-columns: 1fr; gap:10px; }
-      .roster-student{
-        border-radius:14px; border:1px solid rgba(31,41,55,1);
-        background:#020617; padding:10px 10px 12px;
-        box-shadow: 0 0 0 1px rgba(15,23,42,1), 0 12px 30px rgba(15,23,42,.95);
-      }
-      .roster-student .actions{
-        display:flex; gap:6px; justify-content:flex-end; align-items:center; margin-top:8px;
-      }
-      .roster-student .token{
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        letter-spacing:.06em;
-      }
-    `;
-    document.head.appendChild(style);
+  function _renderAfterBankLoad() {
+    try { if (typeof window.renderGoalsList === "function") window.renderGoalsList(); } catch {}
+    try { if (typeof window.renderMcqList === "function") window.renderMcqList(); } catch {}
+    try { if (typeof window.renderImgList === "function") window.renderImgList(); } catch {}
+    try { if (typeof window.renderDragList === "function") window.renderDragList(); } catch {}
+    try { if (typeof window.syncUI === "function") window.syncUI(); } catch {}
+    try { if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); } catch {}
   }
 
-  function markActiveCloudBankUIV4(activeId) {
-    const host = document.getElementById("cloudBanksList");
-    if (!host) return;
-    const items = host.querySelectorAll("[data-cloud-bank-id]");
-    items.forEach((el) => {
-      const id = el.getAttribute("data-cloud-bank-id");
-      if (String(id) === String(activeId)) el.classList.add("active");
-      else el.classList.remove("active");
-    });
-  }
-
-  function getActiveBankIdFromState() {
-    try {
-      const s = loadState();
-      const ab = s.activeBank || {};
-      return ab && ab.mode === "teacher" ? (ab.bankId || "") : "";
-    } catch {
-      return "";
-    }
-  }
-
-  // ====== Fallback: ladda och rendera moln-bankar (om din gamla loadCloudBanksList saknas) ======
+  // ------- Publik loader (matchar HTML: #cloudBankList / #cloudBankStatus / #btnLoadCloudBanks) -------
   async function loadCloudBanksListV4() {
-    ensureCloudStylesV4();
+    const listEl = document.getElementById("cloudBankList");     // ✅ rätt id i din SEKTION 2
+    const statusEl = document.getElementById("cloudBankStatus"); // ✅ rätt id i din SEKTION 2
 
-    const statusEl =
-      document.getElementById("cloudBanksStatus") ||
-      document.getElementById("cloudStatus") ||
-      document.getElementById("googleStatus");
-
-    const host = document.getElementById("cloudBanksList");
-    if (!host) {
-      console.warn("Saknar #cloudBanksList i HTML (SEKTION 2).");
-      if (statusEl) statusEl.textContent = "⚠️ Tekniskt: saknar list-container (#cloudBanksList).";
+    if (!listEl) {
+      console.error("Saknar #cloudBankList i HTML (SEKTION 2).");
       return;
     }
 
-    if (!firebaseDbInstance || !currentTeacherUser) {
-      if (statusEl) statusEl.textContent = "☁️ Logga in med Google för att se moln-bankar.";
-      host.innerHTML = `<div class="mini">Logga in med Google för att ladda moln-bankar.</div>`;
+    listEl.innerHTML = "";
+    if (statusEl) statusEl.textContent = "";
+
+    if (!window.firebaseDbInstance) {
+      if (statusEl) statusEl.textContent = "⚠️ Firebase DB saknas (initFirebase körs inte eller saknar bibliotek).";
+      console.error("firebaseDbInstance saknas");
+      return;
+    }
+
+    if (!window.currentTeacherUser) {
+      if (statusEl) statusEl.textContent = "⚠️ Du måste logga in med Google först (Inställningar → Google).";
+      return;
+    }
+
+    if (!window.CLOUD_ROOT_COLLECTION || !window.CLOUD_BANKS_SUBCOLLECTION) {
+      if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: CLOUD_* konstanter saknas.";
+      console.error("CLOUD_ROOT_COLLECTION/CLOUD_BANKS_SUBCOLLECTION saknas");
       return;
     }
 
     try {
-      if (statusEl) statusEl.textContent = "☁️ Laddar moln-bankar…";
+      if (statusEl) statusEl.textContent = "Laddar moln-bankar…";
 
-      const snap = await firebaseDbInstance
-        .collection(CLOUD_ROOT_COLLECTION)
-        .doc(String(currentTeacherUser.uid))
-        .collection(CLOUD_BANKS_SUBCOLLECTION)
+      const snap = await window.firebaseDbInstance
+        .collection(window.CLOUD_ROOT_COLLECTION)
+        .doc(String(window.currentTeacherUser.uid))
+        .collection(window.CLOUD_BANKS_SUBCOLLECTION)
         .orderBy("createdAt", "desc")
-        .limit(50)
         .get();
 
-      const docs = snap && snap.docs ? snap.docs : [];
-      host.innerHTML = "";
-
-      if (!docs.length) {
-        host.innerHTML = `<div class="mini">Inga sparade moln-banker ännu.</div>`;
-        if (statusEl) statusEl.textContent = "☁️ Inga moln-bankar hittades.";
+      if (!snap || snap.empty) {
+        if (statusEl) statusEl.textContent = "Inga moln-bankar hittades på ditt konto ännu.";
         return;
       }
 
-      docs.forEach((d) => {
-        const data = d.data() || {};
-        const bankName = data.name || d.id;
-        const counts = (() => {
-          const b = ensureBankShape(data.bank || {});
-          return `MCQ: ${(b.mcq||[]).length}, bild: ${(b.img||[]).length}, drag: ${(b.drag||[]).length}`;
-        })();
+      if (statusEl) statusEl.textContent = `Hittade ${snap.size} bank(ar). Klicka “Aktivera” för att ladda in en bank i spelet.`;
 
-        const row = document.createElement("div");
-        row.className = "cloud-bank-item";
-        row.setAttribute("data-cloud-bank-id", d.id);
+      snap.forEach((docSnap) => {
+        const d = docSnap.data() || {};
+        const bankId = docSnap.id;
 
-        row.innerHTML = `
-          <div style="min-width:0;">
-            <div style="font-weight:600; font-size:.88rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(bankName)}</div>
-            <div class="mini" style="margin-top:2px;">${escapeHtml(counts)}</div>
+        const name = (d.name || d.bankName || "Namnlös bank").toString();
+        const bank = _ensureBankShape(d.bank || {});
+        const goals = Array.isArray(d.goalsMap) ? d.goalsMap : [];
+
+        const counts = {
+          mcq: Array.isArray(bank.mcq) ? bank.mcq.length : 0,
+          img: Array.isArray(bank.img) ? bank.img.length : 0,
+          drag: Array.isArray(bank.drag) ? bank.drag.length : 0
+        };
+        counts.total = counts.mcq + counts.img + counts.drag;
+
+        const isActive =
+          (typeof window.activeCloudBankId !== "undefined") &&
+          String(window.activeCloudBankId) === String(bankId);
+
+        const li = document.createElement("li");
+        li.className = "list-item";
+        li.style.display = "flex";
+        li.style.alignItems = "center";
+        li.style.justifyContent = "space-between";
+        li.style.gap = "10px";
+
+        // ✅ FIX: Ingen \\\"-escaping här (det var det som kunde trigga “':' expected” via trasig sträng)
+        li.innerHTML = `
+          <div class="list-main" style="flex:1;">
+            <div class="q-text">
+              ${_escape(name)}${isActive ? ' <span class="mini">✅ Aktiv</span>' : ""}
+            </div>
+            <div class="q-meta mini">Frågor: ${counts.total} (MCQ: ${counts.mcq}, Bild: ${counts.img}, Drag: ${counts.drag})</div>
           </div>
-          <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
-            <button class="btn btn-xxs" type="button" data-action="loadThisCloudBank">Ladda</button>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <button class="btn btn-sm btn-primary" type="button" data-action="activate" data-bank-id="${_escape(bankId)}">
+              ✅ Aktivera
+            </button>
           </div>
         `;
 
-        row.querySelector('[data-action="loadThisCloudBank"]')?.addEventListener("click", async () => {
-          try {
-            if (statusEl) statusEl.textContent = "☁️ Laddar bank…";
+        // Activate handler
+        const btn = li.querySelector('button[data-action="activate"]');
+        if (btn) {
+          btn.addEventListener("click", async () => {
+            try {
+              if (statusEl) statusEl.textContent = "Aktiverar bank…";
 
-            const doc = await firebaseDbInstance
-              .collection(CLOUD_ROOT_COLLECTION)
-              .doc(String(currentTeacherUser.uid))
-              .collection(CLOUD_BANKS_SUBCOLLECTION)
-              .doc(String(d.id))
-              .get();
+              // Skriv in bank + goalsMap i state (REPLACE för att undvika dubbletter)
+              const s = _getState();
+              if (!s) throw new Error("State saknas (loadState).");
 
-            const payload = doc.exists ? (doc.data() || {}) : {};
-            const bank = ensureBankShape(payload.bank || {});
-            const goals = Array.isArray(payload.goalsMap) ? payload.goalsMap : [];
+              s.bank = _ensureBankShape(bank);
+              s.goalsMap = Array.isArray(goals) ? goals : [];
 
-            const s = loadState();
-            s.bank = bank;
-            s.goalsMap = goals;
-            s.activeBank = Object.assign({}, s.activeBank || {}, {
-              mode: "teacher",
-              ownerUid: String(currentTeacherUser.uid),
-              bankId: String(d.id),
-              publicId: ""
-            });
-            saveState(s);
+              _saveState(s);
 
-            try { if (typeof renderMcqList === "function") renderMcqList(); } catch {}
-            try { if (typeof renderImgList === "function") renderImgList(); } catch {}
-            try { if (typeof renderDragList === "function") renderDragList(); } catch {}
-            try { if (typeof renderGoalsList === "function") renderGoalsList(); } catch {}
-            try { if (typeof syncUI === "function") syncUI(); } catch {}
-            try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
+              // Sätt aktiv bank-meta (för inlämning via token)
+              _setActiveBankMeta({
+                mode: "teacher",
+                ownerUid: String(window.currentTeacherUser.uid),
+                bankId: String(bankId),
+                publicId: ""
+              });
 
-            markActiveCloudBankUIV4(d.id);
-            if (statusEl) statusEl.textContent = `☁️ Aktiv bank: ${bankName}`;
-          } catch (e) {
-            console.error("Kunde inte ladda vald bank:", e);
-            if (statusEl) statusEl.textContent = "⚠️ Kunde inte ladda bank. Se konsolen.";
-            alert("Kunde inte ladda banken. Se konsolen för detaljer.");
-          }
-        });
+              // Markera aktiv (för UI-listan)
+              window.activeCloudBankId = String(bankId);
 
-        host.appendChild(row);
-      });
+              // Rerender UI
+              _renderAfterBankLoad();
 
-      const active = getActiveBankIdFromState();
-      if (active) markActiveCloudBankUIV4(active);
+              // Uppdatera listan visuellt (markerar ✅ Aktiv)
+              try { await loadCloudBanksListV4(); } catch {}
 
-      if (statusEl) statusEl.textContent = `☁️ Moln-bankar laddade (${docs.length}).`;
-    } catch (e) {
-      console.error("Kunde inte ladda moln-banker:", e);
-      if (statusEl) statusEl.textContent = "⚠️ Kunde inte ladda moln-banker. Se konsolen.";
-      alert("Kunde inte ladda moln-banker. Se konsolen för detaljer.");
-    }
-  }
-
-  if (typeof window.loadCloudBanksList !== "function") {
-    window.loadCloudBanksList = loadCloudBanksListV4;
-  }
-
-  // ====== Modal för “Spara molnbank + elevlista (tokens)” ======
-  function ensureBankRosterModalV4() {
-    ensureCloudStylesV4();
-
-    let modal = document.getElementById("bankRosterModal");
-    if (modal) return modal;
-
-    modal = document.createElement("div");
-    modal.id = "bankRosterModal";
-    modal.className = "hidden";
-    modal.style.position = "fixed";
-    modal.style.inset = "0";
-    modal.style.zIndex = "9999";
-    modal.style.background = "rgba(0,0,0,0.65)";
-    modal.style.display = "flex";
-    modal.style.alignItems = "center";
-    modal.style.justifyContent = "center";
-    modal.style.padding = "16px";
-
-    modal.innerHTML = `
-      <div class="card" style="width:min(980px, 100%); max-height:88vh; overflow:auto;">
-        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px;">
-          <div>
-            <h3 style="margin:0;">Spara molnbank + elevlista (tokens)</h3>
-            <p class="mini" style="margin:6px 0 0 0;">
-              GDPR-säkert: namn/klass/e-post lagras lokalt på lärardatorn. Molnet sparar bara token + resultat/progression per token.
-            </p>
-          </div>
-          <button id="btnCloseBankRosterModal" class="btn btn-sm btn-danger modal-close-x" type="button" title="Stäng">✕</button>
-        </div>
-
-        <div class="card card-full-width" style="margin-top:12px;">
-          <h3 style="margin:0 0 8px 0;">Elevlista + token</h3>
-          <div class="card-row" style="gap:10px; flex-wrap:wrap; align-items:flex-end;">
-            <div class="field" style="flex:1 1 280px;">
-              <label class="small-label" for="bankRosterBankName">Banknamn</label>
-              <input id="bankRosterBankName" class="input" placeholder="Min frågebank" />
-              <p class="mini" id="bankRosterMeta" style="margin-top:6px;"></p>
-            </div>
-            <div class="field" style="flex:0 0 auto;">
-              <label class="small-label">&nbsp;</label>
-              <button id="btnAddRosterRow" class="btn btn-xxs btn-primary" type="button">➕ Lägg till elev</button>
-            </div>
-          </div>
-
-          <div id="rosterRows" class="roster-grid" style="margin-top:10px;"></div>
-        </div>
-
-        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; align-items:center; justify-content:space-between;">
-          <div>
-            <button id="btnCopyTokens" class="btn btn-sm" type="button">📋 Kopiera tokens</button>
-            <span class="mini" id="bankRosterStatus" style="margin-left:10px;"></span>
-          </div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button id="btnSaveBankWithRoster" class="btn btn-sm btn-primary" type="button">☁️ Spara molnbanken</button>
-          </div>
-        </div>
-
-        <textarea id="bankRosterTokensText" class="textarea" style="margin-top:10px; min-height:90px;" placeholder="Här visas tokens vid kopiering..." readonly></textarea>
-      </div>
-    `;
-
-    document.body.appendChild(modal);
-
-    const btnClose = document.getElementById("btnCloseBankRosterModal");
-    const close = () => modal.classList.add("hidden");
-    if (btnClose) btnClose.addEventListener("click", close);
-    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
-
-    return modal;
-  }
-
-  function makeRosterCardV4(data) {
-    const wrap = document.createElement("div");
-    wrap.className = "roster-student";
-
-    const nameId = "roster_name_" + Math.random().toString(16).slice(2);
-    const klassId = "roster_klass_" + Math.random().toString(16).slice(2);
-    const emailId = "roster_email_" + Math.random().toString(16).slice(2);
-    const tokenId = "roster_token_" + Math.random().toString(16).slice(2);
-
-    const tokenVal = (data && data.token) ? String(data.token) : genTokenLocal(10);
-
-    wrap.innerHTML = `
-      <div class="row">
-        <div class="field" style="flex:1 1 180px;">
-          <label class="small-label" for="${nameId}">Namn</label>
-          <input id="${nameId}" class="input" placeholder="Elevens namn" value="${escapeHtml((data && data.name) || "")}">
-        </div>
-        <div class="field" style="flex:0 0 160px;">
-          <label class="small-label" for="${klassId}">Klass</label>
-          <input id="${klassId}" class="input" placeholder="HRHOT25" value="${escapeHtml((data && data.klass) || "")}">
-        </div>
-        <div class="field" style="flex:1 1 220px;">
-          <label class="small-label" for="${emailId}">E-post</label>
-          <input id="${emailId}" class="input" placeholder="elev@skola.se" value="${escapeHtml((data && data.email) || "")}">
-        </div>
-        <div class="field" style="flex:0 0 180px;">
-          <label class="small-label" for="${tokenId}">Token</label>
-          <input id="${tokenId}" class="input token" readonly value="${escapeHtml(tokenVal)}">
-        </div>
-      </div>
-      <div class="actions">
-        <button class="btn btn-sm btn-danger" type="button" data-roster-del title="Ta bort elev">🗑️ Ta bort</button>
-      </div>
-    `;
-
-    wrap.querySelector("[data-roster-del]")?.addEventListener("click", () => wrap.remove());
-
-    wrap.getRosterData = () => {
-      const name = (wrap.querySelector("#" + CSS.escape(nameId))?.value || "").trim();
-      const klass = (wrap.querySelector("#" + CSS.escape(klassId))?.value || "").trim();
-      const email = (wrap.querySelector("#" + CSS.escape(emailId))?.value || "").trim();
-      const token = (wrap.querySelector("#" + CSS.escape(tokenId))?.value || "").trim();
-      return { name, klass, email, token };
-    };
-
-    return wrap;
-  }
-
-  async function saveBankWithRosterToCloudV4({ bankName, bank, goalsMap, rosterLocal }) {
-    if (!firebaseDbInstance || !currentTeacherUser) throw new Error("Missing firebaseDbInstance/currentTeacherUser");
-
-    const tokens = rosterLocal
-      .map((r) => (r && r.token ? String(r.token).trim() : ""))
-      .filter(Boolean);
-
-    const banksCol = firebaseDbInstance
-      .collection(CLOUD_ROOT_COLLECTION)
-      .doc(currentTeacherUser.uid)
-      .collection(CLOUD_BANKS_SUBCOLLECTION);
-
-    const docRef = banksCol.doc();
-    const bankId = docRef.id;
-
-    const payload = {
-      ownerUid: currentTeacherUser.uid,
-      ownerEmail: currentTeacherUser.email || null,
-      name: bankName || "Min frågebank",
-      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      schemaVersion: "v17-bank+tokens-v4",
-      bank: ensureBankShape(bank || {}),
-      goalsMap: Array.isArray(goalsMap) ? goalsMap : [],
-      rosterTokens: tokens
-    };
-
-    await docRef.set(payload, { merge: false });
-
-    const batch = firebaseDbInstance.batch();
-    const studentsCol = docRef.collection("students");
-
-    tokens.forEach((tkn) => {
-      const sdoc = studentsCol.doc(String(tkn));
-      batch.set(
-        sdoc,
-        {
-          token: String(tkn),
-          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-          lastResult: null,
-          progression: { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} },
-          best: { E: 0, C: 0, A: 0 }
-        },
-        { merge: false }
-      );
-    });
-
-    await batch.commit();
-    return bankId;
-  }
-
-  function openSaveBankRosterFlowV4() {
-    const modal = ensureBankRosterModalV4();
-    const nameInputMain = document.getElementById("inputBankName");
-    const bankNameDefault = (nameInputMain && nameInputMain.value.trim()) || "Min frågebank";
-
-    const modalName = document.getElementById("bankRosterBankName");
-    const meta = document.getElementById("bankRosterMeta");
-    const status = document.getElementById("bankRosterStatus");
-    const rowsHost = document.getElementById("rosterRows");
-    const btnAdd = document.getElementById("btnAddRosterRow");
-    const btnSave = document.getElementById("btnSaveBankWithRoster");
-    const btnCopy = document.getElementById("btnCopyTokens");
-    const tokensText = document.getElementById("bankRosterTokensText");
-
-    if (modalName) modalName.value = bankNameDefault;
-
-    const bankNow = ensureBankShape(loadState().bank || {});
-    const mcqCount = (bankNow.mcq || []).length;
-    const imgCount = (bankNow.img || []).length;
-    const dragCount = (bankNow.drag || []).length;
-    const total = mcqCount + imgCount + dragCount;
-
-    if (meta) meta.textContent = `Denna bank har ${total} frågor (MCQ: ${mcqCount}, bild: ${imgCount}, drag: ${dragCount}).`;
-    if (status) status.textContent = "";
-    if (tokensText) tokensText.value = "";
-
-    if (rowsHost) {
-      rowsHost.innerHTML = "";
-      rowsHost.appendChild(makeRosterCardV4({ name: "", klass: "HRHOT25", email: "", token: genTokenLocal(10) }));
-    }
-
-    if (btnAdd && rowsHost) {
-      btnAdd.onclick = () => rowsHost.appendChild(makeRosterCardV4({ name: "", klass: "HRHOT25", email: "", token: genTokenLocal(10) }));
-    }
-
-    if (btnCopy && rowsHost && tokensText) {
-      btnCopy.onclick = () => {
-        const rows = Array.from(rowsHost.children || []);
-        const roster = rows.map((r) => (typeof r.getRosterData === "function" ? r.getRosterData() : null)).filter(Boolean);
-
-        const lines = roster.map((r, i) => {
-          const nm = r.name || `Elev ${i + 1}`;
-          const kl = r.klass || "";
-          const em = r.email || "";
-          const tk = r.token || "";
-          return `${nm}\t${kl}\t${em}\t${tk}`;
-        });
-
-        tokensText.value = lines.join("\n");
-        if (navigator.clipboard?.writeText) navigator.clipboard.writeText(tokensText.value).catch(() => {});
-        if (status) status.textContent = `Kopierat ${lines.length} rader (namn, klass, e-post, token).`;
-      };
-    }
-
-    if (btnSave && rowsHost) {
-      btnSave.onclick = async () => {
-        if (!firebaseDbInstance || !currentTeacherUser) {
-          alert("Logga in med Google först för att spara till molnet.");
-          return;
-        }
-
-        const bn = (modalName && modalName.value.trim()) || "Min frågebank";
-        const rows = Array.from(rowsHost.children || []);
-        const rosterLocal = rows.map((r) => (typeof r.getRosterData === "function" ? r.getRosterData() : null)).filter(Boolean);
-
-        const tokens = rosterLocal.map((r) => (r.token || "").trim()).filter(Boolean);
-        const tokenSet = new Set(tokens);
-        if (tokens.length !== tokenSet.size) {
-          alert("Du har dubbla tokens i listan. Ta bort en elevrad och lägg till igen.");
-          return;
-        }
-
-        try {
-          if (status) status.textContent = "Sparar till molnet…";
-          const sFull = loadState();
-
-          const bankId = await saveBankWithRosterToCloudV4({
-            bankName: bn,
-            bank: ensureBankShape(sFull.bank || {}),
-            goalsMap: sFull.goalsMap || [],
-            rosterLocal
+              if (statusEl) statusEl.textContent = `✅ Aktiv bank: ${name}`;
+            } catch (e) {
+              console.error("Aktivera bank misslyckades:", e);
+              if (statusEl) statusEl.textContent = "⚠️ Kunde inte aktivera banken. Se konsolen.";
+              alert("Kunde inte aktivera banken. Se konsolen för detaljer.");
+            }
           });
-
-          const rosterMap = loadTeacherRosterMapV4();
-          rosterMap[bankId] = {
-            bankName: bn,
-            savedAt: new Date().toISOString(),
-            students: rosterLocal.map((r) => ({
-              name: r.name || "",
-              klass: r.klass || "",
-              email: r.email || "",
-              token: r.token || ""
-            }))
-          };
-          saveTeacherRosterMapV4(rosterMap);
-
-          if (nameInputMain) nameInputMain.value = bn;
-
-          if (status) status.textContent = "Klart! Bank sparad. Elevlista sparad lokalt.";
-          alert("Molnbank sparad. Elevlista (namn/klass/e-post/token) sparad lokalt på lärardatorn.");
-
-          modal.classList.add("hidden");
-          try { await window.loadCloudBanksList(); } catch {}
-          try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
-        } catch (e) {
-          console.error("Kunde inte spara bank+roster:", e);
-          if (status) status.textContent = "Fel: kunde inte spara. Se konsolen.";
-          alert("Kunde inte spara till molnet. Se konsolen för detaljer.");
         }
-      };
-    }
 
-    modal.classList.remove("hidden");
-  }
-
-  function bindCloudButtonsV4() {
-    ensureCloudStylesV4();
-
-    const allBtns = Array.from(document.querySelectorAll("button"));
-
-    // Ladda moln-bankar
-    const loadBtn = allBtns.find((b) => {
-      const t = (b.textContent || "").toLowerCase();
-      return t.includes("ladda") && (t.includes("moln") || t.includes("bank"));
-    });
-
-    if (loadBtn && !loadBtn.dataset.boundCloudLoadV4) {
-      loadBtn.dataset.boundCloudLoadV4 = "1";
-      loadBtn.addEventListener("click", async () => {
-        const statusEl =
-          document.getElementById("cloudBanksStatus") ||
-          document.getElementById("cloudStatus") ||
-          document.getElementById("googleStatus");
-        if (statusEl) statusEl.textContent = "☁️ Laddar moln-bankar…";
-        await window.loadCloudBanksList();
+        listEl.appendChild(li);
       });
-    }
-
-    // Spara moln-bank
-    const saveBtn = allBtns.find((b) => {
-      const t = (b.textContent || "").toLowerCase();
-      return t.includes("spara") && (t.includes("moln") || t.includes("bank"));
-    });
-
-    if (saveBtn && !saveBtn.dataset.boundCloudSaveV4) {
-      saveBtn.dataset.boundCloudSaveV4 = "1";
-      saveBtn.addEventListener("click", () => {
-        if (!firebaseDbInstance || !currentTeacherUser) {
-          alert("Du måste vara inloggad med Google för att spara till molnet.");
-          return;
-        }
-        openSaveBankRosterFlowV4();
-      });
+    } catch (e) {
+      console.error("Fel vid laddning av moln-banker:", e);
+      if (statusEl) statusEl.textContent = "⚠️ Fel vid laddning av moln-banker. Se konsolen.";
+      alert("Fel vid laddning av moln-banker. Se konsolen för detaljer.");
     }
   }
 
-  try { bindCloudButtonsV4(); } catch {}
-  window.addEventListener("DOMContentLoaded", () => { try { bindCloudButtonsV4(); } catch {} });
-  setTimeout(() => { try { bindCloudButtonsV4(); } catch {} }, 600);
+  // Exponera (för andra delar som anropar)
+  window.loadCloudBanksListV4 = loadCloudBanksListV4;
+  if (typeof window.loadCloudBanksList !== "function") window.loadCloudBanksList = loadCloudBanksListV4;
 
-  window.__markActiveCloudBankUIV4 = markActiveCloudBankUIV4;
+  // ------- Bind knappen (så klick alltid gör något) -------
+  function bindLoadCloudBanksButtonV4() {
+    const btn = document.getElementById("btnLoadCloudBanks");
+    if (!btn) return;
+
+    if (btn.dataset && btn.dataset.boundCloudLoadV4 === "1") return;
+    if (btn.dataset) btn.dataset.boundCloudLoadV4 = "1";
+
+    btn.addEventListener("click", () => {
+      loadCloudBanksListV4();
+    });
+  }
+
+  bindLoadCloudBanksButtonV4();
+  window.addEventListener("DOMContentLoaded", bindLoadCloudBanksButtonV4);
+  setTimeout(bindLoadCloudBanksButtonV4, 400);
 })();
 </script>
-<!-- slut SEKTION 3D: MOLN-BANK + ELEVLISTA & TOKENS (UI v4) --> 
+<!-- slut SEKTION 3D: MOLNBANKAR – Ladda & aktivera (FIX) -->
 
 
 
