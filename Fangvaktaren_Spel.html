@@ -2595,46 +2595,273 @@ async function handleGoogleLogout() {
 
 
 
-<!-- start SEKTION 3F: KOPPLINGAR – helpers för delmåls-taggar -->
+<!-- start SEKTION 3F: PATCH – MOLN-BANKLISTA (DB-FALLBACK + RÄTT LIST-ID) -->
 <script>
 "use strict";
+/* ÄNDRAT: Skriver om loadCloudBanksListV4 så den alltid kan skapa DB via firebase.firestore() (även om firebaseDbInstance-variabeln saknas) + använder #cloudBankList (med fallback); 196 rader omskrivna */
 
-function buildGoalInfoText(q) {
-  const tags = [];
+(function () {
+  // ------- små helpers (egna namn för att inte krocka) -------
+  function _fbSafeText(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
 
-  if (Array.isArray(q.links) && q.links.length) {
-    q.links.forEach((lnk) => {
-      const goal = escapeHtml(lnk.goal || "-");
-      const parts = escapeHtml(lnk.parts || "-");
-      tags.push(`<span class="goal-tag">${goal} (Delbitar: ${parts})</span>`);
-    });
-  } else {
-    if (q.goal || q.parts) {
-      let txt = "Delmål: " + (q.goal || "-");
-      if (q.parts) txt += " (Delbitar: " + q.parts + ")";
-      tags.push(`<span class="goal-tag">${escapeHtml(txt)}</span>`);
-    }
-    if (q.goalExtra || q.partsExtra) {
-      let txt2 = "Delmål: " + (q.goalExtra || "-");
-      if (q.partsExtra) txt2 += " (Delbitar: " + q.partsExtra + ")";
-      tags.push(`<span class="goal-tag">${escapeHtml(txt2)}</span>`);
+  function _fbEnsureBankShape(bank) {
+    const b = bank && typeof bank === "object" ? bank : {};
+    return {
+      mcq: Array.isArray(b.mcq) ? b.mcq : [],
+      img: Array.isArray(b.img) ? b.img : [],
+      drag: Array.isArray(b.drag) ? b.drag : []
+    };
+  }
+
+  function _fbCountQuestions(bank) {
+    const b = _fbEnsureBankShape(bank);
+    const mcq = b.mcq.length;
+    const img = b.img.length;
+    const drag = b.drag.length;
+    return { mcq, img, drag, total: mcq + img + drag };
+  }
+
+  function _fbGetDb() {
+    // 1) Om något annat redan satt window.firebaseDbInstance – använd det.
+    if (window.firebaseDbInstance) return window.firebaseDbInstance;
+
+    // 2) Om Firebase finns och init är OK (apps.length>0) – skapa firestore direkt.
+    try {
+      if (window.firebase && window.firebase.apps && window.firebase.apps.length > 0 && typeof window.firebase.firestore === "function") {
+        const db = window.firebase.firestore();
+        window.firebaseDbInstance = db; // cache
+        return db;
+      }
+    } catch (e) {}
+
+    return null;
+  }
+
+  function _fbGetUser() {
+    // Försök på flera ställen – du kan redan ha satt currentTeacherUser i din kod.
+    if (window.currentTeacherUser && window.currentTeacherUser.uid) return window.currentTeacherUser;
+
+    try {
+      if (window.firebaseAuthInstance && window.firebaseAuthInstance.currentUser) return window.firebaseAuthInstance.currentUser;
+    } catch (e) {}
+
+    try {
+      if (window.firebase && typeof window.firebase.auth === "function") {
+        const u = window.firebase.auth().currentUser;
+        if (u && u.uid) return u;
+      }
+    } catch (e) {}
+
+    return null;
+  }
+
+  function _fbSetStatus(msg, isWarn) {
+    const el = document.querySelector("#cloudBankStatus");
+    if (!el) return;
+    el.textContent = msg;
+    el.style.opacity = "1";
+    el.style.color = isWarn ? "#fca5a5" : "";
+  }
+
+  function _fbGetListEl() {
+    // Din HTML har #cloudBankList (inte #cloudBanksList).
+    return (
+      document.querySelector("#cloudBankList") ||
+      document.querySelector("#cloudBanksList") ||
+      document.querySelector("#cloudBanksListV4") ||
+      null
+    );
+  }
+
+  async function _fbFetchBankDoc(db, uid, bankId) {
+    return db
+      .collection(String(window.CLOUD_ROOT_COLLECTION || "teachers"))
+      .doc(String(uid))
+      .collection(String(window.CLOUD_BANKS_SUBCOLLECTION || "banks"))
+      .doc(String(bankId))
+      .get();
+  }
+
+  function _fbLoadStateSafe() {
+    try {
+      if (typeof window.loadState === "function") return window.loadState();
+    } catch (e) {}
+    return {};
+  }
+
+  function _fbSaveStateSafe(s) {
+    try {
+      if (typeof window.saveState === "function") return window.saveState(s);
+    } catch (e) {}
+  }
+
+  function _fbApplyPayloadToGame(payload, bankId) {
+    // 1) Om du redan har en dedikerad funktion – använd den.
+    try {
+      if (typeof window.applyBankToEditorState === "function") {
+        window.applyBankToEditorState(payload);
+      } else if (typeof window.applyCloudBankToState === "function") {
+        window.applyCloudBankToState(payload);
+      } else if (typeof window.applyBankToState === "function") {
+        window.applyBankToState(payload);
+      } else {
+        // 2) Fallback: merge in i state.bank + spara activeCloudBankId.
+        const s = _fbLoadStateSafe();
+        const bank = _fbEnsureBankShape(payload && payload.bank ? payload.bank : {});
+        s.bank = _fbEnsureBankShape(s.bank || {});
+        s.bank.mcq = ([]).concat(s.bank.mcq || [], bank.mcq || []);
+        s.bank.img = ([]).concat(s.bank.img || [], bank.img || []);
+        s.bank.drag = ([]).concat(s.bank.drag || [], bank.drag || []);
+        if (Array.isArray(payload && payload.goalsMap)) s.goalsMap = payload.goalsMap;
+
+        s.activeCloudBankId = String(bankId || "");
+        window.activeCloudBankId = s.activeCloudBankId;
+
+        _fbSaveStateSafe(s);
+
+        // uppdatera UI om dina funktioner finns
+        try { if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); } catch (e) {}
+        try { if (typeof window.renderQuestionsList === "function") window.renderQuestionsList(); } catch (e) {}
+        try { if (typeof window.renderImagesList === "function") window.renderImagesList(); } catch (e) {}
+        try { if (typeof window.renderDragList === "function") window.renderDragList(); } catch (e) {}
+      }
+    } catch (e) {
+      console.warn("apply cloud bank failed:", e);
     }
   }
 
-  if (!tags.length) return '<span class="goal-tag goal-tag-none">Ingen koppling till delmål</span>';
-  return tags.join(" ");
-}
+  // ------- OVERRIDE: loadCloudBanksListV4 -------
+  window.loadCloudBanksListV4 = async function loadCloudBanksListV4() {
+    const listEl = _fbGetListEl();
+    if (!listEl) {
+      console.warn("Saknar #cloudBankList i HTML (SEKTION 2).");
+      _fbSetStatus("⚠️ Saknar list-element (#cloudBankList) i HTML.", true);
+      return;
+    }
 
-function getLinksFromIds(idArray) {
-  const s = loadState();
-  const goals = s.goalsMap || [];
-  return (idArray || [])
-    .map((id) => goals.find((g) => String(g.id) === String(id)))
-    .filter(Boolean)
-    .map((g) => ({ id: g.id, goal: g.goal, parts: g.parts }));
-}
+    const db = _fbGetDb();
+    if (!db) {
+      console.warn("firebaseDbInstance saknas (men Firebase kan vara init).");
+      _fbSetStatus("⚠️ Firebase DB saknas (Firestore kan inte skapas). Kontrollera att firebase-app + firestore är laddade.", true);
+      return;
+    }
+
+    const user = _fbGetUser();
+    if (!user) {
+      _fbSetStatus("⚠️ Inte inloggad. Logga in med Google i Inställningar först.", true);
+      listEl.innerHTML = "";
+      return;
+    }
+
+    _fbSetStatus("⏳ Hämtar moln-bankar…", false);
+    listEl.innerHTML = "";
+
+    try {
+      const col = db
+        .collection(String(window.CLOUD_ROOT_COLLECTION || "teachers"))
+        .doc(String(user.uid))
+        .collection(String(window.CLOUD_BANKS_SUBCOLLECTION || "banks"));
+
+      const snap = await col.get();
+
+      if (!snap || snap.empty) {
+        _fbSetStatus("Inga moln-bankar hittades för detta konto.", false);
+        listEl.innerHTML = "<li class='mini'>Inga bankar sparade ännu.</li>";
+        return;
+      }
+
+      const activeId = (typeof window.activeCloudBankId !== "undefined" && window.activeCloudBankId) ? String(window.activeCloudBankId) : "";
+      _fbSetStatus("✅ Moln-bankar laddade. Klicka på en bank för att aktivera den.", false);
+
+      snap.forEach(function (d) {
+        const data = d.data() || {};
+        const name = data.name || data.bankName || data.title || d.id;
+        const bank = _fbEnsureBankShape(data.bank || {});
+        const counts = _fbCountQuestions(bank);
+        const isActive = activeId && String(activeId) === String(d.id);
+
+        const li = document.createElement("li");
+        li.style.display = "flex";
+        li.style.alignItems = "center";
+        li.style.justifyContent = "space-between";
+        li.style.gap = "10px";
+
+        const left = document.createElement("div");
+        left.className = "list-main";
+
+        const t = document.createElement("div");
+        t.className = "q-text";
+        t.innerHTML = _fbSafeText(name) + (isActive ? " <span class='mini'>✅ Aktiv</span>" : "");
+        left.appendChild(t);
+
+        const meta = document.createElement("div");
+        meta.className = "q-meta mini";
+        meta.textContent = "Frågor: " + counts.total + " (MCQ: " + counts.mcq + ", Bild: " + counts.img + ", Drag: " + counts.drag + ")";
+        left.appendChild(meta);
+
+        const right = document.createElement("div");
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn-sm " + (isActive ? "" : "btn-primary");
+        btn.textContent = isActive ? "Aktiv" : "Aktivera";
+        btn.disabled = !!isActive;
+
+        btn.addEventListener("click", async function () {
+          try {
+            _fbSetStatus("⏳ Hämtar bank: " + name + "…", false);
+            const doc = await _fbFetchBankDoc(db, user.uid, d.id);
+            const payload = doc && doc.exists ? (doc.data() || {}) : {};
+            // normalisera payload
+            payload.bank = _fbEnsureBankShape(payload.bank || {});
+            payload.goalsMap = Array.isArray(payload.goalsMap) ? payload.goalsMap : [];
+
+            _fbApplyPayloadToGame(payload, d.id);
+
+            // sätt aktivt & ladda om listan så UI uppdateras
+            window.activeCloudBankId = String(d.id);
+            _fbSetStatus("✅ Aktiv bank: " + name, false);
+            await window.loadCloudBanksListV4();
+          } catch (e) {
+            console.error("Fel vid aktivering av bank:", e);
+            _fbSetStatus("⚠️ Kunde inte aktivera bank. Se konsolen.", true);
+          }
+        });
+
+        right.appendChild(btn);
+
+        li.appendChild(left);
+        li.appendChild(right);
+
+        listEl.appendChild(li);
+      });
+    } catch (e) {
+      console.error("Fel vid laddning av moln-banker:", e);
+      _fbSetStatus("⚠️ Fel vid laddning av moln-banker. Se konsolen för detaljer.", true);
+      listEl.innerHTML = "<li class='mini'>Fel vid laddning. Se konsolen.</li>";
+    }
+  };
+
+  // Koppla knappen om den finns (utan att krascha om du redan kopplat)
+  (function _fbWireButton() {
+    const btn = document.querySelector("#btnLoadCloudBanks");
+    if (!btn) return;
+    if (btn.__fbWired) return;
+    btn.__fbWired = true;
+    btn.addEventListener("click", function () {
+      if (typeof window.loadCloudBanksListV4 === "function") window.loadCloudBanksListV4();
+    });
+  })();
+})();
 </script>
-<!-- slut SEKTION 3F: KOPPLINGAR – helpers för delmåls-taggar -->
+<!-- slut SEKTION 3F: PATCH – MOLN-BANKLISTA (DB-FALLBACK + RÄTT LIST-ID) -->
 
 
 
