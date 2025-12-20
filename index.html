@@ -2509,132 +2509,89 @@ async function handleGoogleLogout() {
 
 
 
-<!-- start SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
+<!-- start SEKTION 3E: FIREBASE BRIDGE (GLOBAL→WINDOW) -->
 <script>
 "use strict";
+/* ÄNDRAT: Exponerar firebaseDbInstance/firebaseAuthInstance/currentTeacherUser (som ofta är top-level let) till window.* så moln-banklistan kan läsa dem; 78 rader omskrivna */
 
-function populateGoalSelect(selectElId) {
-  const sel = typeof selectElId === "string" ? $(selectElId) : $("#mcqGoalPart");
-  if (!sel) return;
-
-  const s = loadState();
-  const goals = s.goalsMap || [];
-
-  sel.innerHTML = "";
-  const def = document.createElement("option");
-  def.value = "";
-  def.textContent = "Ingen koppling";
-  sel.appendChild(def);
-
-  goals.forEach((g) => {
-    const opt = document.createElement("option");
-    opt.value = String(g.id);
-    opt.textContent = `${g.goal || "-"} (Delbitar: ${g.parts || "-"})`;
-    sel.appendChild(opt);
-  });
-}
-
-function renderGoalsList() {
-  const host = $("#goalsList");
-  if (!host) return;
-
-  const s = loadState();
-  const list = s.goalsMap || [];
-
-  host.innerHTML = "";
-  if (!list.length) {
-    const li = document.createElement("li");
-    li.className = "mini";
-    li.textContent = "Inga sparade delmål ännu.";
-    host.appendChild(li);
-    populateGoalSelect("#mcqGoalPart");
-    populateGoalSelect("#imgGoalPart");
-    populateGoalSelect("#dragGoalPart");
-    populateGoalSelect("#mcqJsonGoalPart");
-    return;
+(function () {
+  function hasApps() {
+    try {
+      return !!(window.firebase && window.firebase.apps && window.firebase.apps.length > 0);
+    } catch (e) {
+      return false;
+    }
   }
 
-  list.forEach((g) => {
-    const li = document.createElement("li");
-    li.className = "list-item";
-    li.innerHTML = `
-      <div class="list-main">
-        <div class="q-text">${escapeHtml(g.goal || "-")}</div>
-        <div class="q-meta">Delbitar: ${escapeHtml(g.parts || "-")}</div>
-      </div>
-      <div>
-        <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${g.id}">🗑️</button>
-      </div>
-    `;
-    host.appendChild(li);
-  });
+  function safeGetGlobal(name) {
+    try {
+      // top-level let/const är ofta globalt åtkomliga via identifier, men inte som window-prop
+      // eslint-disable-next-line no-undef
+      return (typeof eval(name) !== "undefined") ? eval(name) : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
 
-  host.querySelectorAll("button[data-del-goal-id]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.getAttribute("data-del-goal-id");
-      const s2 = loadState();
-      s2.goalsMap = (s2.goalsMap || []).filter((g) => String(g.id) !== String(id));
-      saveState(s2);
-      renderGoalsList();
-    });
-  });
-
-  populateGoalSelect("#mcqGoalPart");
-  populateGoalSelect("#imgGoalPart");
-  populateGoalSelect("#dragGoalPart");
-  populateGoalSelect("#mcqJsonGoalPart");
-}
-
-function initGoalsMap() {
-  const inputGoal = $("#inputGoalSingle");
-  const inputPart = $("#inputPartSingle");
-  const btnAdd = $("#btnAddGoalPart");
-  const btnSave = $("#btnSaveGoalsMap");
-  const btnClear = $("#btnClearGoalsMap");
-  const statusEl = $("#goalsStatus");
-
-  if (btnAdd) {
-    btnAdd.addEventListener("click", () => {
-      const goalText = (inputGoal && inputGoal.value.trim()) || "";
-      const partsText = (inputPart && inputPart.value.trim()) || "";
-      if (!goalText || !partsText) {
-        if (statusEl) statusEl.textContent = "Skriv både delmål och delbit.";
-        return;
+  function bridgeOnce() {
+    try {
+      // 1) DB
+      if (!window.firebaseDbInstance) {
+        const gDb = safeGetGlobal("firebaseDbInstance");
+        if (gDb) window.firebaseDbInstance = gDb;
       }
-      const s = loadState();
-      if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
-      s.goalsMap.push({ id: Date.now(), goal: goalText, parts: partsText });
-      saveState(s);
-      if (inputGoal) inputGoal.value = "";
-      if (inputPart) inputPart.value = "";
-      if (statusEl) statusEl.textContent = "Delbit tillagd (glöm inte att spara).";
-      renderGoalsList();
-    });
+      if (!window.firebaseDbInstance && hasApps() && window.firebase && typeof window.firebase.firestore === "function") {
+        try { window.firebaseDbInstance = window.firebase.firestore(); } catch (e) {}
+      }
+
+      // 2) AUTH
+      if (!window.firebaseAuthInstance) {
+        const gAuth = safeGetGlobal("firebaseAuthInstance");
+        if (gAuth) window.firebaseAuthInstance = gAuth;
+      }
+      if (!window.firebaseAuthInstance && hasApps() && window.firebase && typeof window.firebase.auth === "function") {
+        try { window.firebaseAuthInstance = window.firebase.auth(); } catch (e) {}
+      }
+
+      // 3) current user
+      if (!window.currentTeacherUser) {
+        const gUser = safeGetGlobal("currentTeacherUser");
+        if (gUser) window.currentTeacherUser = gUser;
+      }
+
+      // 4) active bank id (om den finns som global)
+      if (typeof window.activeCloudBankId === "undefined") {
+        const gActive = safeGetGlobal("activeCloudBankId");
+        if (typeof gActive !== "undefined") window.activeCloudBankId = gActive;
+      }
+
+      // Debug (lågmält)
+      // console.log("[BRIDGE] db:", !!window.firebaseDbInstance, "auth:", !!window.firebaseAuthInstance, "user:", !!window.currentTeacherUser);
+    } catch (e) {
+      // tyst fail
+    }
   }
 
-  if (btnSave) {
-    btnSave.addEventListener("click", () => {
-      const s = loadState();
-      saveState(s);
-      if (statusEl) statusEl.textContent = "Delmål & delbitar sparade.";
-    });
-  }
+  // Kör direkt + flera gånger så vi fångar init som sker efter DOMContentLoaded
+  bridgeOnce();
+  window.addEventListener("DOMContentLoaded", bridgeOnce);
 
-  if (btnClear) {
-    btnClear.addEventListener("click", () => {
-      if (!confirm("Ta bort alla delmål och delbitar?")) return;
-      const s = loadState();
-      s.goalsMap = [];
-      saveState(s);
-      if (statusEl) statusEl.textContent = "Alla delmål borttagna.";
-      renderGoalsList();
-    });
-  }
-
-  renderGoalsList();
-}
+  // Fånga init som händer strax efter
+  setTimeout(bridgeOnce, 0);
+  setTimeout(bridgeOnce, 50);
+  setTimeout(bridgeOnce, 150);
+  setTimeout(bridgeOnce, 400);
+  setTimeout(bridgeOnce, 900);
+  setTimeout(bridgeOnce, 1500);
+})();
 </script>
-<!-- slut SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
+<!-- slut SEKTION 3E: FIREBASE BRIDGE (GLOBAL→WINDOW) -->
+
+
+
+
+
+
 
 
 
