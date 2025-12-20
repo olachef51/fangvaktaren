@@ -2284,12 +2284,16 @@ async function handleGoogleLogout() {
 
 
 
-<!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (ROBUST LOAD + SAVE ROSTER) -->
+<!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (SAVE ONLY USED + PUBLIC LINK + EMAIL) -->
 <script>
 "use strict";
 
 /* =========================
-   3D – Robust moln-UI + inline elevlista-ruta (med Spara till aktiv bank)
+   3D – Robust moln-UI + inline elevlista-ruta
+   - Sparar bara "använda" rader (token skapas först vid input eller 🎲 Token)
+   - "Spara till aktiv bank" sparar rosterTokens i teachers/{uid}/banks/{bankId}
+   - "Skapa elevlänk" publicerar bank till public_banks/{publicId} (för elev utan login)
+   - 📧 per elev öppnar mailto med länk + token
    ========================= */
 
 function _fv3d_escape(s){
@@ -2311,7 +2315,6 @@ function _fv3d_genToken(len){
 function _fv3d_hasFirebaseReady(){
   return !!(typeof firebaseDbInstance !== "undefined" && firebaseDbInstance);
 }
-
 function _fv3d_hasTeacher(){
   return !!(typeof currentTeacherUser !== "undefined" && currentTeacherUser && currentTeacherUser.uid);
 }
@@ -2353,6 +2356,24 @@ function _fv3d_setActiveMeta(bankId){
   } catch {}
 }
 
+function _fv3d_getBaseUrl(){
+  try {
+    const href = String(window.location.href || "");
+    const noHash = href.split("#")[0];
+    return noHash.split("?")[0];
+  } catch {
+    return "";
+  }
+}
+
+function _fv3d_bankShape(bank){
+  const b = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
+  if (!Array.isArray(b.mcq)) b.mcq = [];
+  if (!Array.isArray(b.img)) b.img = [];
+  if (!Array.isArray(b.drag)) b.drag = [];
+  return b;
+}
+
 function _fv3d_ensureStyles(){
   if (document.getElementById("fv3d-styles")) return;
   const st = document.createElement("style");
@@ -2368,13 +2389,7 @@ function _fv3d_ensureStyles(){
     .cloud-bank-active .mini,
     .cloud-bank-active .chip{ color:#bbf7d0 !important; }
 
-    .fv3d-actions{
-      display:flex;
-      gap:6px;
-      flex-wrap:wrap;
-      align-items:center;
-      justify-content:flex-end;
-    }
+    .fv3d-actions{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; justify-content:flex-end; }
     .fv3d-actions .btn{ white-space:nowrap; }
     #fv3d-cloud-status{ margin-top:6px; }
 
@@ -2451,13 +2466,19 @@ function _fv3d_ensureStyles(){
 
     #fv3dRosterBottom{
       display:flex;
-      justify-content:flex-end;
+      justify-content:space-between;
       gap:8px;
       flex-wrap:wrap;
       margin-top:10px;
       align-items:center;
     }
-    #fv3dRosterStatus{ margin-top:8px; }
+    #fv3dRosterStatus{ margin-top:8px; white-space:pre-wrap; }
+    #fv3dRosterLinkBox{ margin-top:8px; }
+    #fv3dRosterLink{
+      width:100%;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      letter-spacing:.02em;
+    }
   `;
   document.head.appendChild(st);
 }
@@ -2496,7 +2517,6 @@ function _fv3d_ensureCloudHost(){
     status.id = "fv3d-cloud-status";
     status.className = "mini";
   }
-
   if (!host) {
     host = document.createElement("ul");
     host.id = "cloudBanksListV4";
@@ -2530,14 +2550,6 @@ function _fv3d_setStatus(msg){
   if (status) status.textContent = msg || "";
 }
 
-function _fv3d_bankShape(bank){
-  const b = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
-  if (!Array.isArray(b.mcq)) b.mcq = [];
-  if (!Array.isArray(b.img)) b.img = [];
-  if (!Array.isArray(b.drag)) b.drag = [];
-  return b;
-}
-
 /* =========================
    Inline elevlista-ruta under molnlistan
    ========================= */
@@ -2557,19 +2569,28 @@ function _fv3d_ensureRosterBox(){
   box.innerHTML = `
     <div id="fv3dRosterTop">
       <div>
-        <h3 style="margin:0;">Elevlista (lokalt) + tokens (moln)</h3>
+        <h3 style="margin:0;">Elevlista (lokalt) + tokens</h3>
         <div id="fv3dRosterMeta" class="mini">-</div>
       </div>
       <div class="fv3d-actions">
+        <button id="fv3dRosterPublish" class="btn fv3d-btn-xs" type="button">Skapa elevlänk</button>
+        <button id="fv3dRosterCopyLinks" class="btn fv3d-btn-xs" type="button">Kopiera länkar</button>
         <button id="fv3dRosterSave" class="btn fv3d-btn-xs btn-primary" type="button">Spara till aktiv bank</button>
         <button id="fv3dRosterClose" class="btn fv3d-btn-xs" type="button">Stäng</button>
       </div>
+    </div>
+
+    <div id="fv3dRosterLinkBox" class="field">
+      <label class="small-label" for="fv3dRosterLink">Elevlänk (public)</label>
+      <input id="fv3dRosterLink" class="input" readonly value="" placeholder="Skapa elevlänk för att fylla i..." />
+      <div class="mini" style="margin-top:4px;">Tips: när elevlänk finns kan 📧-knappen skapa ett färdigt mejl per elev.</div>
     </div>
 
     <div id="fv3dRosterGrid"></div>
 
     <div id="fv3dRosterBottom">
       <button id="fv3dRosterAddBottom" class="btn fv3d-btn-xs btn-primary" type="button">➕ Lägg till elev</button>
+      <span class="mini">Tomma rader sparas inte.</span>
     </div>
 
     <div id="fv3dRosterStatus" class="mini"></div>
@@ -2585,6 +2606,13 @@ function _fv3d_ensureRosterBox(){
   });
 
   return box;
+}
+
+function _fv3d_mailto(to, subject, body){
+  try{
+    const url = `mailto:${encodeURIComponent(to || "")}?subject=${encodeURIComponent(subject || "")}&body=${encodeURIComponent(body || "")}`;
+    window.open(url, "_blank");
+  }catch{}
 }
 
 function _fv3d_makeRosterCard(data){
@@ -2612,7 +2640,31 @@ function _fv3d_makeRosterCard(data){
   const token = document.createElement("input");
   token.className = "input fv3d-field-token fv3d-token";
   token.readOnly = true;
-  token.value = (data && data.token) || _fv3d_genToken(10);
+  token.value = (data && typeof data.token === "string") ? data.token : ""; // tom tills raden används
+
+  function ensureToken(){
+    if (!token.value.trim()) token.value = _fv3d_genToken(10);
+    return token.value.trim();
+  }
+
+  function isUsedRow(){
+    const a = name.value.trim();
+    const b = klass.value.trim();
+    const c = email.value.trim();
+    const t = token.value.trim();
+    return !!(t || a || b || c);
+  }
+
+  // Auto-token när man börjar fylla i raden
+  function onAnyInput(){
+    const a = name.value.trim();
+    const b = klass.value.trim();
+    const c = email.value.trim();
+    if ((a || b || c) && !token.value.trim()) ensureToken();
+  }
+  name.addEventListener("input", onAnyInput);
+  klass.addEventListener("input", onAnyInput);
+  email.addEventListener("input", onAnyInput);
 
   row.appendChild(name);
   row.appendChild(klass);
@@ -2622,6 +2674,56 @@ function _fv3d_makeRosterCard(data){
   const actions = document.createElement("div");
   actions.className = "fv3d-roster-actions";
 
+  const btnTok = document.createElement("button");
+  btnTok.className = "btn fv3d-btn-xs";
+  btnTok.type = "button";
+  btnTok.textContent = "🎲 Token";
+  btnTok.title = "Skapa token för raden";
+  btnTok.addEventListener("click", ()=>{ ensureToken(); });
+
+  const btnMail = document.createElement("button");
+  btnMail.className = "btn fv3d-btn-xs";
+  btnMail.type = "button";
+  btnMail.textContent = "📧";
+  btnMail.title = "Skapa mejl till denna elev";
+  btnMail.addEventListener("click", async ()=>{
+    const em = email.value.trim();
+    if (!em) { alert("Skriv e-post på raden först."); return; }
+
+    const box = document.getElementById("fv3dRosterBox");
+    const status = document.getElementById("fv3dRosterStatus");
+    const linkInput = document.getElementById("fv3dRosterLink");
+
+    const tkn = ensureToken();
+
+    // Se till att elevlänk finns (public)
+    let publicUrl = (linkInput && linkInput.value.trim()) ? linkInput.value.trim() : "";
+    if (!publicUrl) {
+      if (status) status.textContent = "Skapar elevlänk…";
+      try {
+        const pub = await _fv3d_publishActiveBankToPublic();
+        publicUrl = pub && pub.publicUrl ? String(pub.publicUrl) : "";
+        if (linkInput && publicUrl) linkInput.value = publicUrl;
+      } catch (e) {
+        console.error("Kunde inte skapa elevlänk:", e);
+      }
+    }
+
+    if (!publicUrl) { alert("Kunde inte skapa elevlänk. Klicka 'Skapa elevlänk' först."); return; }
+
+    const joiner = publicUrl.includes("?") ? "&" : "?";
+    const urlWithToken = `${publicUrl}${joiner}token=${encodeURIComponent(tkn)}`;
+
+    const subj = "Fångvaktaren – länk till spelet";
+    const body =
+      `Hej!\n\n` +
+      `Här är länken till spelet:\n${urlWithToken}\n\n` +
+      `Din token (om du behöver skriva in den): ${tkn}\n\n` +
+      `Lycka till!\n`;
+
+    _fv3d_mailto(em, subj, body);
+  });
+
   const btnDel = document.createElement("button");
   btnDel.className = "btn fv3d-btn-xs btn-danger";
   btnDel.type = "button";
@@ -2629,6 +2731,8 @@ function _fv3d_makeRosterCard(data){
   btnDel.title = "Ta bort elevruta";
   btnDel.addEventListener("click", ()=> card.remove());
 
+  actions.appendChild(btnTok);
+  actions.appendChild(btnMail);
   actions.appendChild(btnDel);
 
   card.appendChild(row);
@@ -2638,8 +2742,11 @@ function _fv3d_makeRosterCard(data){
     name: name.value.trim(),
     klass: klass.value.trim(),
     email: email.value.trim(),
-    token: (token.value || "").trim()
+    token: token.value.trim(),
+    _isUsed: isUsedRow()
   });
+
+  card.ensureToken = ensureToken;
 
   return card;
 }
@@ -2690,28 +2797,97 @@ function _fv3d_collectRosterFromUI(){
   if (!grid) return { rosterLocal: [], tokens: [] };
 
   const cards = Array.from(grid.children || []);
-  const rosterLocal = cards
+
+  // Bara "använda" rader (tomma standardrader blir kvar i UI men sparas inte)
+  const usedCards = cards
     .map((c)=> (typeof c.getRosterData === "function" ? c.getRosterData() : null))
     .filter(Boolean)
-    .map((r)=>{
-      let tk = (r.token || "").trim();
-      if (!tk) tk = _fv3d_genToken(10);
-      return {
-        name: (r.name || "").trim(),
-        klass: (r.klass || "").trim(),
-        email: (r.email || "").trim(),
-        token: tk
-      };
-    });
+    .filter((r)=> !!(r._isUsed || r.token || r.name || r.klass || r.email));
+
+  const rosterLocal = usedCards.map((r)=>{
+    let tk = (r.token || "").trim();
+    if (!tk) tk = _fv3d_genToken(10);
+    return {
+      name: (r.name || "").trim(),
+      klass: (r.klass || "").trim(),
+      email: (r.email || "").trim(),
+      token: tk
+    };
+  });
 
   const tokens = rosterLocal.map(r=> String(r.token || "").trim()).filter(Boolean);
   return { rosterLocal, tokens };
 }
 
+/* =========================
+   Publicera bank till public_banks (elev utan login)
+   ========================= */
+
+async function _fv3d_publishActiveBankToPublic(){
+  if (!_fv3d_hasFirebaseReady() || !_fv3d_hasTeacher()) throw new Error("Firebase/Teacher saknas");
+
+  const status = document.getElementById("fv3dRosterStatus");
+  const linkInput = document.getElementById("fv3dRosterLink");
+
+  const activeId = _fv3d_activeBankId();
+  if (!activeId) throw new Error("Ingen aktiv bank");
+
+  const teacherRef = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION)
+    .doc(String(currentTeacherUser.uid))
+    .collection(CLOUD_BANKS_SUBCOLLECTION)
+    .doc(String(activeId));
+
+  const tdoc = await teacherRef.get();
+  if (!tdoc.exists) throw new Error("Aktiv bank finns inte");
+
+  const data = tdoc.data() || {};
+  const bank = _fv3d_bankShape(data.bank || {});
+  const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
+  const rosterTokens = Array.isArray(data.rosterTokens) ? data.rosterTokens.map(String) : [];
+
+  let publicId = data.publicId ? String(data.publicId) : "";
+
+  // Skapa ny publicId om saknas
+  if (!publicId) {
+    publicId = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc().id;
+    await teacherRef.set({ publicId: publicId }, { merge: true });
+  }
+
+  const pubRef = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
+  await pubRef.set(
+    {
+      name: data.name || "Elevbank",
+      sourceTeacherUid: String(currentTeacherUser.uid),
+      sourceBankId: String(activeId),
+      schemaVersion: "v17-public-bank-v1",
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      bank: bank,
+      goalsMap: goalsMap,
+      rosterTokens: rosterTokens
+    },
+    { merge: true }
+  );
+
+  const base = _fv3d_getBaseUrl();
+  const publicUrl = base ? `${base}?public=${encodeURIComponent(publicId)}` : "";
+
+  if (linkInput) linkInput.value = publicUrl;
+  if (status) status.textContent = `✅ Elevlänk skapad (publicId: ${publicId}).`;
+
+  return { publicId, publicUrl };
+}
+
+/* =========================
+   Spara rosterTokens till aktiv bank + lokalt kopplat till bank
+   ========================= */
+
 async function _fv3d_saveRosterToCloudAndLocal(){
   const box = document.getElementById("fv3dRosterBox");
   const status = document.getElementById("fv3dRosterStatus");
   const meta = document.getElementById("fv3dRosterMeta");
+
   if (!box) return;
 
   const clickedBankId = String(box.dataset.bankId || "");
@@ -2735,30 +2911,30 @@ async function _fv3d_saveRosterToCloudAndLocal(){
     return;
   }
 
-  // 1) Spara lokalt kopplat till *targetBankId*
+  // Spara lokalt kopplat till bankId
   try {
     const map = _fv3d_loadLocalRosterMap();
     map[targetBankId] = {
       bankName: clickedBankName || (map[targetBankId] && map[targetBankId].bankName) || "",
       savedAt: new Date().toISOString(),
-      students: rosterLocal
+      students: rosterLocal,
+      publicId: (map[targetBankId] && map[targetBankId].publicId) ? map[targetBankId].publicId : ""
     };
     _fv3d_saveLocalRosterMap(map);
   } catch (e) {
     console.warn("Kunde inte spara elevlista lokalt:", e);
   }
 
-  // Feedback direkt (även om moln saknas)
-  if (status) status.textContent = `✅ Sparat lokalt (${tokens.length} elever) – kopplat till bank: ${targetBankId}.`;
-
   if (meta) {
     const nm = clickedBankName ? String(clickedBankName) : "Moln-bank";
     meta.textContent = `${nm} (${clickedBankId || "-"}) – Aktiv bank för sparning: ${targetBankId}`;
   }
 
-  // 2) Spara tokens i molnbanken + skapa students/{token} docs
+  if (status) status.textContent = `✅ Sparat lokalt (${tokens.length} elever) – kopplat till bank: ${targetBankId}.`;
+
   if (!_fv3d_hasFirebaseReady() || !_fv3d_hasTeacher()) {
     if (status) status.textContent = `✅ Sparat lokalt (${tokens.length} elever). (Logga in för att spara tokens i molnet.)`;
+    alert(`Sparat lokalt! ${tokens.length} elever kopplade till bank.\n(Logga in för molnsparning.)`);
     return;
   }
 
@@ -2809,30 +2985,35 @@ async function _fv3d_saveRosterToCloudAndLocal(){
   }
 }
 
-function _fv3d_showRosterBox({ bankId, bankName, initialStudents }){
+function _fv3d_showRosterBox({ bankId, bankName, initialStudents, publicId }){
   const box = _fv3d_ensureRosterBox();
   const grid = document.getElementById("fv3dRosterGrid");
   const meta = document.getElementById("fv3dRosterMeta");
   const status = document.getElementById("fv3dRosterStatus");
   const btnAddBottom = document.getElementById("fv3dRosterAddBottom");
   const btnSave = document.getElementById("fv3dRosterSave");
+  const btnPublish = document.getElementById("fv3dRosterPublish");
+  const btnCopyLinks = document.getElementById("fv3dRosterCopyLinks");
+  const linkInput = document.getElementById("fv3dRosterLink");
 
   if (!grid) return;
 
   box.dataset.bankId = String(bankId || "");
   box.dataset.bankName = String(bankName || "");
+  box.dataset.publicId = publicId ? String(publicId) : "";
 
   grid.innerHTML = "";
   if (status) status.textContent = "";
 
   const students = Array.isArray(initialStudents) ? initialStudents.slice() : [];
 
+  // Standard: 10 tomma rader (token tom tills raden används)
   if (!students.length) {
-    for (let i = 0; i < 10; i++) students.push({ name:"", klass:"", email:"", token:_fv3d_genToken(10) });
+    for (let i = 0; i < 10; i++) students.push({ name:"", klass:"", email:"", token:"" });
   }
   if (students.length < 10) {
     const addN = 10 - students.length;
-    for (let i = 0; i < addN; i++) students.push({ name:"", klass:"", email:"", token:_fv3d_genToken(10) });
+    for (let i = 0; i < addN; i++) students.push({ name:"", klass:"", email:"", token:"" });
   }
 
   students.forEach((st)=> grid.appendChild(_fv3d_makeRosterCard(st)));
@@ -2843,15 +3024,93 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents }){
     meta.textContent = `${nm} (${bankId}) – Aktiv bank för sparning: ${activeId || "(ingen aktiv ännu)"}`;
   }
 
+  // Sätt elevlänk om vi redan har publicId
+  const base = _fv3d_getBaseUrl();
+  const existingPublicId = publicId ? String(publicId) : "";
+  if (linkInput) linkInput.value = (base && existingPublicId) ? `${base}?public=${encodeURIComponent(existingPublicId)}` : "";
+
   if (btnAddBottom && grid) {
     btnAddBottom.onclick = () => {
-      grid.appendChild(_fv3d_makeRosterCard({ name:"", klass:"", email:"", token:_fv3d_genToken(10) }));
+      grid.appendChild(_fv3d_makeRosterCard({ name:"", klass:"", email:"", token:"" }));
     };
   }
 
   if (btnSave) {
     btnSave.onclick = async () => {
       await _fv3d_saveRosterToCloudAndLocal();
+    };
+  }
+
+  if (btnPublish) {
+    btnPublish.onclick = async () => {
+      try {
+        if (status) status.textContent = "Skapar elevlänk…";
+        const pub = await _fv3d_publishActiveBankToPublic();
+        if (pub && pub.publicId) {
+          box.dataset.publicId = String(pub.publicId);
+          // Spara publicId lokalt kopplat till aktiv bank
+          try {
+            const map = _fv3d_loadLocalRosterMap();
+            const active = _fv3d_activeBankId();
+            const key = active || String(bankId || "");
+            if (key) {
+              map[key] = Object.assign({}, map[key] || {}, { publicId: String(pub.publicId) });
+              _fv3d_saveLocalRosterMap(map);
+            }
+          } catch {}
+        }
+      } catch (e) {
+        console.error("Skapa elevlänk: fel:", e);
+        if (status) status.textContent = "⚠️ Kunde inte skapa elevlänk. Se konsol.";
+        alert("Kunde inte skapa elevlänk. Se konsolen för detaljer.");
+      }
+    };
+  }
+
+  if (btnCopyLinks) {
+    btnCopyLinks.onclick = async () => {
+      const box2 = document.getElementById("fv3dRosterBox");
+      const st = document.getElementById("fv3dRosterStatus");
+      const linkEl = document.getElementById("fv3dRosterLink");
+
+      // Se till att elevlänk finns
+      if (linkEl && !linkEl.value.trim()) {
+        try { await _fv3d_publishActiveBankToPublic(); } catch {}
+      }
+      const basePublic = linkEl ? linkEl.value.trim() : "";
+      if (!basePublic) { alert("Skapa elevlänk först."); return; }
+
+      const rows = Array.from(document.getElementById("fv3dRosterGrid").children || []);
+      const used = rows
+        .map((c)=> (typeof c.getRosterData === "function" ? c.getRosterData() : null))
+        .filter(Boolean);
+
+      // Generera token för rader som har e-post men saknar token
+      rows.forEach((c)=>{
+        try{
+          if (c && c.ensureToken && typeof c.getRosterData === "function") {
+            const d = c.getRosterData();
+            const hasAny = (d.name||"").trim() || (d.klass||"").trim() || (d.email||"").trim() || (d.token||"").trim();
+            const wants = (d.email||"").trim();
+            if (wants && !String(d.token||"").trim()) c.ensureToken();
+          }
+        }catch{}
+      });
+
+      const { rosterLocal } = _fv3d_collectRosterFromUI();
+      const lines = rosterLocal.map((r)=>{
+        const joiner = basePublic.includes("?") ? "&" : "?";
+        const urlWithToken = `${basePublic}${joiner}token=${encodeURIComponent(r.token || "")}`;
+        return `${r.name || ""}\t${r.klass || ""}\t${r.email || ""}\t${r.token || ""}\t${urlWithToken}`;
+      });
+
+      const out = lines.join("\n");
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(out);
+        if (st) st.textContent = `📋 Kopierade ${lines.length} elevlänkar (namn, klass, e-post, token, länk).`;
+      } catch {
+        if (st) st.textContent = `Kunde inte kopiera automatiskt. Markera text i status och kopiera manuellt:\n${out}`;
+      }
     };
   }
 
@@ -2865,6 +3124,7 @@ async function _fv3d_openRosterInline(bankId){
   const localMap = _fv3d_loadLocalRosterMap();
   const localStudents = (localMap[bankId] && Array.isArray(localMap[bankId].students)) ? localMap[bankId].students : [];
   const localName = (localMap[bankId] && localMap[bankId].bankName) ? localMap[bankId].bankName : "";
+  const localPublicId = (localMap[bankId] && localMap[bankId].publicId) ? String(localMap[bankId].publicId) : "";
 
   if (_fv3d_hasFirebaseReady() && _fv3d_hasTeacher()) {
     try {
@@ -2878,20 +3138,22 @@ async function _fv3d_openRosterInline(bankId){
       if (doc.exists) {
         const data = doc.data() || {};
         const bankName = data.name || localName || "Moln-bank";
+        const publicId = data.publicId ? String(data.publicId) : localPublicId;
 
+        // Prioritera lokal info (namn/klass/e-post) om den finns
         if (localStudents.length) {
-          _fv3d_showRosterBox({ bankId, bankName, initialStudents: localStudents });
+          _fv3d_showRosterBox({ bankId, bankName, initialStudents: localStudents, publicId });
           return;
         }
 
         const tokens = Array.isArray(data.rosterTokens) ? data.rosterTokens.map(String) : [];
         if (tokens.length) {
           const students = tokens.slice(0, 200).map((t)=>({ name:"", klass:"", email:"", token:String(t) }));
-          _fv3d_showRosterBox({ bankId, bankName, initialStudents: students });
+          _fv3d_showRosterBox({ bankId, bankName, initialStudents: students, publicId });
           return;
         }
 
-        _fv3d_showRosterBox({ bankId, bankName, initialStudents: [] });
+        _fv3d_showRosterBox({ bankId, bankName, initialStudents: [], publicId });
         return;
       }
     } catch (e) {
@@ -2900,7 +3162,7 @@ async function _fv3d_openRosterInline(bankId){
   }
 
   const bankName = localName || "Moln-bank";
-  _fv3d_showRosterBox({ bankId, bankName, initialStudents: localStudents });
+  _fv3d_showRosterBox({ bankId, bankName, initialStudents: localStudents, publicId: localPublicId });
 }
 
 /* =========================
@@ -3110,7 +3372,7 @@ function _fv3d_bind(){
       const ros = t.getAttribute("data-fv3d-roster");
       if (ros) {
         e.preventDefault();
-        // Viktigt: koppla elevlistan till banken genom att aktivera den först
+        // Koppla alltid elevlistan till banken genom att aktivera den först
         try { await _fv3d_activate(String(ros)); } catch {}
         await _fv3d_openRosterInline(String(ros));
         return;
@@ -3149,7 +3411,7 @@ function _fv3d_bind(){
 
 document.addEventListener("DOMContentLoaded", _fv3d_bind);
 </script>
-<!-- slut SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (ROBUST LOAD + SAVE ROSTER) -->
+<!-- slut SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (SAVE ONLY USED + PUBLIC LINK + EMAIL) -->
 
 
 
