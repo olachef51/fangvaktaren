@@ -1925,6 +1925,16 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;");
 }
 
+function isPermissionDenied(err) {
+  const code = (err && (err.code || err.name)) ? String(err.code || err.name) : "";
+  const msg = (err && err.message) ? String(err.message) : "";
+  return (
+    code.includes("permission-denied") ||
+    code.includes("PERMISSION_DENIED") ||
+    msg.includes("Missing or insufficient permissions")
+  );
+}
+
 /* =========================
    3b – State-hantering & embedded-data
    ========================= */
@@ -2191,9 +2201,12 @@ async function loadCloudBanksList() {
       meta.className = "q-meta";
       const ts = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : null;
       const countMcq = Array.isArray(normalizedBank.mcq) ? normalizedBank.mcq.length : 0;
+      const countImg = Array.isArray(normalizedBank.img) ? normalizedBank.img.length : 0;
+      const countDrag = Array.isArray(normalizedBank.drag) ? normalizedBank.drag.length : 0;
+
       meta.textContent = (ts
         ? `Skapad: ${ts.toLocaleString("sv-SE")}`
-        : "Skapad: okänt datum") + ` · MCQ: ${countMcq}`;
+        : "Skapad: okänt datum") + ` · MCQ: ${countMcq} · Bild: ${countImg} · Drag: ${countDrag}`;
 
       main.appendChild(title);
       main.appendChild(meta);
@@ -2244,9 +2257,19 @@ async function loadCloudBanksList() {
     });
   } catch (e) {
     console.error("Kunde inte ladda moln-banker:", e);
+
     const li = document.createElement("li");
     li.className = "mini";
-    li.textContent = "Fel vid laddning av moln-banker. Se konsolen för detaljer.";
+
+    if (isPermissionDenied(e)) {
+      li.textContent =
+        "⚠️ Åtkomst nekad till moln-banker (permissions). " +
+        "Detta beror på Firestore Rules. " +
+        "Kontrollera att reglerna tillåter read på teachers/{uid}/banks för inloggad användare.";
+    } else {
+      li.textContent = "Fel vid laddning av moln-banker. Se konsolen för detaljer.";
+    }
+
     listEl.appendChild(li);
   }
 }
@@ -2281,7 +2304,6 @@ function setupCloudBankUI() {
           .collection(CLOUD_BANKS_SUBCOLLECTION)
           .add({
             ownerUid: currentTeacherUser.uid,
-            ownerEmail: currentTeacherUser.email || null,
             name,
             createdAt: firebase.firestore.FieldValue.serverTimestamp(),
             bank,
@@ -2477,7 +2499,6 @@ function buildGoalInfoText(q) {
       tags.push(`<span class="goal-tag">${goal} (Delbitar: ${parts})</span>`);
     });
   } else {
-    // bakåtkompatibelt mot gamla fält
     if (q.goal || q.parts) {
       let txt = "Delmål: " + (q.goal || "-");
       if (q.parts) txt += " (Delbitar: " + q.parts + ")";
@@ -2618,14 +2639,12 @@ function initQuestionForms() {
     return;
   }
 
-  // dölj gamla "index"-fältet
   if (mcqAnswerNumber) {
     const label = document.querySelector('label[for="mcqAnswer"]');
     mcqAnswerNumber.style.display = "none";
     if (label) label.style.display = "none";
   }
 
-  // radioknappar för korrekt svar
   currentMcqCorrectIndex = 0;
   if (mcqAnswerNumber && mcqAnswerNumber.parentElement) {
     const container = document.createElement("div");
@@ -2658,7 +2677,6 @@ function initQuestionForms() {
     mcqAnswerNumber.parentElement.appendChild(container);
   }
 
-  // flera delmål – koppling (manuellt skapade MCQ)
   currentMcqLinks = [];
   let mcqLinksPreview = null;
   if (mcqGoalPart && mcqGoalPart.parentElement) {
@@ -2763,10 +2781,6 @@ function initQuestionForms() {
     });
   }
 
-  // =========================
-  // Snabbimport (text-format) med egen nivå + delmål
-  // =========================
-
   let mcqJsonLinks = [];
 
   const questionsPanel = document.querySelector('.tab-panel[data-panel="questions"]');
@@ -2831,7 +2845,6 @@ function initQuestionForms() {
     const btnJsonAddLink = $("#btnMcqJsonAddGoalLink");
     const jsonLevelSelect = $("#mcqJsonLevel");
 
-    // fyll drop-down för delmål
     populateGoalSelect("#mcqJsonGoalPart");
 
     if (btnJsonAddLink && jsonGoalPart && jsonLinksPreview) {
@@ -2875,7 +2888,7 @@ function initQuestionForms() {
             .map((l) => l.trim())
             .filter((l) => l.length);
 
-          if (lines.length < 3) return; // minst 1 fråga + 2 svar
+          if (lines.length < 3) return;
 
           const question = lines[0];
           const answerLines = lines.slice(1);
@@ -3090,7 +3103,6 @@ function initImageQuestionsEditor() {
   currentImgLinks = [];
   currentImgCorrectIndex = 0;
 
-  // radioknappar för rätt svar
   if (imgCorrectContainer) {
     const row = document.createElement("div");
     ["1", "2", "3", "4"].forEach((lbl, idx) => {
@@ -3115,7 +3127,6 @@ function initImageQuestionsEditor() {
     imgCorrectContainer.appendChild(row);
   }
 
-  // bildförhandsgranskning
   if (imgFileInput) {
     imgFileInput.addEventListener("change", (e) => {
       const file = e.target.files && e.target.files[0];
@@ -3135,7 +3146,6 @@ function initImageQuestionsEditor() {
     });
   }
 
-  // flera delmål
   if (btnAddGoalLink && imgGoalLinksPreview) {
     btnAddGoalLink.addEventListener("click", () => {
       const val = imgGoalPart.value;
@@ -3195,7 +3205,6 @@ function initImageQuestionsEditor() {
       s.bank.img.push(qObj);
       saveState(s);
 
-      // reset
       currentImgDataUrl = null;
       currentImgLinks = [];
       currentImgCorrectIndex = 0;
@@ -3318,7 +3327,7 @@ function initDragDropQuestionsEditor() {
       <h3>Drag &amp; Drop-frågor</h3>
       <p class="mini">
         Skapa sorteringsfrågor: eleverna drar kort till rätt kategori-rutor.
-        Du skriver först alla kort i en ruta, sedan kategorier i en annan – 
+        Du skriver först alla kort i en ruta, sedan kategorier i en annan –
         därefter fördelar du korten på kategorier.
       </p>
       <div class="card-row">
@@ -3469,7 +3478,6 @@ function initDragDropQuestionsEditor() {
           }
         });
 
-        // default första kategori
         if (currentDragTargetsTmp.length) {
           sel.value = currentDragTargetsTmp[0].id;
           currentDragCorrectMapTmp[src.id] = currentDragTargetsTmp[0].id;
@@ -3524,7 +3532,6 @@ function initDragDropQuestionsEditor() {
       s.bank.drag.push(qObj);
       saveState(s);
 
-      // reset editor
       if (dragQuestion) dragQuestion.value = "";
       if (dragItems) dragItems.value = "";
       if (dragCategories) dragCategories.value = "";
