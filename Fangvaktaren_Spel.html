@@ -1834,12 +1834,10 @@ Gurka
 
 
 <!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
+
+<!-- start SEKTION 3A: BAS – konstanter, state, utils -->
 <script>
 "use strict";
-
-/* =========================
-   3a – Konstanter & grundstate
-   ========================= */
 
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
@@ -1853,9 +1851,15 @@ const FIREBASE_CONFIG = {
 
 const STORAGE_KEY = "fangvaktaren-v17";
 
-// 🔁 använder teachers/{uid}/banks
+// teachers/{uid}/banks/{bankId}
 const CLOUD_ROOT_COLLECTION = "teachers";
 const CLOUD_BANKS_SUBCOLLECTION = "banks";
+
+// public_banks/{publicId} (elevlänk utan inloggning)
+const PUBLIC_BANKS_COLLECTION = "public_banks";
+
+// Lokal (endast lärardator): roster per bankId (namn/e-post/token)
+const TEACHER_LOCAL_ROSTER_KEY = STORAGE_KEY + "::teacherRosterByBankId_v1";
 
 const $ = (sel) => document.querySelector(sel);
 const $all = (sel) => document.querySelectorAll(sel);
@@ -1878,24 +1882,31 @@ let currentMcqCorrectIndex = 0;
 let currentImgCorrectIndex = 0;
 let currentImgDataUrl = null;
 
-// drag & drop-editor – temporär state för nya frågor
 let currentDragSourcesTmp = [];
 let currentDragTargetsTmp = [];
 let currentDragCorrectMapTmp = {};
 
 const defaultState = {
-  student: { name: "", klass: "" },
+  student: { name: "", klass: "", token: "" },
+
   best: { E: 0, C: 0, A: 0 },
   unlocked: { E: false, C: false, A: false },
   thres: { E: 70, C: 70, A: 70 },
+
   teacherPassword: null,
   teacherEmail: "",
+
   goalsMap: [],
-  bank: {
-    mcq: [],
-    img: [],
-    drag: []
+
+  bank: { mcq: [], img: [], drag: [] },
+
+  activeBank: {
+    mode: "",     // "teacher" | "public" | ""
+    ownerUid: "", // uid för teachers/{uid}/banks
+    bankId: "",   // bankId under teachers/{uid}/banks/{bankId}
+    publicId: ""  // public_banks/{publicId}
   },
+
   progression: {
     totalPoints: 0,
     wrongByGoalId: {},
@@ -1903,9 +1914,7 @@ const defaultState = {
   }
 };
 
-function deepCloneDefault() {
-  return JSON.parse(JSON.stringify(defaultState));
-}
+function deepCloneDefault() { return JSON.parse(JSON.stringify(defaultState)); }
 
 function clampInt(val, min, max) {
   const n = parseInt(val, 10);
@@ -1913,9 +1922,7 @@ function clampInt(val, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-function shuffle(arr) {
-  return arr.slice().sort(() => Math.random() - 0.5);
-}
+function shuffle(arr) { return arr.slice().sort(() => Math.random() - 0.5); }
 
 function escapeHtml(str) {
   if (!str && str !== 0) return "";
@@ -1935,9 +1942,56 @@ function isPermissionDenied(err) {
   );
 }
 
-/* =========================
-   3b – State-hantering & embedded-data
-   ========================= */
+function ensureBankShape(bank) {
+  const b = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
+  if (!Array.isArray(b.mcq)) b.mcq = [];
+  if (!Array.isArray(b.img)) b.img = [];
+  if (!Array.isArray(b.drag)) b.drag = [];
+  return b;
+}
+
+function getBankFromState() {
+  const s = loadState();
+  return ensureBankShape(s.bank);
+}
+
+function setBankInState(bankObj) {
+  const s = loadState();
+  s.bank = ensureBankShape(bankObj);
+  saveState(s);
+}
+
+function setActiveBankMeta(meta) {
+  const s = loadState();
+  s.activeBank = Object.assign({ mode: "", ownerUid: "", bankId: "", publicId: "" }, s.activeBank || {}, meta || {});
+  saveState(s);
+}
+
+function getQueryParam(name) {
+  try {
+    const u = new URL(window.location.href);
+    return (u.searchParams.get(name) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function genToken(len = 10) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  const bytes = new Uint8Array(len);
+  (window.crypto || window.msCrypto).getRandomValues(bytes);
+  for (let i = 0; i < len; i++) out += chars[bytes[i] % chars.length];
+  return out;
+}
+</script>
+<!-- slut SEKTION 3A: BAS – konstanter, state, utils -->
+
+
+
+<!-- start SEKTION 3B: STATE – embedded-data, load/save, roster local -->
+<script>
+"use strict";
 
 function mergeEmbeddedBank(state) {
   const el = document.getElementById("embedded-data");
@@ -1957,23 +2011,8 @@ function mergeEmbeddedBank(state) {
   return state;
 }
 
-function loadState() {
-  let s = null;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      s = JSON.parse(raw);
-    }
-  } catch (e) {
-    console.warn("Kunde inte läsa state, återställer:", e);
-  }
-  if (!s) {
-    s = deepCloneDefault();
-    s = mergeEmbeddedBank(s);
-    saveState(s);
-  }
-
-  s.student = Object.assign({ name: "", klass: "" }, s.student || {});
+function normalizeState(s) {
+  s.student = Object.assign({ name: "", klass: "", token: "" }, s.student || {});
   s.best = Object.assign({ E: 0, C: 0, A: 0 }, s.best || {});
   s.unlocked = Object.assign({ E: false, C: false, A: false }, s.unlocked || {});
   s.thres = Object.assign({ E: 70, C: 70, A: 70 }, s.thres || {});
@@ -1989,7 +2028,26 @@ function loadState() {
     s.progression.wrongByGoalId = s.progression.wrongByGoalId || {};
     s.progression.correctByGoalId = s.progression.correctByGoalId || {};
   }
+  s.activeBank = Object.assign({ mode: "", ownerUid: "", bankId: "", publicId: "" }, s.activeBank || {});
   return s;
+}
+
+function loadState() {
+  let s = null;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) s = JSON.parse(raw);
+  } catch (e) {
+    console.warn("Kunde inte läsa state, återställer:", e);
+  }
+
+  if (!s) {
+    s = deepCloneDefault();
+    s = mergeEmbeddedBank(s);
+    saveState(s);
+  }
+
+  return normalizeState(s);
 }
 
 function saveState(state) {
@@ -2000,167 +2058,119 @@ function saveState(state) {
   }
 }
 
-/* =========================
-   3c – Firebase init & Google-inloggning
-   ========================= */
+/* GDPR: roster (namn/e-post/token) lagras ENDAST lokalt på lärardatorn */
+
+function loadTeacherRosterMap() {
+  try {
+    const raw = localStorage.getItem(TEACHER_LOCAL_ROSTER_KEY);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveTeacherRosterMap(mapObj) {
+  try {
+    localStorage.setItem(TEACHER_LOCAL_ROSTER_KEY, JSON.stringify(mapObj || {}));
+  } catch (e) {
+    console.warn("Kunde inte spara lärarens elevlista lokalt:", e);
+  }
+}
+</script>
+<!-- slut SEKTION 3B: STATE – embedded-data, load/save, roster local -->
+
+
+
+<!-- start SEKTION 3C: FIREBASE – init + Google login -->
+<script>
+"use strict";
 
 function initFirebase() {
   const statusEl = $("#googleStatus");
   try {
     if (!window.firebase) {
       console.warn("Firebase-bibliotek kunde inte hittas.");
-      if (statusEl) {
-        statusEl.textContent = "⚠️ Tekniskt fel: Firebase-bibliotek kunde inte laddas.";
-      }
+      if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: Firebase-bibliotek kunde inte laddas.";
       return;
     }
-    if (!firebase.apps.length) {
-      firebase.initializeApp(FIREBASE_CONFIG);
-    }
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+
     firebaseAppInstance = firebase.app();
     firebaseAuthInstance = firebase.auth();
     firebaseDbInstance = firebase.firestore();
-    console.log("Firebase init OK");
-    setupGoogleLogin();
-  } catch (e) {
-    console.error("Firebase init misslyckades:", e);
-    if (statusEl) {
-      statusEl.textContent = "⚠️ Tekniskt fel: kunde inte starta Firebase.";
+
+    if (firebaseAuthInstance) {
+      firebaseAuthInstance.onAuthStateChanged((user) => {
+        currentTeacherUser = user || null;
+        const btnLogout = $("#btnGoogleLogout");
+        if (!statusEl) return;
+
+        if (user) {
+          statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
+          if (btnLogout) btnLogout.classList.remove("hidden");
+        } else {
+          statusEl.textContent = "☁️ Inte inloggad – klicka på Google för att logga in.";
+          if (btnLogout) btnLogout.classList.add("hidden");
+        }
+      });
     }
+
+    console.log("Firebase init OK");
+  } catch (e) {
+    console.error("Fel vid initFirebase:", e);
+    if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: kunde inte starta Firebase.";
   }
 }
 
-function setupGoogleLogin() {
-  const btnLogin = $("#btnGooglePlaceholder");
-  const btnLogout = $("#btnGoogleLogout");
+async function handleGoogleLogin() {
   const statusEl = $("#googleStatus");
-  if (!btnLogin || !statusEl) return;
-
   if (!firebaseAuthInstance) {
-    console.warn("Firebase Auth saknas vid setupGoogleLogin.");
-    statusEl.textContent = "⚠️ Tekniskt fel: Firebase Auth saknas.";
+    alert("Tekniskt fel: Firebase Auth saknas.");
     return;
   }
-
-  firebaseAuthInstance.onAuthStateChanged((user) => {
-    currentTeacherUser = user || null;
-    if (!statusEl) return;
-    if (user) {
-      statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
-      if (btnLogout) btnLogout.classList.remove("hidden");
-    } else {
-      statusEl.textContent = "☁️ Inte inloggad – klicka för att logga in med Google.";
-      if (btnLogout) btnLogout.classList.add("hidden");
-    }
-  });
-
-  btnLogin.addEventListener("click", async () => {
-    if (!firebaseAuthInstance) {
-      alert("Tekniskt fel: Firebase Auth saknas.");
-      return;
-    }
-    try {
-      const provider = new firebase.auth.GoogleAuthProvider();
-      await firebaseAuthInstance.signInWithPopup(provider);
-    } catch (err) {
-      console.error("Google-inloggning misslyckades:", err);
-      statusEl.textContent = "⚠️ Kunde inte logga in med Google. Försök igen.";
-    }
-  });
-
-  if (btnLogout) {
-    btnLogout.addEventListener("click", async () => {
-      try {
-        await firebaseAuthInstance.signOut();
-      } catch (err) {
-        console.error("Kunde inte logga ut:", err);
-      }
-    });
+  try {
+    const provider = new firebase.auth.GoogleAuthProvider();
+    await firebaseAuthInstance.signInWithPopup(provider);
+  } catch (err) {
+    console.error("Google-inloggning misslyckades:", err);
+    if (statusEl) statusEl.textContent = "⚠️ Kunde inte logga in med Google. Försök igen.";
   }
 }
+
+async function handleGoogleLogout() {
+  try {
+    if (firebaseAuthInstance) await firebaseAuthInstance.signOut();
+  } catch (err) {
+    console.error("Kunde inte logga ut:", err);
+  }
+}
+</script>
+<!-- slut SEKTION 3C: FIREBASE – init + Google login -->
+
+
+
+<!-- start SEKTION 3D: MOLN-BANK – listning, laddning, spara bank + roster/tokens (GDPR) -->
+<script>
+"use strict";
 
 /* =========================
-   3d – Moln-banker (Firestore)
+   Cloud: lista banker (teacher)
    ========================= */
 
-function getBankFromState() {
-  const s = loadState();
-  return Object.assign({ mcq: [], img: [], drag: [] }, s.bank || {});
-}
-
-// Normalisera bank-data från Firestore
-function normalizeBankFromDoc(data) {
-  if (!data || typeof data !== "object") {
-    return { mcq: [], img: [], drag: [] };
-  }
-
-  // 1) Nytt format: data.bank.mcq/img/drag
-  if (
-    data.bank &&
-    (Array.isArray(data.bank.mcq) || Array.isArray(data.bank.img) || Array.isArray(data.bank.drag))
-  ) {
-    return {
-      mcq: data.bank.mcq || [],
-      img: data.bank.img || [],
-      drag: data.bank.drag || []
-    };
-  }
-
-  // 2) Bank direkt i roten: data.mcq/img/drag
-  if (
-    Array.isArray(data.mcq) ||
-    Array.isArray(data.img) ||
-    Array.isArray(data.drag)
-  ) {
-    return {
-      mcq: data.mcq || [],
-      img: data.img || [],
-      drag: data.drag || []
-    };
-  }
-
-  // 3) Gamla format med "questions" – behandla som mcq
-  if (Array.isArray(data.questions)) {
-    return {
-      mcq: data.questions,
-      img: [],
-      drag: []
-    };
-  }
-
-  return { mcq: [], img: [], drag: [] };
-}
-
-function setBankAndGoalsInState(bank, goalsMap) {
-  const s = loadState();
-  s.bank = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
-  if (Array.isArray(goalsMap)) {
-    s.goalsMap = goalsMap.slice();
-  }
-  saveState(s);
-  console.log("[DEBUG] State efter setBankAndGoalsInState:", {
-    mcq: s.bank.mcq.length,
-    img: s.bank.img.length,
-    drag: s.bank.drag.length,
-    goalsMap: s.goalsMap.length
-  });
-}
-
-function setBankInState(bank) {
-  setBankAndGoalsInState(bank, null);
-}
-
-// Läs banker från teachers/{uid}/banks
 async function loadCloudBanksList() {
   const listEl = $("#cloudBankList");
   if (!listEl) return;
-  listEl.innerHTML = "";
 
-  if (!firebaseDbInstance || !currentTeacherUser) {
-    const li = document.createElement("li");
-    li.className = "mini";
-    li.textContent = "Du måste vara inloggad med Google för att se dina moln-banker.";
-    listEl.appendChild(li);
+  listEl.innerHTML = `<p class="mini">Laddar moln-banker…</p>`;
+
+  if (!firebaseDbInstance) {
+    listEl.innerHTML = `<p class="mini">Firebase saknas.</p>`;
+    return;
+  }
+  if (!currentTeacherUser) {
+    listEl.innerHTML = `<p class="mini">Logga in med Google för att se dina moln-banker.</p>`;
     return;
   }
 
@@ -2170,151 +2180,682 @@ async function loadCloudBanksList() {
       .doc(currentTeacherUser.uid)
       .collection(CLOUD_BANKS_SUBCOLLECTION)
       .orderBy("createdAt", "desc")
+      .limit(50)
       .get();
 
-    if (snap.empty) {
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.textContent = "Inga moln-banker hittades ännu.";
-      listEl.appendChild(li);
+    const items = [];
+    snap.forEach((doc) => {
+      const d = doc.data() || {};
+      items.push({
+        id: doc.id,
+        name: d.name || "Namnlös bank",
+        createdAt: d.createdAt || null,
+        counts: {
+          mcq: d.bank && Array.isArray(d.bank.mcq) ? d.bank.mcq.length : 0,
+          img: d.bank && Array.isArray(d.bank.img) ? d.bank.img.length : 0,
+          drag: d.bank && Array.isArray(d.bank.drag) ? d.bank.drag.length : 0
+        }
+      });
+    });
+
+    renderCloudBankListUI(items);
+  } catch (err) {
+    console.error("Kunde inte ladda moln-banker:", err);
+    if (isPermissionDenied(err)) {
+      listEl.innerHTML = `<p class="mini">Behörighet saknas. Kontrollera Firestore rules + att du är inloggad.</p>`;
+      return;
+    }
+    listEl.innerHTML = `<p class="mini">Kunde inte ladda moln-banker. Se konsolen.</p>`;
+  }
+}
+
+function renderCloudBankListUI(items) {
+  const listEl = $("#cloudBankList");
+  if (!listEl) return;
+
+  listEl.innerHTML = "";
+
+  if (!items || !items.length) {
+    listEl.innerHTML = `<p class="mini">Inga moln-banker hittades.</p>`;
+    return;
+  }
+
+  const s = loadState();
+  const activeBankId = (s.activeBank && s.activeBank.bankId) ? String(s.activeBank.bankId) : "";
+
+  items.forEach((it) => {
+    const row = document.createElement("div");
+    row.className = "list-item";
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.justifyContent = "space-between";
+    row.style.gap = "10px";
+
+    const left = document.createElement("div");
+    left.className = "list-main";
+
+    const title = document.createElement("div");
+    title.className = "q-text";
+    title.innerHTML = `${escapeHtml(it.name)} ${it.id === activeBankId ? '<span class="mini" style="margin-left:8px;">(aktiv)</span>' : ""}`;
+
+    const meta = document.createElement("div");
+    meta.className = "q-meta";
+    const total = (it.counts.mcq || 0) + (it.counts.img || 0) + (it.counts.drag || 0);
+    meta.textContent = `Frågor: ${total} (MCQ: ${it.counts.mcq}, bild: ${it.counts.img}, drag: ${it.counts.drag})`;
+
+    left.appendChild(title);
+    left.appendChild(meta);
+
+    const right = document.createElement("div");
+    right.style.display = "flex";
+    right.style.gap = "6px";
+    right.style.flexWrap = "wrap";
+    right.style.justifyContent = "flex-end";
+
+    const btnLoad = document.createElement("button");
+    btnLoad.className = "btn btn-sm";
+    btnLoad.type = "button";
+    btnLoad.textContent = "Ladda";
+    btnLoad.addEventListener("click", () => handleLoadBankFromCloud(it.id));
+
+    const btnRoster = document.createElement("button");
+    btnRoster.className = "btn btn-sm";
+    btnRoster.type = "button";
+    btnRoster.textContent = "Elevlista";
+    btnRoster.addEventListener("click", () => openRosterViewerForBank(it.id));
+
+    const btnDel = document.createElement("button");
+    btnDel.className = "btn btn-sm btn-danger";
+    btnDel.type = "button";
+    btnDel.textContent = "🗑️";
+    btnDel.addEventListener("click", () => handleDeleteCloudBank(it.id, it.name));
+
+    right.appendChild(btnLoad);
+    right.appendChild(btnRoster);
+    right.appendChild(btnDel);
+
+    row.appendChild(left);
+    row.appendChild(right);
+    listEl.appendChild(row);
+  });
+}
+
+async function handleDeleteCloudBank(bankId, bankName) {
+  if (!firebaseDbInstance || !currentTeacherUser) return;
+  if (!confirm(`Ta bort molnbank: "${bankName || bankId}" ?`)) return;
+
+  try {
+    await firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION)
+      .doc(currentTeacherUser.uid)
+      .collection(CLOUD_BANKS_SUBCOLLECTION)
+      .doc(bankId)
+      .delete();
+
+    const s = loadState();
+    if (s.activeBank && String(s.activeBank.bankId) === String(bankId)) {
+      s.activeBank = { mode: "", ownerUid: "", bankId: "", publicId: "" };
+      saveState(s);
+    }
+
+    await loadCloudBanksList();
+    if (typeof updateBankStatusUI === "function") updateBankStatusUI();
+  } catch (e) {
+    console.error("Kunde inte ta bort bank:", e);
+    alert("Kunde inte ta bort bank. Se konsolen.");
+  }
+}
+
+async function handleLoadBankFromCloud(bankId) {
+  if (!firebaseDbInstance || !currentTeacherUser) {
+    alert("Logga in med Google först.");
+    return;
+  }
+  try {
+    const doc = await firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION)
+      .doc(currentTeacherUser.uid)
+      .collection(CLOUD_BANKS_SUBCOLLECTION)
+      .doc(bankId)
+      .get();
+
+    if (!doc.exists) {
+      alert("Banken hittades inte.");
       return;
     }
 
-    snap.forEach((docSnap) => {
-      const data = docSnap.data() || {};
-      const normalizedBank = normalizeBankFromDoc(data);
-      const goalsFromDoc = Array.isArray(data.goalsMap)
-        ? data.goalsMap
-        : (data.bank && Array.isArray(data.bank.goalsMap) ? data.bank.goalsMap : []);
+    const data = doc.data() || {};
+    const bank = ensureBankShape(data.bank);
+    setBankInState(bank);
 
-      const li = document.createElement("li");
-      li.className = "list-item";
+    const s = loadState();
+    s.goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : (s.goalsMap || []);
+    saveState(s);
 
-      const main = document.createElement("div");
-      main.className = "list-main";
+    setActiveBankMeta({ mode: "teacher", ownerUid: currentTeacherUser.uid, bankId: bankId, publicId: "" });
 
-      const title = document.createElement("div");
-      title.className = "q-text";
-      title.textContent = data.name || "Namnlös bank";
+    if (typeof renderMcqList === "function") renderMcqList();
+    if (typeof renderImgList === "function") renderImgList();
+    if (typeof renderDragList === "function") renderDragList();
+    if (typeof renderGoalsList === "function") renderGoalsList();
+    if (typeof syncUI === "function") syncUI();
+    if (typeof updateBankStatusUI === "function") updateBankStatusUI();
 
-      const meta = document.createElement("div");
-      meta.className = "q-meta";
-      const ts = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : null;
-      const countMcq = Array.isArray(normalizedBank.mcq) ? normalizedBank.mcq.length : 0;
-      const countImg = Array.isArray(normalizedBank.img) ? normalizedBank.img.length : 0;
-      const countDrag = Array.isArray(normalizedBank.drag) ? normalizedBank.drag.length : 0;
-
-      meta.textContent = (ts
-        ? `Skapad: ${ts.toLocaleString("sv-SE")}`
-        : "Skapad: okänt datum") + ` · MCQ: ${countMcq} · Bild: ${countImg} · Drag: ${countDrag}`;
-
-      main.appendChild(title);
-      main.appendChild(meta);
-
-      const actions = document.createElement("div");
-      actions.style.display = "flex";
-      actions.style.flexDirection = "column";
-      actions.style.gap = "4px";
-
-      const btnActivate = document.createElement("button");
-      btnActivate.className = "btn btn-sm";
-      btnActivate.textContent = "Aktivera denna bank";
-      btnActivate.addEventListener("click", () => {
-        setBankAndGoalsInState(normalizedBank, goalsFromDoc);
-        renderMcqList();
-        renderImgList();
-        renderDragList();
-        renderGoalsList();
-        syncUI();
-        alert("Moln-bank aktiverad. Dina frågor är nu laddade i spelet.");
-      });
-      actions.appendChild(btnActivate);
-
-      const btnDelete = document.createElement("button");
-      btnDelete.className = "btn btn-sm btn-danger";
-      btnDelete.textContent = "🗑️ Ta bort";
-      btnDelete.addEventListener("click", async () => {
-        if (!confirm("Ta bort denna moln-bank permanent?")) return;
-        try {
-          await firebaseDbInstance
-            .collection(CLOUD_ROOT_COLLECTION)
-            .doc(currentTeacherUser.uid)
-            .collection(CLOUD_BANKS_SUBCOLLECTION)
-            .doc(docSnap.id)
-            .delete();
-          alert("Moln-bank borttagen.");
-          loadCloudBanksList();
-        } catch (err) {
-          console.error("Kunde inte ta bort bank:", err);
-          alert("Kunde inte ta bort bank. Se konsolen för detaljer.");
-        }
-      });
-      actions.appendChild(btnDelete);
-
-      li.appendChild(main);
-      li.appendChild(actions);
-      listEl.appendChild(li);
-    });
+    alert("Molnbank laddad och aktiv.");
   } catch (e) {
-    console.error("Kunde inte ladda moln-banker:", e);
-
-    const li = document.createElement("li");
-    li.className = "mini";
-
-    if (isPermissionDenied(e)) {
-      li.textContent =
-        "⚠️ Åtkomst nekad till moln-banker (permissions). " +
-        "Detta beror på Firestore Rules. " +
-        "Kontrollera att reglerna tillåter read på teachers/{uid}/banks för inloggad användare.";
-    } else {
-      li.textContent = "Fel vid laddning av moln-banker. Se konsolen för detaljer.";
-    }
-
-    listEl.appendChild(li);
+    console.error("Kunde inte ladda bank:", e);
+    alert("Kunde inte ladda bank. Se konsolen.");
   }
 }
+
+/* =========================
+   GDPR: Modal för roster (lokalt) + tokens
+   ========================= */
+
+function ensureBankRosterModal() {
+  let modal = document.getElementById("bankRosterModal");
+  if (modal) return modal;
+
+  modal = document.createElement("div");
+  modal.id = "bankRosterModal";
+  modal.className = "hidden";
+  modal.style.position = "fixed";
+  modal.style.inset = "0";
+  modal.style.zIndex = "9999";
+  modal.style.background = "rgba(0,0,0,0.65)";
+  modal.style.display = "flex";
+  modal.style.alignItems = "center";
+  modal.style.justifyContent = "center";
+  modal.style.padding = "16px";
+
+  modal.innerHTML = `
+    <div class="card" style="width:min(980px, 100%); max-height:88vh; overflow:auto;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <div>
+          <h3 style="margin:0;">Spara molnbank + elevlista (tokens)</h3>
+          <p class="mini" style="margin:6px 0 0 0;">
+            GDPR-säkert: namn/e-post lagras lokalt på lärardatorn. Molnet sparar bara tokens + resultat/progression per token.
+          </p>
+        </div>
+        <button id="btnCloseBankRosterModal" class="btn btn-sm" type="button">Stäng</button>
+      </div>
+
+      <div class="card-row" style="margin-top:12px; gap:10px; flex-wrap:wrap;">
+        <div class="field" style="flex:1 1 280px;">
+          <label class="small-label" for="bankRosterBankName">Banknamn</label>
+          <input id="bankRosterBankName" class="input" placeholder="Min frågebank" />
+          <p class="mini" id="bankRosterMeta" style="margin-top:6px;"></p>
+        </div>
+        <div class="field" style="flex:0 0 auto;">
+          <label class="small-label">&nbsp;</label>
+          <button id="btnAddRosterRow" class="btn btn-sm btn-primary" type="button">➕ Lägg till elev</button>
+        </div>
+      </div>
+
+      <div class="card card-full-width" style="margin-top:12px;">
+        <h3 style="margin:0 0 8px 0;">Elevlista (lokalt) + token</h3>
+        <div class="mini" style="margin-bottom:8px;">
+          Tips: Använd elevkod + skolmail om ni vill minimera personuppgifter.
+        </div>
+        <div style="display:flex; gap:8px; font-size:12px; opacity:0.9; margin-bottom:6px;">
+          <div style="flex:1 1 220px;">Namn</div>
+          <div style="flex:1 1 260px;">E-post</div>
+          <div style="flex:0 0 160px;">Token</div>
+          <div style="flex:0 0 160px;">Åtgärder</div>
+        </div>
+        <div id="rosterRows"></div>
+      </div>
+
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; align-items:center; justify-content:space-between;">
+        <div>
+          <button id="btnCopyTokens" class="btn btn-sm" type="button">📋 Kopiera tokens (text)</button>
+          <span class="mini" id="bankRosterStatus" style="margin-left:10px;"></span>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button id="btnSaveBankWithRoster" class="btn btn-sm btn-primary" type="button">☁️ Spara molnbanken</button>
+          <button id="btnCancelBankWithRoster" class="btn btn-sm" type="button">Avbryt</button>
+        </div>
+      </div>
+
+      <textarea id="bankRosterTokensText" class="textarea" style="margin-top:10px; min-height:90px;" placeholder="Här visas tokens vid kopiering..." readonly></textarea>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const close = () => modal.classList.add("hidden");
+  const btnClose = document.getElementById("btnCloseBankRosterModal");
+  const btnCancel = document.getElementById("btnCancelBankWithRoster");
+  if (btnClose) btnClose.addEventListener("click", close);
+  if (btnCancel) btnCancel.addEventListener("click", close);
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+
+  return modal;
+}
+
+function makeRosterRow(data) {
+  const row = document.createElement("div");
+  row.className = "card-row";
+  row.style.gap = "8px";
+  row.style.flexWrap = "wrap";
+  row.style.alignItems = "center";
+  row.style.marginBottom = "8px";
+
+  const name = document.createElement("input");
+  name.className = "input";
+  name.placeholder = "Elevens namn (lokalt)";
+  name.style.flex = "1 1 220px";
+  name.value = (data && data.name) || "";
+
+  const email = document.createElement("input");
+  email.className = "input";
+  email.placeholder = "E-post (lokalt)";
+  email.style.flex = "1 1 260px";
+  email.value = (data && data.email) || "";
+
+  const token = document.createElement("input");
+  token.className = "input";
+  token.style.flex = "0 0 160px";
+  token.readOnly = true;
+  token.value = (data && data.token) || genToken(10);
+
+  const actions = document.createElement("div");
+  actions.style.flex = "0 0 160px";
+  actions.style.display = "flex";
+  actions.style.gap = "6px";
+  actions.style.justifyContent = "flex-end";
+
+  const btnRegen = document.createElement("button");
+  btnRegen.className = "btn btn-sm";
+  btnRegen.type = "button";
+  btnRegen.textContent = "Ny token";
+  btnRegen.addEventListener("click", () => { token.value = genToken(10); });
+
+  const btnDel = document.createElement("button");
+  btnDel.className = "btn btn-sm btn-danger";
+  btnDel.type = "button";
+  btnDel.textContent = "🗑️";
+  btnDel.addEventListener("click", () => row.remove());
+
+  actions.appendChild(btnRegen);
+  actions.appendChild(btnDel);
+
+  row.appendChild(name);
+  row.appendChild(email);
+  row.appendChild(token);
+  row.appendChild(actions);
+
+  row.getRosterData = () => ({
+    name: name.value.trim(),
+    email: email.value.trim(),
+    token: token.value.trim()
+  });
+
+  return row;
+}
+
+async function saveBankWithRosterToCloud({ bankName, bank, goalsMap, rosterLocal }) {
+  if (!firebaseDbInstance || !currentTeacherUser) throw new Error("Missing firebaseDbInstance/currentTeacherUser");
+
+  const tokens = (rosterLocal || []).map((r) => (r.token || "").trim()).filter(Boolean);
+
+  const banksCol = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION)
+    .doc(currentTeacherUser.uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION);
+
+  const docRef = banksCol.doc();
+  const bankId = docRef.id;
+
+  const payload = {
+    ownerUid: currentTeacherUser.uid,
+    ownerEmail: currentTeacherUser.email || null,
+    name: bankName || "Min frågebank",
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    schemaVersion: "v17-bank+tokens-v1",
+    bank: ensureBankShape(bank || {}),
+    goalsMap: Array.isArray(goalsMap) ? goalsMap : [],
+    rosterTokens: tokens
+  };
+
+  await docRef.set(payload, { merge: false });
+
+  const batch = firebaseDbInstance.batch();
+  const studentsCol = docRef.collection("students");
+
+  tokens.forEach((tkn) => {
+    const sdoc = studentsCol.doc(String(tkn));
+    batch.set(
+      sdoc,
+      {
+        token: String(tkn),
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        lastResult: null,
+        progression: { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} },
+        best: { E: 0, C: 0, A: 0 }
+      },
+      { merge: false }
+    );
+  });
+
+  await batch.commit();
+  return bankId;
+}
+
+function openSaveBankRosterFlow() {
+  const modal = ensureBankRosterModal();
+  const s = loadState();
+
+  const modalName = document.getElementById("bankRosterBankName");
+  const meta = document.getElementById("bankRosterMeta");
+  const status = document.getElementById("bankRosterStatus");
+  const rowsHost = document.getElementById("rosterRows");
+  const btnAdd = document.getElementById("btnAddRosterRow");
+  const btnSave = document.getElementById("btnSaveBankWithRoster");
+  const btnCopy = document.getElementById("btnCopyTokens");
+  const tokensText = document.getElementById("bankRosterTokensText");
+
+  const mainName = document.getElementById("inputBankName");
+  const bankNameDefault = (mainName && mainName.value.trim()) || "Min frågebank";
+  if (modalName) modalName.value = bankNameDefault;
+
+  const bank = getBankFromState();
+  const mcqCount = Array.isArray(bank.mcq) ? bank.mcq.length : 0;
+  const imgCount = Array.isArray(bank.img) ? bank.img.length : 0;
+  const dragCount = Array.isArray(bank.drag) ? bank.drag.length : 0;
+  const total = mcqCount + imgCount + dragCount;
+  if (meta) meta.textContent = `Denna bank har ${total} frågor (MCQ: ${mcqCount}, bild: ${imgCount}, drag: ${dragCount}).`;
+
+  if (status) status.textContent = "";
+  if (tokensText) tokensText.value = "";
+
+  if (rowsHost) {
+    rowsHost.innerHTML = "";
+    rowsHost.appendChild(makeRosterRow({ name: "", email: "", token: genToken(10) }));
+  }
+
+  if (btnAdd && rowsHost) {
+    btnAdd.onclick = () => rowsHost.appendChild(makeRosterRow({ name: "", email: "", token: genToken(10) }));
+  }
+
+  if (btnCopy && rowsHost && tokensText) {
+    btnCopy.onclick = () => {
+      const rows = Array.from(rowsHost.children || []);
+      const roster = rows.map((r) => (typeof r.getRosterData === "function" ? r.getRosterData() : null)).filter(Boolean);
+
+      const lines = roster.map((r, i) => {
+        const nm = r.name || `Elev ${i + 1}`;
+        const em = r.email || "";
+        const tk = r.token || "";
+        return `${nm}\t${em}\t${tk}`;
+      });
+
+      tokensText.value = lines.join("\n");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(tokensText.value).catch(() => {});
+      }
+      if (status) status.textContent = `Kopierat ${lines.length} rader (namn, e-post, token).`;
+    };
+  }
+
+  if (btnSave && rowsHost) {
+    btnSave.onclick = async () => {
+      if (!firebaseDbInstance || !currentTeacherUser) {
+        alert("Logga in med Google först för att spara till molnet.");
+        return;
+      }
+
+      const bn = (modalName && modalName.value.trim()) || "Min frågebank";
+      const rows = Array.from(rowsHost.children || []);
+      const rosterLocal = rows.map((r) => (typeof r.getRosterData === "function" ? r.getRosterData() : null)).filter(Boolean);
+
+      const tokens = rosterLocal.map((r) => (r.token || "").trim()).filter(Boolean);
+      const tokenSet = new Set(tokens);
+      if (tokens.length !== tokenSet.size) {
+        alert("Du har dubbla tokens i listan. Klicka 'Ny token' på en rad och försök igen.");
+        return;
+      }
+
+      try {
+        if (status) status.textContent = "Sparar till molnet…";
+
+        const bankNow = getBankFromState();
+        const sFull = loadState();
+
+        const bankId = await saveBankWithRosterToCloud({
+          bankName: bn,
+          bank: bankNow,
+          goalsMap: sFull.goalsMap || [],
+          rosterLocal
+        });
+
+        const rosterMap = loadTeacherRosterMap();
+        rosterMap[bankId] = {
+          bankName: bn,
+          savedAt: new Date().toISOString(),
+          students: rosterLocal.map((r) => ({ name: r.name || "", email: r.email || "", token: r.token || "" }))
+        };
+        saveTeacherRosterMap(rosterMap);
+
+        if (mainName) mainName.value = bn;
+
+        setActiveBankMeta({ mode: "teacher", ownerUid: currentTeacherUser.uid, bankId: bankId, publicId: "" });
+
+        if (status) status.textContent = `Klart! Bank sparad (bankId: ${bankId}). Elevlista sparad lokalt på lärardatorn.`;
+        modal.classList.add("hidden");
+
+        try { await loadCloudBanksList(); } catch {}
+        try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
+
+        alert("Molnbank sparad. Elevlista (namn/e-post/token) sparad lokalt på lärardatorn.");
+      } catch (e) {
+        console.error("Kunde inte spara bank+roster:", e);
+        if (status) status.textContent = "Fel: kunde inte spara. Se konsolen.";
+        alert("Kunde inte spara till molnet. Se konsolen för detaljer.");
+      }
+    };
+  }
+
+  modal.classList.remove("hidden");
+}
+
+/* =========================
+   Roster-viewer (lokalt) per bankId
+   ========================= */
+
+function openRosterViewerForBank(bankId) {
+  const rosterMap = loadTeacherRosterMap();
+  const entry = rosterMap[String(bankId)];
+
+  const modal = ensureRosterViewerModal();
+  const title = document.getElementById("rosterViewerTitle");
+  const body = document.getElementById("rosterViewerBody");
+  const status = document.getElementById("rosterViewerStatus");
+
+  if (title) title.textContent = entry ? `Elevlista: ${entry.bankName || bankId}` : `Elevlista: ${bankId}`;
+  if (status) status.textContent = "";
+
+  if (body) {
+    body.innerHTML = "";
+    if (!entry || !Array.isArray(entry.students) || !entry.students.length) {
+      body.innerHTML = `<p class="mini">Ingen elevlista sparad lokalt för denna bank ännu.</p>`;
+    } else {
+      const pre = document.createElement("textarea");
+      pre.className = "textarea";
+      pre.style.minHeight = "220px";
+      pre.readOnly = true;
+      pre.value = entry.students
+        .map((st) => `${st.name || ""}\t${st.email || ""}\t${st.token || ""}`)
+        .join("\n");
+      body.appendChild(pre);
+    }
+  }
+
+  modal.classList.remove("hidden");
+}
+
+function ensureRosterViewerModal() {
+  let modal = document.getElementById("rosterViewerModal");
+  if (modal) return modal;
+
+  modal = document.createElement("div");
+  modal.id = "rosterViewerModal";
+  modal.className = "hidden";
+  modal.style.position = "fixed";
+  modal.style.inset = "0";
+  modal.style.zIndex = "9999";
+  modal.style.background = "rgba(0,0,0,0.65)";
+  modal.style.display = "flex";
+  modal.style.alignItems = "center";
+  modal.style.justifyContent = "center";
+  modal.style.padding = "16px";
+
+  modal.innerHTML = `
+    <div class="card" style="width:min(900px, 100%); max-height:88vh; overflow:auto;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <div>
+          <h3 id="rosterViewerTitle" style="margin:0;">Elevlista</h3>
+          <p class="mini" style="margin:6px 0 0 0;">Visas från lärarens lokala lagring (namn/e-post/token).</p>
+        </div>
+        <button id="btnCloseRosterViewer" class="btn btn-sm" type="button">Stäng</button>
+      </div>
+      <div id="rosterViewerBody" style="margin-top:12px;"></div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; justify-content:space-between;">
+        <div>
+          <button id="btnCopyRosterViewer" class="btn btn-sm" type="button">📋 Kopiera</button>
+          <span id="rosterViewerStatus" class="mini" style="margin-left:10px;"></span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const close = () => modal.classList.add("hidden");
+  const btnClose = document.getElementById("btnCloseRosterViewer");
+  if (btnClose) btnClose.addEventListener("click", close);
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+
+  const btnCopy = document.getElementById("btnCopyRosterViewer");
+  if (btnCopy) {
+    btnCopy.addEventListener("click", () => {
+      const body = document.getElementById("rosterViewerBody");
+      const ta = body ? body.querySelector("textarea") : null;
+      const status = document.getElementById("rosterViewerStatus");
+      if (!ta) return;
+      const txt = ta.value || "";
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).catch(() => {});
+      }
+      if (status) status.textContent = "Kopierat.";
+    });
+  }
+
+  return modal;
+}
+
+/* =========================
+   Public bank: publish + autoload
+   ========================= */
+
+async function handlePublishSharedBank() {
+  if (!firebaseDbInstance || !currentTeacherUser) {
+    alert("Logga in med Google först.");
+    return;
+  }
+
+  const s = loadState();
+  const bank = getBankFromState();
+  const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+  const bankName = ($("#inputBankName") && $("#inputBankName").value.trim()) ? $("#inputBankName").value.trim() : "Delad bank";
+
+  try {
+    const docRef = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc();
+    const publicId = docRef.id;
+
+    const payload = {
+      ownerUid: currentTeacherUser.uid,
+      ownerEmail: currentTeacherUser.email || null,
+      name: bankName,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      schemaVersion: "v17-public-v1",
+      bank: ensureBankShape(bank),
+      goalsMap: goalsMap
+    };
+
+    await docRef.set(payload, { merge: false });
+
+    setActiveBankMeta({ mode: "public", ownerUid: currentTeacherUser.uid, bankId: "", publicId });
+
+    const url = `${window.location.origin}${window.location.pathname}?bank=${encodeURIComponent(publicId)}`;
+    const out = $("#shareLinkOutput");
+    if (out) out.value = url;
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).catch(() => {});
+    }
+
+    alert("Publik elevlänk skapad/kopierad.");
+  } catch (e) {
+    console.error("Kunde inte publicera bank:", e);
+    alert("Kunde inte publicera bank. Se konsolen.");
+  }
+}
+
+async function autoLoadSharedBank() {
+  const publicId = getQueryParam("bank");
+  if (!publicId) return;
+
+  if (!firebaseDbInstance) return;
+
+  try {
+    const doc = await firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(publicId).get();
+    if (!doc.exists) return;
+
+    const data = doc.data() || {};
+    const bank = ensureBankShape(data.bank);
+
+    setBankInState(bank);
+
+    const s = loadState();
+    s.goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : (s.goalsMap || []);
+    saveState(s);
+
+    setActiveBankMeta({ mode: "public", ownerUid: data.ownerUid || "", bankId: "", publicId: publicId });
+
+    if (typeof renderMcqList === "function") renderMcqList();
+    if (typeof renderImgList === "function") renderImgList();
+    if (typeof renderDragList === "function") renderDragList();
+    if (typeof renderGoalsList === "function") renderGoalsList();
+    if (typeof syncUI === "function") syncUI();
+    if (typeof updateBankStatusUI === "function") updateBankStatusUI();
+  } catch (e) {
+    console.error("autoLoadSharedBank misslyckades:", e);
+  }
+}
+
+/* =========================
+   setupCloudBankUI – kopplas av SEKTION 5
+   ========================= */
 
 function setupCloudBankUI() {
   const btnLoad = $("#btnLoadCloudBanks");
   const btnSave = $("#btnSaveToCloud");
   const btnExport = $("#btnExportBank");
   const fileImport = $("#fileImport");
+  const btnPublish = $("#btnPublishSharedBank");
 
   if (btnLoad) {
-    btnLoad.addEventListener("click", () => {
-      loadCloudBanksList();
-    });
+    btnLoad.addEventListener("click", () => { loadCloudBanksList(); });
   }
 
   if (btnSave) {
-    btnSave.addEventListener("click", async () => {
+    btnSave.addEventListener("click", () => {
       if (!firebaseDbInstance || !currentTeacherUser) {
         alert("Du måste vara inloggad med Google för att spara till molnet.");
         return;
       }
-      const nameInput = $("#inputBankName");
-      const name = (nameInput && nameInput.value.trim()) || "Min frågebank";
-      const bank = getBankFromState();
-      const sFull = loadState();
-
-      try {
-        await firebaseDbInstance
-          .collection(CLOUD_ROOT_COLLECTION)
-          .doc(currentTeacherUser.uid)
-          .collection(CLOUD_BANKS_SUBCOLLECTION)
-          .add({
-            ownerUid: currentTeacherUser.uid,
-            name,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-            bank,
-            goalsMap: sFull.goalsMap || []
-          });
-        alert("Frågebank sparad till molnet.");
-        if (nameInput) nameInput.value = name;
-      } catch (e) {
-        console.error("Kunde inte spara bank till molnet:", e);
-        alert("Det gick inte att spara bank till molnet. Se konsolen för detaljer.");
-      }
+      openSaveBankRosterFlow();
     });
   }
 
@@ -2342,10 +2883,11 @@ function setupCloudBankUI() {
         try {
           const imported = JSON.parse(reader.result);
           setBankInState(imported);
-          renderMcqList();
-          renderImgList();
-          renderDragList();
-          syncUI();
+          if (typeof renderMcqList === "function") renderMcqList();
+          if (typeof renderImgList === "function") renderImgList();
+          if (typeof renderDragList === "function") renderDragList();
+          if (typeof syncUI === "function") syncUI();
+          try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
           alert("Frågebank importerad.");
         } catch (err) {
           console.error("Fel vid import av JSON-bank:", err);
@@ -2355,15 +2897,33 @@ function setupCloudBankUI() {
       reader.readAsText(file, "utf-8");
     });
   }
+
+  if (btnPublish) {
+    btnPublish.addEventListener("click", handlePublishSharedBank);
+  }
+
+  autoLoadSharedBank();
 }
 
 /* =========================
-   3e – Delmål & delbitar (goalsMap)
+   SEKTION 5 använder dessa wrappers
    ========================= */
+
+function handleLoadCloudBanks() { return loadCloudBanksList(); }
+function handleSaveToCloud() { return openSaveBankRosterFlow(); }
+</script>
+<!-- slut SEKTION 3D: MOLN-BANK – listning, laddning, spara bank + roster/tokens (GDPR) -->
+
+
+
+<!-- start SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
+<script>
+"use strict";
 
 function populateGoalSelect(selectElId) {
   const sel = typeof selectElId === "string" ? $(selectElId) : $("#mcqGoalPart");
   if (!sel) return;
+
   const s = loadState();
   const goals = s.goalsMap || [];
 
@@ -2410,7 +2970,7 @@ function renderGoalsList() {
         <div class="q-meta">Delbitar: ${escapeHtml(g.parts || "-")}</div>
       </div>
       <div>
-        <button class="btn btn-sm btn-danger" data-del-goal-id="${g.id}">🗑️</button>
+        <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${g.id}">🗑️</button>
       </div>
     `;
     host.appendChild(li);
@@ -2420,7 +2980,7 @@ function renderGoalsList() {
     btn.addEventListener("click", () => {
       const id = btn.getAttribute("data-del-goal-id");
       const s2 = loadState();
-      s2.goalsMap = (s2.goalsMap || []).filter((g) => String(g.id) !== id);
+      s2.goalsMap = (s2.goalsMap || []).filter((g) => String(g.id) !== String(id));
       saveState(s2);
       renderGoalsList();
     });
@@ -2450,11 +3010,7 @@ function initGoalsMap() {
       }
       const s = loadState();
       if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
-      s.goalsMap.push({
-        id: Date.now(),
-        goal: goalText,
-        parts: partsText
-      });
+      s.goalsMap.push({ id: Date.now(), goal: goalText, parts: partsText });
       saveState(s);
       if (inputGoal) inputGoal.value = "";
       if (inputPart) inputPart.value = "";
@@ -2484,10 +3040,14 @@ function initGoalsMap() {
 
   renderGoalsList();
 }
+</script>
+<!-- slut SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
 
-/* =========================
-   3f – Hjälp: delmåls-taggar & kopplingar
-   ========================= */
+
+
+<!-- start SEKTION 3F: KOPPLINGAR – helpers för delmåls-taggar -->
+<script>
+"use strict";
 
 function buildGoalInfoText(q) {
   const tags = [];
@@ -2511,59 +3071,26 @@ function buildGoalInfoText(q) {
     }
   }
 
-  if (!tags.length) {
-    return '<span class="goal-tag goal-tag-none">Ingen koppling till delmål</span>';
-  }
+  if (!tags.length) return '<span class="goal-tag goal-tag-none">Ingen koppling till delmål</span>';
   return tags.join(" ");
 }
 
 function getLinksFromIds(idArray) {
   const s = loadState();
   const goals = s.goalsMap || [];
-  return idArray
+  return (idArray || [])
     .map((id) => goals.find((g) => String(g.id) === String(id)))
     .filter(Boolean)
     .map((g) => ({ id: g.id, goal: g.goal, parts: g.parts }));
 }
+</script>
+<!-- slut SEKTION 3F: KOPPLINGAR – helpers för delmåls-taggar -->
 
-// Hämta länk-objekt (id, goal, parts) för en fråga, även om den bara har goal/parts-strängar
-function getLinksForQuestion(q, goals) {
-  if (Array.isArray(q.links) && q.links.length) {
-    return q.links
-      .filter((lnk) => lnk && (lnk.id != null || lnk.goal || lnk.parts))
-      .map((lnk) => ({
-        id: lnk.id != null ? lnk.id : (goals.find((g) => g.goal === lnk.goal && g.parts === lnk.parts)?.id),
-        goal: lnk.goal || (goals.find((g) => g.id === lnk.id)?.goal),
-        parts: lnk.parts || (goals.find((g) => g.id === lnk.id)?.parts)
-      }))
-      .filter((lnk) => lnk.id != null);
-  }
 
-  const results = [];
-  if (q.goal || q.parts) {
-    const match = goals.find((g) =>
-      (q.goal && g.goal === q.goal) ||
-      (q.parts && g.parts === q.parts)
-    );
-    if (match) {
-      results.push({ id: match.id, goal: match.goal, parts: match.parts });
-    }
-  }
-  if (q.goalExtra || q.partsExtra) {
-    const match2 = goals.find((g) =>
-      (q.goalExtra && g.goal === q.goalExtra) ||
-      (q.partsExtra && g.parts === q.partsExtra)
-    );
-    if (match2 && !results.some((r) => r.id === match2.id)) {
-      results.push({ id: match2.id, goal: match2.goal, parts: match2.parts });
-    }
-  }
-  return results;
-}
 
-/* =========================
-   3g – Flervalsfrågor (MCQ) – lista & editor
-   ========================= */
+<!-- start SEKTION 3G: FLERVAL (MCQ) – lista, editor, snabbimport -->
+<script>
+"use strict";
 
 function renderMcqList() {
   const listEl = $("#mcqList");
@@ -2604,7 +3131,7 @@ function renderMcqList() {
         <div class="q-meta">${goalInfo}</div>
       </div>
       <div>
-        <button class="btn btn-sm btn-danger" data-del-index="${idx}">🗑️</button>
+        <button class="btn btn-sm btn-danger" type="button" data-del-index="${idx}">🗑️</button>
       </div>
     `;
     listEl.appendChild(li);
@@ -2618,7 +3145,7 @@ function renderMcqList() {
       s2.bank.mcq.splice(index, 1);
       saveState(s2);
       renderMcqList();
-      syncUI();
+      if (typeof syncUI === "function") syncUI();
     });
   });
 }
@@ -2630,29 +3157,30 @@ function initQuestionForms() {
   const mcqOpt1 = $("#mcqOption1");
   const mcqOpt2 = $("#mcqOption2");
   const mcqOpt3 = $("#mcqOption3");
-  const mcqAnswerNumber = $("#mcqAnswer");
   const mcqGoalPart = $("#mcqGoalPart");
   const btnAdd = $("#btnMcqAdd");
   const btnClear = $("#btnMcqClear");
 
-  if (!btnAdd || !mcqLevel || !mcqQuestion || !mcqOpt0 || !mcqOpt1) {
-    return;
-  }
-
-  if (mcqAnswerNumber) {
-    const label = document.querySelector('label[for="mcqAnswer"]');
-    mcqAnswerNumber.style.display = "none";
-    if (label) label.style.display = "none";
-  }
+  if (!btnAdd || !mcqLevel || !mcqQuestion || !mcqOpt0 || !mcqOpt1) return;
 
   currentMcqCorrectIndex = 0;
-  if (mcqAnswerNumber && mcqAnswerNumber.parentElement) {
-    const container = document.createElement("div");
-    container.className = "mini";
-    container.style.marginTop = "4px";
-    container.textContent = "Välj vilket alternativ som är rätt:";
+  currentMcqLinks = [];
 
-    const row = document.createElement("div");
+  const answerHostId = "mcqCorrectContainer";
+  let answerHost = document.getElementById(answerHostId);
+  if (!answerHost && mcqQuestion && mcqQuestion.parentElement) {
+    answerHost = document.createElement("div");
+    answerHost.id = answerHostId;
+    answerHost.className = "mini";
+    answerHost.style.marginTop = "6px";
+    mcqQuestion.parentElement.appendChild(answerHost);
+  }
+
+  if (answerHost && !answerHost.dataset.ready) {
+    answerHost.dataset.ready = "1";
+    answerHost.textContent = "Välj vilket alternativ som är rätt: ";
+    const row = document.createElement("span");
+    row.style.marginLeft = "8px";
     ["1", "2", "3", "4"].forEach((lbl, idx) => {
       const lab = document.createElement("label");
       lab.style.marginRight = "8px";
@@ -2661,25 +3189,17 @@ function initQuestionForms() {
       r.type = "radio";
       r.name = "mcqCorrectRadio";
       r.value = String(idx);
-      if (idx === 0) {
-        r.checked = true;
-        currentMcqCorrectIndex = 0;
-      }
-      r.addEventListener("change", () => {
-        currentMcqCorrectIndex = idx;
-      });
+      if (idx === 0) r.checked = true;
+      r.addEventListener("change", () => { currentMcqCorrectIndex = idx; });
       lab.appendChild(r);
       lab.appendChild(document.createTextNode(" " + lbl));
       row.appendChild(lab);
     });
-
-    container.appendChild(row);
-    mcqAnswerNumber.parentElement.appendChild(container);
+    answerHost.appendChild(row);
   }
 
-  currentMcqLinks = [];
-  let mcqLinksPreview = null;
-  if (mcqGoalPart && mcqGoalPart.parentElement) {
+  let mcqLinksPreview = $("#mcqGoalLinksPreview");
+  if (mcqGoalPart && mcqGoalPart.parentElement && !document.getElementById("btnMcqAddGoalLink")) {
     const btnLink = document.createElement("button");
     btnLink.type = "button";
     btnLink.className = "btn btn-sm";
@@ -2701,9 +3221,7 @@ function initQuestionForms() {
       const links = getLinksFromIds([val]);
       if (!links.length) return;
       const link = links[0];
-      if (!currentMcqLinks.some((x) => String(x.id) === String(link.id))) {
-        currentMcqLinks.push(link);
-      }
+      if (!currentMcqLinks.some((x) => String(x.id) === String(link.id))) currentMcqLinks.push(link);
       if (mcqLinksPreview) {
         mcqLinksPreview.innerHTML = currentMcqLinks
           .map((lnk) => `<span class="goal-tag">${escapeHtml(lnk.goal || "-")} (Delbitar: ${escapeHtml(lnk.parts || "-")})</span>`)
@@ -2760,11 +3278,12 @@ function initQuestionForms() {
     currentMcqLinks = [];
     if (mcqLinksPreview) mcqLinksPreview.textContent = "Inga kopplingar ännu.";
     currentMcqCorrectIndex = 0;
+
     const firstRadio = document.querySelector('input[name="mcqCorrectRadio"][value="0"]');
     if (firstRadio) firstRadio.checked = true;
 
     renderMcqList();
-    syncUI();
+    if (typeof syncUI === "function") syncUI();
   });
 
   if (btnClear) {
@@ -2781,164 +3300,141 @@ function initQuestionForms() {
     });
   }
 
-  let mcqJsonLinks = [];
-
-  const questionsPanel = document.querySelector('.tab-panel[data-panel="questions"]');
-  if (questionsPanel && !document.getElementById("mcqJsonImportCard")) {
-    const card = document.createElement("div");
-    card.className = "card card-full-width";
-    card.id = "mcqJsonImportCard";
-    card.style.marginBottom = "15px";
-    card.innerHTML = `
-      <h3>Snabbimport av flervalsfrågor (text)</h3>
-      <p class="mini">
-        Format per fråga:<br>
-        Första raden = fråga, följande rader = svarsalternativ.<br>
-        Markera rätt svar med <code>*</code> i början av raden.<br>
-        Separera frågor med en tom rad.<br><br>
-        Exempel:<br>
-        Vad heter Sveriges huvudstad?<br>
-        Olso<br>
-        *Stockholm<br>
-        Norge<br>
-        Helsinki
-      </p>
-      <textarea id="mcqJsonTextarea" class="textarea" placeholder="Klistra in dina frågor här..."></textarea>
-      <div class="card-row" style="margin-top:8px;gap:8px;flex-wrap:wrap;">
-        <div class="field" style="max-width:140px;">
-          <label class="small-label" for="mcqJsonLevel">Nivå för import</label>
-          <select id="mcqJsonLevel" class="input">
-            <option value="E">E</option>
-            <option value="C">C</option>
-            <option value="A">A</option>
-          </select>
-        </div>
-        <div class="field">
-          <label class="small-label" for="mcqJsonGoalPart">Kopplad delbit (valfritt – gäller alla importerade frågor)</label>
-          <select id="mcqJsonGoalPart" class="input">
-            <option value="">Ingen koppling</option>
-          </select>
-          <button id="btnMcqJsonAddGoalLink" class="btn btn-sm" type="button" style="margin-top:4px;">
-            ➕ Lägg till delmåls-koppling
-          </button>
-          <div id="mcqJsonGoalLinksPreview" class="mini" style="margin-top:4px;">Inga kopplingar ännu.</div>
-        </div>
-      </div>
-      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
-        <button id="btnMcqImportJson" class="btn btn-sm">⬆️ Importera flervalsfrågor</button>
-      </div>
-      <p class="mini" id="mcqJsonStatus" style="margin-top:4px;"></p>
-    `;
-
-    const firstChild = questionsPanel.firstElementChild || questionsPanel.firstChild;
-    if (firstChild) {
-      questionsPanel.insertBefore(card, firstChild);
-    } else {
-      questionsPanel.appendChild(card);
-    }
-
-    const btnImport = $("#btnMcqImportJson");
-    const txt = $("#mcqJsonTextarea");
-    const status = $("#mcqJsonStatus");
-    const jsonGoalPart = $("#mcqJsonGoalPart");
-    const jsonLinksPreview = $("#mcqJsonGoalLinksPreview");
-    const btnJsonAddLink = $("#btnMcqJsonAddGoalLink");
-    const jsonLevelSelect = $("#mcqJsonLevel");
-
-    populateGoalSelect("#mcqJsonGoalPart");
-
-    if (btnJsonAddLink && jsonGoalPart && jsonLinksPreview) {
-      btnJsonAddLink.addEventListener("click", () => {
-        const val = jsonGoalPart.value;
-        if (!val) return;
-        const links = getLinksFromIds([val]);
-        if (!links.length) return;
-        const link = links[0];
-        if (!mcqJsonLinks.some((x) => String(x.id) === String(link.id))) {
-          mcqJsonLinks.push(link);
-        }
-        jsonLinksPreview.innerHTML = mcqJsonLinks
-          .map((lnk) => `<span class="goal-tag">${escapeHtml(lnk.goal || "-")} (Delbitar: ${escapeHtml(lnk.parts || "-")})</span>`)
-          .join(" ");
-      });
-    }
-
-    if (btnImport && txt) {
-      btnImport.addEventListener("click", () => {
-        const raw = txt.value.trim();
-        if (!raw) return;
-
-        const blocks = raw
-          .split(/\n\s*\n/)
-          .map((b) => b.trim())
-          .filter((b) => b.length);
-
-        const s2 = loadState();
-        if (!Array.isArray(s2.bank.mcq)) s2.bank.mcq = [];
-        let added = 0;
-        const levelForImport =
-          (jsonLevelSelect && jsonLevelSelect.value) ||
-          (mcqLevel && mcqLevel.value) ||
-          "E";
-        const linksForImport = mcqJsonLinks.slice();
-
-        blocks.forEach((block) => {
-          const lines = block
-            .split("\n")
-            .map((l) => l.trim())
-            .filter((l) => l.length);
-
-          if (lines.length < 3) return;
-
-          const question = lines[0];
-          const answerLines = lines.slice(1);
-          const opts = [];
-          let correctIdx = 0;
-
-          answerLines.forEach((line, idx) => {
-            let text = line;
-            if (text.startsWith("*")) {
-              text = text.replace(/^\*\s*/, "");
-              correctIdx = idx;
-            }
-            opts.push(text);
-          });
-
-          if (!question || opts.length < 2) return;
-
-          const qObj = {
-            type: "mcq",
-            level: levelForImport,
-            q: question,
-            options: opts,
-            answer: correctIdx
-          };
-
-          if (linksForImport.length) {
-            qObj.links = linksForImport;
-            qObj.goal = linksForImport[0].goal;
-            qObj.parts = linksForImport[0].parts;
-          }
-
-          s2.bank.mcq.push(qObj);
-          added++;
-        });
-
-        saveState(s2);
-        renderMcqList();
-        syncUI();
-        if (status) status.textContent = `Importerade ${added} frågor.`;
-      });
-    }
-  }
+  initMcqQuickImportUI();
 
   renderMcqList();
   populateGoalSelect("#mcqGoalPart");
 }
 
-/* =========================
-   3h – Bildfrågor (IMG) – lista & editor
-   ========================= */
+function initMcqQuickImportUI() {
+  const questionsPanel = document.querySelector('.tab-panel[data-panel="questions"]');
+  if (!questionsPanel) return;
+  if (document.getElementById("mcqQuickImportCard")) return;
+
+  const card = document.createElement("div");
+  card.className = "card card-full-width";
+  card.id = "mcqQuickImportCard";
+  card.style.marginBottom = "15px";
+  card.innerHTML = `
+    <h3>Snabbimport av flervalsfrågor (text)</h3>
+    <p class="mini">
+      Format per fråga:<br>
+      Första raden = fråga, följande rader = svarsalternativ.<br>
+      Markera rätt svar med <code>*</code> i början av raden.<br>
+      Separera frågor med en tom rad.
+    </p>
+    <textarea id="mcqQuickTextarea" class="textarea" placeholder="Klistra in dina frågor här..."></textarea>
+    <div class="card-row" style="margin-top:8px;gap:8px;flex-wrap:wrap;">
+      <div class="field" style="max-width:140px;">
+        <label class="small-label" for="mcqQuickLevel">Nivå för import</label>
+        <select id="mcqQuickLevel" class="input">
+          <option value="E">E</option>
+          <option value="C">C</option>
+          <option value="A">A</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="small-label" for="mcqJsonGoalPart">Kopplad delbit (valfritt – gäller alla importerade frågor)</label>
+        <select id="mcqJsonGoalPart" class="input"><option value="">Ingen koppling</option></select>
+        <button id="btnMcqQuickAddGoalLink" class="btn btn-sm" type="button" style="margin-top:4px;">➕ Lägg till delmåls-koppling</button>
+        <div id="mcqQuickGoalLinksPreview" class="mini" style="margin-top:4px;">Inga kopplingar ännu.</div>
+      </div>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+      <button id="btnMcqQuickImport" class="btn btn-sm">⬆️ Importera flervalsfrågor</button>
+    </div>
+    <p class="mini" id="mcqQuickStatus" style="margin-top:4px;"></p>
+  `;
+
+  const firstChild = questionsPanel.firstElementChild || questionsPanel.firstChild;
+  if (firstChild) questionsPanel.insertBefore(card, firstChild);
+  else questionsPanel.appendChild(card);
+
+  const btnImport = $("#btnMcqQuickImport");
+  const txt = $("#mcqQuickTextarea");
+  const status = $("#mcqQuickStatus");
+  const levelSel = $("#mcqQuickLevel");
+  const goalSel = $("#mcqJsonGoalPart");
+  const btnAddLink = $("#btnMcqQuickAddGoalLink");
+  const preview = $("#mcqQuickGoalLinksPreview");
+
+  let quickLinks = [];
+  populateGoalSelect("#mcqJsonGoalPart");
+
+  if (btnAddLink && goalSel && preview) {
+    btnAddLink.addEventListener("click", () => {
+      const val = goalSel.value;
+      if (!val) return;
+      const links = getLinksFromIds([val]);
+      if (!links.length) return;
+      const link = links[0];
+      if (!quickLinks.some((x) => String(x.id) === String(link.id))) quickLinks.push(link);
+      preview.innerHTML = quickLinks
+        .map((lnk) => `<span class="goal-tag">${escapeHtml(lnk.goal || "-")} (Delbitar: ${escapeHtml(lnk.parts || "-")})</span>`)
+        .join(" ");
+    });
+  }
+
+  if (btnImport && txt) {
+    btnImport.addEventListener("click", () => {
+      const raw = txt.value.trim();
+      if (!raw) return;
+
+      const blocks = raw.split(/\n\s*\n/).map((b) => b.trim()).filter((b) => b.length);
+
+      const s2 = loadState();
+      if (!Array.isArray(s2.bank.mcq)) s2.bank.mcq = [];
+      let added = 0;
+
+      const lvl = (levelSel && levelSel.value) ? levelSel.value : "E";
+      const linksForImport = quickLinks.slice();
+
+      blocks.forEach((block) => {
+        const lines = block.split("\n").map((l) => l.trim()).filter((l) => l.length);
+        if (lines.length < 3) return;
+
+        const question = lines[0];
+        const answerLines = lines.slice(1);
+        const opts = [];
+        let correctIdx = 0;
+
+        answerLines.forEach((line, idx) => {
+          let t = line;
+          if (t.startsWith("*")) {
+            t = t.replace(/^\*\s*/, "");
+            correctIdx = idx;
+          }
+          opts.push(t);
+        });
+
+        if (!question || opts.length < 2) return;
+
+        const qObj = { type: "mcq", level: lvl, q: question, options: opts, answer: correctIdx };
+        if (linksForImport.length) {
+          qObj.links = linksForImport;
+          qObj.goal = linksForImport[0].goal;
+          qObj.parts = linksForImport[0].parts;
+        }
+
+        s2.bank.mcq.push(qObj);
+        added++;
+      });
+
+      saveState(s2);
+      renderMcqList();
+      if (typeof syncUI === "function") syncUI();
+      if (status) status.textContent = `Importerade ${added} frågor.`;
+    });
+  }
+}
+</script>
+<!-- slut SEKTION 3G: FLERVAL (MCQ) – lista, editor, snabbimport -->
+
+
+
+<!-- start SEKTION 3H: BILDFRÅGOR (IMG) – lista & editor -->
+<script>
+"use strict";
 
 function renderImgList() {
   const host = $("#imgList");
@@ -2980,7 +3476,7 @@ function renderImgList() {
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
         ${hasThumb ? `<img src="${q.imgDataUrl}" alt="Miniatyr" style="max-width:80px;max-height:60px;border-radius:4px;object-fit:cover;">` : ""}
-        <button class="btn btn-sm btn-danger" data-del-img-index="${idx}">🗑️</button>
+        <button class="btn btn-sm btn-danger" type="button" data-del-img-index="${idx}">🗑️</button>
       </div>
     `;
     host.appendChild(li);
@@ -2994,7 +3490,7 @@ function renderImgList() {
       s2.bank.img.splice(idx, 1);
       saveState(s2);
       renderImgList();
-      syncUI();
+      if (typeof syncUI === "function") syncUI();
     });
   });
 }
@@ -3006,9 +3502,8 @@ function initImageQuestionsEditor() {
   panel.innerHTML = `
     <div class="card">
       <h3>Bildfrågor</h3>
-      <p class="mini">
-        Skapa frågor med bild och 2–4 svarsalternativ. Välj rätt svar genom att klicka i en cirkel.
-      </p>
+      <p class="mini">Skapa frågor med bild och 2–4 svarsalternativ.</p>
+
       <div class="card-row">
         <div class="field" style="flex:0 0 100px;">
           <label class="small-label" for="imgLevel">Nivå</label>
@@ -3023,6 +3518,7 @@ function initImageQuestionsEditor() {
           <input id="imgQuestion" class="input" placeholder="Skriv frågan här..." />
         </div>
       </div>
+
       <div class="card-row" style="margin-top:8px;">
         <div class="field">
           <label class="small-label" for="imgFileInput">Bildfil</label>
@@ -3030,11 +3526,10 @@ function initImageQuestionsEditor() {
         </div>
         <div class="field">
           <label class="small-label">Förhandsgranskning</label>
-          <div id="imgPreviewBox" class="img-preview-box">
-            Ingen bild vald ännu.
-          </div>
+          <div id="imgPreviewBox" class="img-preview-box">Ingen bild vald ännu.</div>
         </div>
       </div>
+
       <div class="card-row" style="margin-top:8px;">
         <div class="field">
           <label class="small-label" for="imgOption0">Alternativ 1</label>
@@ -3045,6 +3540,7 @@ function initImageQuestionsEditor() {
           <input id="imgOption1" class="input" />
         </div>
       </div>
+
       <div class="card-row" style="margin-top:8px;">
         <div class="field">
           <label class="small-label" for="imgOption2">Alternativ 3 (valfritt)</label>
@@ -3055,26 +3551,22 @@ function initImageQuestionsEditor() {
           <input id="imgOption3" class="input" />
         </div>
       </div>
+
       <div class="card-row" style="margin-top:8px;">
         <div class="field" id="imgCorrectContainer">
           <label class="small-label">Rätt svar</label>
         </div>
         <div class="field">
           <label class="small-label" for="imgGoalPart">Kopplad delbit (valfritt)</label>
-          <select id="imgGoalPart" class="input">
-            <option value="">Ingen koppling</option>
-          </select>
-          <button id="btnImgAddGoalLink" class="btn btn-sm" type="button" style="margin-top:4px;">
-            ➕ Lägg till delmåls-koppling
-          </button>
+          <select id="imgGoalPart" class="input"><option value="">Ingen koppling</option></select>
+          <button id="btnImgAddGoalLink" class="btn btn-sm" type="button" style="margin-top:4px;">➕ Lägg till delmåls-koppling</button>
           <div id="imgGoalLinksPreview" class="mini" style="margin-top:4px;">Inga kopplingar ännu.</div>
         </div>
       </div>
+
       <div class="card-row" style="margin-top:12px;justify-content:space-between;">
-        <div>
-          <button id="btnImgAdd" class="btn btn-sm btn-primary">➕ Lägg till bildfråga</button>
-        </div>
-        <button id="btnImgClear" class="btn btn-sm">Avbryt/Rensa formulär</button>
+        <div><button id="btnImgAdd" class="btn btn-sm btn-primary" type="button">➕ Lägg till bildfråga</button></div>
+        <button id="btnImgClear" class="btn btn-sm" type="button">Avbryt/Rensa formulär</button>
       </div>
     </div>
 
@@ -3113,13 +3605,8 @@ function initImageQuestionsEditor() {
       r.type = "radio";
       r.name = "imgCorrectRadio";
       r.value = String(idx);
-      if (idx === 0) {
-        r.checked = true;
-        currentImgCorrectIndex = 0;
-      }
-      r.addEventListener("change", () => {
-        currentImgCorrectIndex = idx;
-      });
+      if (idx === 0) r.checked = true;
+      r.addEventListener("change", () => { currentImgCorrectIndex = idx; });
       lab.appendChild(r);
       lab.appendChild(document.createTextNode(" " + lbl));
       row.appendChild(lab);
@@ -3153,9 +3640,7 @@ function initImageQuestionsEditor() {
       const links = getLinksFromIds([val]);
       if (!links.length) return;
       const link = links[0];
-      if (!currentImgLinks.some((x) => String(x.id) === String(link.id))) {
-        currentImgLinks.push(link);
-      }
+      if (!currentImgLinks.some((x) => String(x.id) === String(link.id))) currentImgLinks.push(link);
       imgGoalLinksPreview.innerHTML = currentImgLinks
         .map((lnk) => `<span class="goal-tag">${escapeHtml(lnk.goal || "-")} (Delbitar: ${escapeHtml(lnk.parts || "-")})</span>`)
         .join(" ");
@@ -3174,14 +3659,8 @@ function initImageQuestionsEditor() {
         imgOpt3 && imgOpt3.value.trim()
       ].filter((x) => x && x.length > 0);
 
-      if (!currentImgDataUrl) {
-        alert("Välj en bild för bildfrågan.");
-        return;
-      }
-      if (!text || opts.length < 2) {
-        alert("Skriv en fråga och minst två svarsalternativ.");
-        return;
-      }
+      if (!currentImgDataUrl) { alert("Välj en bild för bildfrågan."); return; }
+      if (!text || opts.length < 2) { alert("Skriv en fråga och minst två svarsalternativ."); return; }
 
       let ans = currentImgCorrectIndex || 0;
       if (ans >= opts.length) ans = 0;
@@ -3196,10 +3675,7 @@ function initImageQuestionsEditor() {
         imgDataUrl: currentImgDataUrl,
         links: links
       };
-      if (links.length) {
-        qObj.goal = links[0].goal;
-        qObj.parts = links[0].parts;
-      }
+      if (links.length) { qObj.goal = links[0].goal; qObj.parts = links[0].parts; }
 
       if (!Array.isArray(s.bank.img)) s.bank.img = [];
       s.bank.img.push(qObj);
@@ -3208,6 +3684,7 @@ function initImageQuestionsEditor() {
       currentImgDataUrl = null;
       currentImgLinks = [];
       currentImgCorrectIndex = 0;
+
       if (imgQuestion) imgQuestion.value = "";
       if (imgOpt0) imgOpt0.value = "";
       if (imgOpt1) imgOpt1.value = "";
@@ -3217,11 +3694,12 @@ function initImageQuestionsEditor() {
       if (imgPreviewBox) imgPreviewBox.textContent = "Ingen bild vald ännu.";
       if (imgGoalPart) imgGoalPart.value = "";
       if (imgGoalLinksPreview) imgGoalLinksPreview.textContent = "Inga kopplingar ännu.";
+
       const firstR = document.querySelector('input[name="imgCorrectRadio"][value="0"]');
       if (firstR) firstR.checked = true;
 
       renderImgList();
-      syncUI();
+      if (typeof syncUI === "function") syncUI();
     });
   }
 
@@ -3247,10 +3725,14 @@ function initImageQuestionsEditor() {
   populateGoalSelect("#imgGoalPart");
   renderImgList();
 }
+</script>
+<!-- slut SEKTION 3H: BILDFRÅGOR (IMG) – lista & editor -->
 
-/* =========================
-   3i – Drag & Drop-frågor – lista & editor
-   ========================= */
+
+
+<!-- start SEKTION 3I: DRAG & DROP – lista & editor -->
+<script>
+"use strict";
 
 function renderDragList() {
   const host = $("#dragList");
@@ -3299,7 +3781,7 @@ function renderDragList() {
         <div class="q-meta">${goalInfo}</div>
       </div>
       <div>
-        <button class="btn btn-sm btn-danger" data-del-drag-index="${idx}">🗑️</button>
+        <button class="btn btn-sm btn-danger" type="button" data-del-drag-index="${idx}">🗑️</button>
       </div>
     `;
     host.appendChild(li);
@@ -3313,7 +3795,7 @@ function renderDragList() {
       s2.bank.drag.splice(idx, 1);
       saveState(s2);
       renderDragList();
-      syncUI();
+      if (typeof syncUI === "function") syncUI();
     });
   });
 }
@@ -3325,11 +3807,8 @@ function initDragDropQuestionsEditor() {
   panel.innerHTML = `
     <div class="card">
       <h3>Drag &amp; Drop-frågor</h3>
-      <p class="mini">
-        Skapa sorteringsfrågor: eleverna drar kort till rätt kategori-rutor.
-        Du skriver först alla kort i en ruta, sedan kategorier i en annan –
-        därefter fördelar du korten på kategorier.
-      </p>
+      <p class="mini">Skapa sorteringsfrågor: eleverna drar kort till rätt kategori.</p>
+
       <div class="card-row">
         <div class="field" style="flex:0 0 100px;">
           <label class="small-label" for="dragLevel">Nivå</label>
@@ -3341,42 +3820,37 @@ function initDragDropQuestionsEditor() {
         </div>
         <div class="field">
           <label class="small-label" for="dragQuestion">Frågetext</label>
-          <input id="dragQuestion" class="input" placeholder="T.ex. Dra varje maträtt till rätt kategori..." />
+          <input id="dragQuestion" class="input" placeholder="T.ex. Dra varje sak till rätt kategori..." />
         </div>
       </div>
+
       <div class="card-row" style="margin-top:8px;">
         <div class="field">
-          <label class="small-label" for="dragItems">Kort / alternativ (ett per rad)</label>
-          <textarea id="dragItems" class="textarea" style="min-height:80px;" placeholder="t.ex. Köttbullar&#10;Pannkakor&#10;Äpple"></textarea>
+          <label class="small-label" for="dragItems">Kort (ett per rad)</label>
+          <textarea id="dragItems" class="textarea" style="min-height:80px;"></textarea>
         </div>
         <div class="field">
-          <label class="small-label" for="dragCategories">Kategori-rutor (ett per rad)</label>
-          <textarea id="dragCategories" class="textarea" style="min-height:80px;" placeholder="t.ex. Kött&#10;Efterrätt&#10;Frukt"></textarea>
+          <label class="small-label" for="dragCategories">Kategorier (ett per rad)</label>
+          <textarea id="dragCategories" class="textarea" style="min-height:80px;"></textarea>
         </div>
       </div>
+
       <div class="card-row" style="margin-top:8px;">
         <div class="field" style="flex:1;">
-          <button id="btnDragBuildMapping" class="btn btn-sm">Bygg fördelning (kort → kategori)</button>
-          <div id="dragMappingArea" class="mini" style="margin-top:6px;">
-            Inget fördelat ännu – skriv kort och kategorier och klicka sedan på knappen.
-          </div>
+          <button id="btnDragBuildMapping" class="btn btn-sm" type="button">Bygg fördelning (kort → kategori)</button>
+          <div id="dragMappingArea" class="mini" style="margin-top:6px;">Inget fördelat ännu.</div>
         </div>
         <div class="field">
           <label class="small-label" for="dragGoalPart">Kopplad delbit (valfritt)</label>
-          <select id="dragGoalPart" class="input">
-            <option value="">Ingen koppling</option>
-          </select>
-          <button id="btnDragAddGoalLink" class="btn btn-sm" type="button" style="margin-top:4px;">
-            ➕ Lägg till delmåls-koppling
-          </button>
+          <select id="dragGoalPart" class="input"><option value="">Ingen koppling</option></select>
+          <button id="btnDragAddGoalLink" class="btn btn-sm" type="button" style="margin-top:4px;">➕ Lägg till delmåls-koppling</button>
           <div id="dragGoalLinksPreview" class="mini" style="margin-top:4px;">Inga kopplingar ännu.</div>
         </div>
       </div>
+
       <div class="card-row" style="margin-top:12px;justify-content:space-between;">
-        <div>
-          <button id="btnDragAdd" class="btn btn-sm btn-primary">➕ Lägg till drag &amp; drop-fråga</button>
-        </div>
-        <button id="btnDragClear" class="btn sm">Avbryt/Rensa formulär</button>
+        <div><button id="btnDragAdd" class="btn btn-sm btn-primary" type="button">➕ Lägg till drag &amp; drop-fråga</button></div>
+        <button id="btnDragClear" class="btn btn-sm" type="button">Avbryt/Rensa formulär</button>
       </div>
     </div>
 
@@ -3410,9 +3884,7 @@ function initDragDropQuestionsEditor() {
       const links = getLinksFromIds([val]);
       if (!links.length) return;
       const link = links[0];
-      if (!currentDragLinks.some((x) => String(x.id) === String(link.id))) {
-        currentDragLinks.push(link);
-      }
+      if (!currentDragLinks.some((x) => String(x.id) === String(link.id))) currentDragLinks.push(link);
       dragLinksPreview.innerHTML = currentDragLinks
         .map((lnk) => `<span class="goal-tag">${escapeHtml(lnk.goal || "-")} (Delbitar: ${escapeHtml(lnk.parts || "-")})</span>`)
         .join(" ");
@@ -3424,19 +3896,10 @@ function initDragDropQuestionsEditor() {
       const srcLines = (dragItems && dragItems.value.split("\n").map((x) => x.trim()).filter((x) => x.length)) || [];
       const catLines = (dragCategories && dragCategories.value.split("\n").map((x) => x.trim()).filter((x) => x.length)) || [];
 
-      if (!srcLines.length || !catLines.length) {
-        alert("Skriv minst ett kort och minst en kategori först.");
-        return;
-      }
+      if (!srcLines.length || !catLines.length) { alert("Skriv minst ett kort och minst en kategori först."); return; }
 
-      currentDragSourcesTmp = srcLines.map((label, idx) => ({
-        id: "s" + idx,
-        label
-      }));
-      currentDragTargetsTmp = catLines.map((label, idx) => ({
-        id: "t" + idx,
-        label
-      }));
+      currentDragSourcesTmp = srcLines.map((label, idx) => ({ id: "s" + idx, label }));
+      currentDragTargetsTmp = catLines.map((label, idx) => ({ id: "t" + idx, label }));
       currentDragCorrectMapTmp = {};
 
       mappingArea.innerHTML = "";
@@ -3473,9 +3936,7 @@ function initDragDropQuestionsEditor() {
         sel.addEventListener("change", () => {
           const sid = sel.dataset.sourceId;
           const tid = sel.value;
-          if (sid && tid) {
-            currentDragCorrectMapTmp[sid] = tid;
-          }
+          if (sid && tid) currentDragCorrectMapTmp[sid] = tid;
         });
 
         if (currentDragTargetsTmp.length) {
@@ -3497,20 +3958,11 @@ function initDragDropQuestionsEditor() {
       const level = dragLevel.value || "E";
       const text = (dragQuestion && dragQuestion.value.trim()) || "";
 
-      if (!text) {
-        alert("Skriv frågetext först.");
-        return;
-      }
-      if (!currentDragSourcesTmp.length || !currentDragTargetsTmp.length) {
-        alert("Bygg först upp kort och kategorier via 'Bygg fördelning'.");
-        return;
-      }
+      if (!text) { alert("Skriv frågetext först."); return; }
+      if (!currentDragSourcesTmp.length || !currentDragTargetsTmp.length) { alert("Bygg först upp kort och kategorier via 'Bygg fördelning'."); return; }
 
       for (const src of currentDragSourcesTmp) {
-        if (!currentDragCorrectMapTmp[src.id]) {
-          alert("Alla kort måste ha en vald kategori.");
-          return;
-        }
+        if (!currentDragCorrectMapTmp[src.id]) { alert("Alla kort måste ha en vald kategori."); return; }
       }
 
       const links = currentDragLinks.slice();
@@ -3523,10 +3975,7 @@ function initDragDropQuestionsEditor() {
         correctMap: Object.assign({}, currentDragCorrectMapTmp),
         links: links
       };
-      if (links.length) {
-        qObj.goal = links[0].goal;
-        qObj.parts = links[0].parts;
-      }
+      if (links.length) { qObj.goal = links[0].goal; qObj.parts = links[0].parts; }
 
       if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
       s.bank.drag.push(qObj);
@@ -3537,16 +3986,15 @@ function initDragDropQuestionsEditor() {
       if (dragCategories) dragCategories.value = "";
       if (dragGoalPart) dragGoalPart.value = "";
       if (dragLinksPreview) dragLinksPreview.textContent = "Inga kopplingar ännu.";
-      if (mappingArea) {
-        mappingArea.textContent = "Inget fördelat ännu – skriv kort och kategorier och klicka sedan på knappen.";
-      }
+      if (mappingArea) mappingArea.textContent = "Inget fördelat ännu.";
+
       currentDragLinks = [];
       currentDragSourcesTmp = [];
       currentDragTargetsTmp = [];
       currentDragCorrectMapTmp = {};
 
       renderDragList();
-      syncUI();
+      if (typeof syncUI === "function") syncUI();
     });
   }
 
@@ -3557,9 +4005,7 @@ function initDragDropQuestionsEditor() {
       if (dragCategories) dragCategories.value = "";
       if (dragGoalPart) dragGoalPart.value = "";
       if (dragLinksPreview) dragLinksPreview.textContent = "Inga kopplingar ännu.";
-      if (mappingArea) {
-        mappingArea.textContent = "Inget fördelat ännu – skriv kort och kategorier och klicka sedan på knappen.";
-      }
+      if (mappingArea) mappingArea.textContent = "Inget fördelat ännu.";
       currentDragLinks = [];
       currentDragSourcesTmp = [];
       currentDragTargetsTmp = [];
@@ -3570,10 +4016,14 @@ function initDragDropQuestionsEditor() {
   populateGoalSelect("#dragGoalPart");
   renderDragList();
 }
+</script>
+<!-- slut SEKTION 3I: DRAG & DROP – lista & editor -->
 
-/* =========================
-   3j – Lärarläge: lösenord, e-post, nivågränser
-   ========================= */
+
+
+<!-- start SEKTION 3J: LÄRARINSTÄLLNINGAR – lösen, e-post, nivågränser -->
+<script>
+"use strict";
 
 function initTeacherPasswordSettings() {
   const statusEl = $("#passwordStatus");
@@ -3581,7 +4031,6 @@ function initTeacherPasswordSettings() {
   const inputOld = $("#inputOldPassword");
   const inputNew = $("#inputNewPassword");
   const inputNewRepeat = $("#inputNewPasswordRepeat");
-
   if (!btnChange) return;
 
   btnChange.addEventListener("click", () => {
@@ -3591,18 +4040,10 @@ function initTeacherPasswordSettings() {
     const newVal = (inputNew && inputNew.value) || "";
     const repeatVal = (inputNewRepeat && inputNewRepeat.value) || "";
 
-    if (!newVal || !repeatVal) {
-      if (statusEl) statusEl.textContent = "Nytt lösenord får inte vara tomt.";
-      return;
-    }
-    if (newVal !== repeatVal) {
-      if (statusEl) statusEl.textContent = "Nya lösenorden matchar inte.";
-      return;
-    }
-    if (current && oldVal !== current) {
-      if (statusEl) statusEl.textContent = "Nuvarande lösenord stämmer inte.";
-      return;
-    }
+    if (!newVal || !repeatVal) { if (statusEl) statusEl.textContent = "Nytt lösenord får inte vara tomt."; return; }
+    if (newVal !== repeatVal) { if (statusEl) statusEl.textContent = "Nya lösenorden matchar inte."; return; }
+    if (current && oldVal !== current) { if (statusEl) statusEl.textContent = "Nuvarande lösenord stämmer inte."; return; }
+
     s.teacherPassword = newVal;
     saveState(s);
     if (statusEl) statusEl.textContent = "Lärarlösenord uppdaterat.";
@@ -3649,85 +4090,68 @@ function initThresholdSettings() {
       if (inputC) s2.thres.C = clampInt(inputC.value, 0, 100);
       if (inputA) s2.thres.A = clampInt(inputA.value, 0, 100);
       saveState(s2);
-      syncUI();
+      if (typeof syncUI === "function") syncUI();
     });
   }
 }
+</script>
+<!-- slut SEKTION 3J: LÄRARINSTÄLLNINGAR – lösen, e-post, nivågränser -->
 
-/* =========================
-   3k – Lärarläge: gate, modal & flikar
-   ========================= */
 
-function openTeacherGate() {
-  const gate = $("#teacherGate");
-  const text = $("#teacherGateText");
-  const input = $("#teacherPasswordInput");
+
+<!-- start SEKTION 3K: INLÄMNING – spara resultat/progression via token (GDPR) -->
+<script>
+"use strict";
+
+async function saveCurrentResultToFirestore() {
+  if (!firebaseDbInstance) throw new Error("firebaseDbInstance saknas");
+
   const s = loadState();
-  if (!gate || !text || !input) return;
+  const token = (s.student && s.student.token) ? String(s.student.token).trim() : "";
+  if (!token) throw new Error("token saknas");
 
-  gate.classList.remove("hidden");
-  input.value = "";
-  if (s.teacherPassword) {
-    text.textContent = "Ange lärarlösenord för att öppna lärarläget.";
-  } else {
-    text.textContent = "Första gången du loggar in blir lösenordet det du skriver här.";
-  }
-}
+  const ab = s.activeBank || {};
+  const mode = ab.mode || "";
 
-function closeTeacherGate() {
-  const gate = $("#teacherGate");
-  if (gate) gate.classList.add("hidden");
-}
+  const payload = {
+    token: token,
+    submittedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    best: s.best || { E: 0, C: 0, A: 0 },
+    lastSubmission: lastSubmission || null,
+    progression: s.progression || { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} }
+  };
 
-function openTeacherModal() {
-  const modal = $("#teacherModal");
-  if (modal) modal.classList.remove("hidden");
-}
+  if (mode === "public" && ab.publicId) {
+    const ref = firebaseDbInstance
+      .collection(PUBLIC_BANKS_COLLECTION)
+      .doc(String(ab.publicId))
+      .collection("students")
+      .doc(token);
 
-function closeTeacherModal() {
-  const modal = $("#teacherModal");
-  if (modal) modal.classList.add("hidden");
-}
-
-function handleTeacherConfirm() {
-  const input = $("#teacherPasswordInput");
-  if (!input) return;
-  const value = input.value;
-  const s = loadState();
-
-  if (!s.teacherPassword) {
-    s.teacherPassword = value;
-    saveState(s);
-    closeTeacherGate();
-    openTeacherModal();
+    await ref.set(payload, { merge: true });
     return;
   }
 
-  if (value === s.teacherPassword) {
-    closeTeacherGate();
-    openTeacherModal();
-  } else {
-    alert("Fel lärarlösenord.");
+  if (mode === "teacher" && ab.ownerUid && ab.bankId) {
+    const ref = firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION)
+      .doc(String(ab.ownerUid))
+      .collection(CLOUD_BANKS_SUBCOLLECTION)
+      .doc(String(ab.bankId))
+      .collection("students")
+      .doc(token);
+
+    await ref.set(payload, { merge: true });
+    return;
   }
-}
 
-function setupTabNavigation() {
-  const tabs = $all(".tab-btn");
-  const panels = $all(".tab-panel");
-
-  tabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      const target = tab.getAttribute("data-tab");
-      tabs.forEach((t) => t.classList.remove("active"));
-      panels.forEach((p) => p.classList.add("hidden"));
-
-      tab.classList.add("active");
-      const panel = document.querySelector(`.tab-panel[data-panel="${target}"]`);
-      if (panel) panel.classList.remove("hidden");
-    });
-  });
+  throw new Error("Ingen aktiv bank-meta (public/teacher) för inlämning");
 }
 </script>
+<!-- slut SEKTION 3K: INLÄMNING – spara resultat/progression via token (GDPR) -->
+
+
+
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
 
 
