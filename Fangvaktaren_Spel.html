@@ -2289,7 +2289,7 @@ async function handleGoogleLogout() {
 "use strict";
 
 /* =========================
-   3D – Robust moln-UI + inline elevlista-ruta (med Spara)
+   3D – Robust moln-UI + inline elevlista-ruta (med Spara till aktiv bank)
    ========================= */
 
 function _fv3d_escape(s){
@@ -2376,10 +2376,8 @@ function _fv3d_ensureStyles(){
       justify-content:flex-end;
     }
     .fv3d-actions .btn{ white-space:nowrap; }
-
     #fv3d-cloud-status{ margin-top:6px; }
 
-    /* Inline elevlista-rutan */
     #fv3dRosterBox{
       margin-top:10px;
       border:1px solid rgba(31,41,55,1);
@@ -2472,7 +2470,7 @@ function _fv3d_findTeacherPanel(){
 
   const btn = document.getElementById("btnLoadCloudBanks") || Array.from(document.querySelectorAll("button")).find(b=>{
     const t=(b.textContent||"").toLowerCase();
-    return t.includes("ladda") && t.includes("molnet");
+    return t.includes("ladda") && t.includes("moln");
   });
   if (btn) return btn.closest(".card") || btn.closest(".tab-panel") || btn.parentElement || document.body;
 
@@ -2507,7 +2505,7 @@ function _fv3d_ensureCloudHost(){
 
   const btnLoad = document.getElementById("btnLoadCloudBanks") || Array.from(document.querySelectorAll("button")).find(b=>{
     const t=(b.textContent||"").toLowerCase();
-    return t.includes("ladda") && t.includes("molnet");
+    return t.includes("ladda") && t.includes("moln");
   });
 
   if (btnLoad && btnLoad.parentElement) {
@@ -2563,7 +2561,7 @@ function _fv3d_ensureRosterBox(){
         <div id="fv3dRosterMeta" class="mini">-</div>
       </div>
       <div class="fv3d-actions">
-        <button id="fv3dRosterSave" class="btn fv3d-btn-xs btn-primary" type="button">Spara</button>
+        <button id="fv3dRosterSave" class="btn fv3d-btn-xs btn-primary" type="button">Spara till aktiv bank</button>
         <button id="fv3dRosterClose" class="btn fv3d-btn-xs" type="button">Stäng</button>
       </div>
     </div>
@@ -2580,7 +2578,11 @@ function _fv3d_ensureRosterBox(){
   container.appendChild(box);
 
   const btnClose = document.getElementById("fv3dRosterClose");
-  if (btnClose) btnClose.addEventListener("click", ()=> box.classList.add("hidden"));
+  if (btnClose) btnClose.addEventListener("click", ()=>{
+    box.classList.add("hidden");
+    const st = document.getElementById("fv3dRosterStatus");
+    if (st) st.textContent = "";
+  });
 
   return box;
 }
@@ -2684,9 +2686,8 @@ function _fv3d_saveLocalRosterMap(mapObj){
 }
 
 function _fv3d_collectRosterFromUI(){
-  const box = document.getElementById("fv3dRosterBox");
   const grid = document.getElementById("fv3dRosterGrid");
-  if (!box || !grid) return { rosterLocal: [], tokens: [] };
+  if (!grid) return { rosterLocal: [], tokens: [] };
 
   const cards = Array.from(grid.children || []);
   const rosterLocal = cards
@@ -2710,13 +2711,18 @@ function _fv3d_collectRosterFromUI(){
 async function _fv3d_saveRosterToCloudAndLocal(){
   const box = document.getElementById("fv3dRosterBox");
   const status = document.getElementById("fv3dRosterStatus");
+  const meta = document.getElementById("fv3dRosterMeta");
   if (!box) return;
 
-  const bankId = String(box.dataset.bankId || "");
-  const bankName = String(box.dataset.bankName || "");
+  const clickedBankId = String(box.dataset.bankId || "");
+  const clickedBankName = String(box.dataset.bankName || "");
 
-  if (!bankId) {
-    if (status) status.textContent = "⚠️ Ingen bank vald.";
+  const activeId = _fv3d_activeBankId();
+  const targetBankId = activeId || clickedBankId;
+
+  if (!targetBankId) {
+    if (status) status.textContent = "⚠️ Ingen aktiv bank. Aktivera en bank först.";
+    alert("Ingen aktiv bank. Klicka 'Aktivera' på en bank först.");
     return;
   }
 
@@ -2725,15 +2731,15 @@ async function _fv3d_saveRosterToCloudAndLocal(){
   const tokenSet = new Set(tokens);
   if (tokens.length !== tokenSet.size) {
     if (status) status.textContent = "⚠️ Dubbla tokens finns. Ta bort en elev och lägg till ny.";
-    alert("Du har dubbla tokens i listan. Ta bort en elevruta och lägg till en ny (ny token skapas).");
+    alert("Du har dubbla tokens i listan. Ta bort en elevruta och lägg till ny (ny token skapas).");
     return;
   }
 
-  // 1) Spara lokalt kopplat till bankId
+  // 1) Spara lokalt kopplat till *targetBankId*
   try {
     const map = _fv3d_loadLocalRosterMap();
-    map[bankId] = {
-      bankName: bankName || (map[bankId] && map[bankId].bankName) || "",
+    map[targetBankId] = {
+      bankName: clickedBankName || (map[targetBankId] && map[targetBankId].bankName) || "",
       savedAt: new Date().toISOString(),
       students: rosterLocal
     };
@@ -2742,9 +2748,17 @@ async function _fv3d_saveRosterToCloudAndLocal(){
     console.warn("Kunde inte spara elevlista lokalt:", e);
   }
 
+  // Feedback direkt (även om moln saknas)
+  if (status) status.textContent = `✅ Sparat lokalt (${tokens.length} elever) – kopplat till bank: ${targetBankId}.`;
+
+  if (meta) {
+    const nm = clickedBankName ? String(clickedBankName) : "Moln-bank";
+    meta.textContent = `${nm} (${clickedBankId || "-"}) – Aktiv bank för sparning: ${targetBankId}`;
+  }
+
   // 2) Spara tokens i molnbanken + skapa students/{token} docs
   if (!_fv3d_hasFirebaseReady() || !_fv3d_hasTeacher()) {
-    if (status) status.textContent = "✅ Sparat lokalt. (Logga in för att spara tokens i molnet.)";
+    if (status) status.textContent = `✅ Sparat lokalt (${tokens.length} elever). (Logga in för att spara tokens i molnet.)`;
     return;
   }
 
@@ -2755,7 +2769,7 @@ async function _fv3d_saveRosterToCloudAndLocal(){
       .collection(CLOUD_ROOT_COLLECTION)
       .doc(String(currentTeacherUser.uid))
       .collection(CLOUD_BANKS_SUBCOLLECTION)
-      .doc(String(bankId));
+      .doc(String(targetBankId));
 
     await ref.set(
       {
@@ -2765,7 +2779,6 @@ async function _fv3d_saveRosterToCloudAndLocal(){
       { merge: true }
     );
 
-    // Skapa/uppdatera students-subcollection (token-only)
     const batch = firebaseDbInstance.batch();
     const studentsCol = ref.collection("students");
 
@@ -2787,7 +2800,8 @@ async function _fv3d_saveRosterToCloudAndLocal(){
 
     await batch.commit();
 
-    if (status) status.textContent = `✅ Sparat: ${tokens.length} tokens i molnet + elevinfo lokalt.`;
+    if (status) status.textContent = `✅ Sparat i molnet + lokalt: ${tokens.length} elever till aktiv bank (${targetBankId}).`;
+    alert(`Sparat! ${tokens.length} elever sparade till aktiv bank.\nBank: ${targetBankId}`);
   } catch (e) {
     console.error("Kunde inte spara tokens i molnet:", e);
     if (status) status.textContent = "⚠️ Sparat lokalt, men kunde inte spara i molnet (se konsol).";
@@ -2823,9 +2837,10 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents }){
 
   students.forEach((st)=> grid.appendChild(_fv3d_makeRosterCard(st)));
 
+  const activeId = _fv3d_activeBankId();
   if (meta) {
     const nm = bankName ? String(bankName) : "Moln-bank";
-    meta.textContent = `${nm} (${bankId}) – “Spara” sparar tokens i molnet och info lokalt kopplat till banken.`;
+    meta.textContent = `${nm} (${bankId}) – Aktiv bank för sparning: ${activeId || "(ingen aktiv ännu)"}`;
   }
 
   if (btnAddBottom && grid) {
@@ -3093,7 +3108,13 @@ function _fv3d_bind(){
       if (del) { e.preventDefault(); await _fv3d_delete(String(del)); return; }
 
       const ros = t.getAttribute("data-fv3d-roster");
-      if (ros) { e.preventDefault(); await _fv3d_openRosterInline(String(ros)); return; }
+      if (ros) {
+        e.preventDefault();
+        // Viktigt: koppla elevlistan till banken genom att aktivera den först
+        try { await _fv3d_activate(String(ros)); } catch {}
+        await _fv3d_openRosterInline(String(ros));
+        return;
+      }
     });
   }
 
