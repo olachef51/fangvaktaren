@@ -2284,12 +2284,12 @@ async function handleGoogleLogout() {
 
 
 
-<!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (ROBUST LOAD) -->
+<!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (ROBUST LOAD + SAVE ROSTER) -->
 <script>
 "use strict";
 
 /* =========================
-   3D – Robust moln-UI + inline elevlista
+   3D – Robust moln-UI + inline elevlista-ruta (med Spara)
    ========================= */
 
 function _fv3d_escape(s){
@@ -2399,7 +2399,6 @@ function _fv3d_ensureStyles(){
     }
     #fv3dRosterMeta{ margin-top:4px; }
 
-    /* Horisontell elevlista (sidscroll) */
     #fv3dRosterGrid{
       display:grid;
       grid-auto-flow:row;
@@ -2407,7 +2406,6 @@ function _fv3d_ensureStyles(){
       margin-top:10px;
     }
 
-    /* ✅ Varje elevruta = EN rad: namn | klass | epost | token | delete */
     .fv3d-roster-card{
       border-radius:12px;
       border:1px solid rgba(31,41,55,1);
@@ -2428,10 +2426,7 @@ function _fv3d_ensureStyles(){
       gap:8px;
       min-width:0;
     }
-
-    .fv3d-roster-row .input{
-      min-width:0;
-    }
+    .fv3d-roster-row .input{ min-width:0; }
 
     .fv3d-field-name{ flex: 2 1 220px; }
     .fv3d-field-klass{ flex: 1 1 120px; }
@@ -2455,6 +2450,16 @@ function _fv3d_ensureStyles(){
       font-size:.74rem;
       border-radius:999px;
     }
+
+    #fv3dRosterBottom{
+      display:flex;
+      justify-content:flex-end;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:10px;
+      align-items:center;
+    }
+    #fv3dRosterStatus{ margin-top:8px; }
   `;
   document.head.appendChild(st);
 }
@@ -2554,16 +2559,22 @@ function _fv3d_ensureRosterBox(){
   box.innerHTML = `
     <div id="fv3dRosterTop">
       <div>
-        <h3 style="margin:0;">Elevlista (lokalt)</h3>
+        <h3 style="margin:0;">Elevlista (lokalt) + tokens (moln)</h3>
         <div id="fv3dRosterMeta" class="mini">-</div>
       </div>
       <div class="fv3d-actions">
-        <button id="fv3dRosterAdd" class="btn fv3d-btn-xs btn-primary" type="button">➕ Lägg till elev</button>
+        <button id="fv3dRosterSave" class="btn fv3d-btn-xs btn-primary" type="button">Spara</button>
         <button id="fv3dRosterClose" class="btn fv3d-btn-xs" type="button">Stäng</button>
       </div>
     </div>
 
     <div id="fv3dRosterGrid"></div>
+
+    <div id="fv3dRosterBottom">
+      <button id="fv3dRosterAddBottom" class="btn fv3d-btn-xs btn-primary" type="button">➕ Lägg till elev</button>
+    </div>
+
+    <div id="fv3dRosterStatus" class="mini"></div>
   `;
 
   container.appendChild(box);
@@ -2574,7 +2585,6 @@ function _fv3d_ensureRosterBox(){
   return box;
 }
 
-/* ✅ NYTT: en-rads layout i varje elevruta */
 function _fv3d_makeRosterCard(data){
   const card = document.createElement("div");
   card.className = "fv3d-roster-card";
@@ -2626,7 +2636,7 @@ function _fv3d_makeRosterCard(data){
     name: name.value.trim(),
     klass: klass.value.trim(),
     email: email.value.trim(),
-    token: token.value.trim()
+    token: (token.value || "").trim()
   });
 
   return card;
@@ -2657,11 +2667,141 @@ function _fv3d_loadLocalRosterMap(){
   return {};
 }
 
+function _fv3d_saveLocalRosterMap(mapObj){
+  if (typeof saveTeacherRosterMap === "function") {
+    try { saveTeacherRosterMap(mapObj || {}); return true; } catch {}
+  }
+
+  const keys = [];
+  try { if (typeof TEACHER_LOCAL_ROSTER_KEY !== "undefined") keys.push(TEACHER_LOCAL_ROSTER_KEY); } catch {}
+  try { if (typeof STORAGE_KEY !== "undefined") keys.push(STORAGE_KEY + "::teacherRosterByBankId_v2"); } catch {}
+  keys.push("fangvaktaren-v17::teacherRosterByBankId_v2");
+
+  for (const k of keys) {
+    try { localStorage.setItem(k, JSON.stringify(mapObj || {})); return true; } catch {}
+  }
+  return false;
+}
+
+function _fv3d_collectRosterFromUI(){
+  const box = document.getElementById("fv3dRosterBox");
+  const grid = document.getElementById("fv3dRosterGrid");
+  if (!box || !grid) return { rosterLocal: [], tokens: [] };
+
+  const cards = Array.from(grid.children || []);
+  const rosterLocal = cards
+    .map((c)=> (typeof c.getRosterData === "function" ? c.getRosterData() : null))
+    .filter(Boolean)
+    .map((r)=>{
+      let tk = (r.token || "").trim();
+      if (!tk) tk = _fv3d_genToken(10);
+      return {
+        name: (r.name || "").trim(),
+        klass: (r.klass || "").trim(),
+        email: (r.email || "").trim(),
+        token: tk
+      };
+    });
+
+  const tokens = rosterLocal.map(r=> String(r.token || "").trim()).filter(Boolean);
+  return { rosterLocal, tokens };
+}
+
+async function _fv3d_saveRosterToCloudAndLocal(){
+  const box = document.getElementById("fv3dRosterBox");
+  const status = document.getElementById("fv3dRosterStatus");
+  if (!box) return;
+
+  const bankId = String(box.dataset.bankId || "");
+  const bankName = String(box.dataset.bankName || "");
+
+  if (!bankId) {
+    if (status) status.textContent = "⚠️ Ingen bank vald.";
+    return;
+  }
+
+  const { rosterLocal, tokens } = _fv3d_collectRosterFromUI();
+
+  const tokenSet = new Set(tokens);
+  if (tokens.length !== tokenSet.size) {
+    if (status) status.textContent = "⚠️ Dubbla tokens finns. Ta bort en elev och lägg till ny.";
+    alert("Du har dubbla tokens i listan. Ta bort en elevruta och lägg till en ny (ny token skapas).");
+    return;
+  }
+
+  // 1) Spara lokalt kopplat till bankId
+  try {
+    const map = _fv3d_loadLocalRosterMap();
+    map[bankId] = {
+      bankName: bankName || (map[bankId] && map[bankId].bankName) || "",
+      savedAt: new Date().toISOString(),
+      students: rosterLocal
+    };
+    _fv3d_saveLocalRosterMap(map);
+  } catch (e) {
+    console.warn("Kunde inte spara elevlista lokalt:", e);
+  }
+
+  // 2) Spara tokens i molnbanken + skapa students/{token} docs
+  if (!_fv3d_hasFirebaseReady() || !_fv3d_hasTeacher()) {
+    if (status) status.textContent = "✅ Sparat lokalt. (Logga in för att spara tokens i molnet.)";
+    return;
+  }
+
+  try {
+    if (status) status.textContent = "Sparar tokens i molnet…";
+
+    const ref = firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION)
+      .doc(String(currentTeacherUser.uid))
+      .collection(CLOUD_BANKS_SUBCOLLECTION)
+      .doc(String(bankId));
+
+    await ref.set(
+      {
+        rosterTokens: tokens,
+        rosterUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    // Skapa/uppdatera students-subcollection (token-only)
+    const batch = firebaseDbInstance.batch();
+    const studentsCol = ref.collection("students");
+
+    tokens.forEach((tkn)=>{
+      const sdoc = studentsCol.doc(String(tkn));
+      batch.set(
+        sdoc,
+        {
+          token: String(tkn),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          lastResult: null,
+          progression: { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} },
+          best: { E: 0, C: 0, A: 0 }
+        },
+        { merge: true }
+      );
+    });
+
+    await batch.commit();
+
+    if (status) status.textContent = `✅ Sparat: ${tokens.length} tokens i molnet + elevinfo lokalt.`;
+  } catch (e) {
+    console.error("Kunde inte spara tokens i molnet:", e);
+    if (status) status.textContent = "⚠️ Sparat lokalt, men kunde inte spara i molnet (se konsol).";
+    alert("Sparade elevlistan lokalt, men kunde inte spara tokens i molnet. Se konsolen för detaljer.");
+  }
+}
+
 function _fv3d_showRosterBox({ bankId, bankName, initialStudents }){
   const box = _fv3d_ensureRosterBox();
   const grid = document.getElementById("fv3dRosterGrid");
   const meta = document.getElementById("fv3dRosterMeta");
-  const btnAdd = document.getElementById("fv3dRosterAdd");
+  const status = document.getElementById("fv3dRosterStatus");
+  const btnAddBottom = document.getElementById("fv3dRosterAddBottom");
+  const btnSave = document.getElementById("fv3dRosterSave");
 
   if (!grid) return;
 
@@ -2669,13 +2809,13 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents }){
   box.dataset.bankName = String(bankName || "");
 
   grid.innerHTML = "";
+  if (status) status.textContent = "";
 
   const students = Array.isArray(initialStudents) ? initialStudents.slice() : [];
 
   if (!students.length) {
     for (let i = 0; i < 10; i++) students.push({ name:"", klass:"", email:"", token:_fv3d_genToken(10) });
   }
-
   if (students.length < 10) {
     const addN = 10 - students.length;
     for (let i = 0; i < addN; i++) students.push({ name:"", klass:"", email:"", token:_fv3d_genToken(10) });
@@ -2685,12 +2825,18 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents }){
 
   if (meta) {
     const nm = bankName ? String(bankName) : "Moln-bank";
-    meta.textContent = `${nm} (${bankId}) – redigera elever här (lokalt).`;
+    meta.textContent = `${nm} (${bankId}) – “Spara” sparar tokens i molnet och info lokalt kopplat till banken.`;
   }
 
-  if (btnAdd) {
-    btnAdd.onclick = () => {
+  if (btnAddBottom && grid) {
+    btnAddBottom.onclick = () => {
       grid.appendChild(_fv3d_makeRosterCard({ name:"", klass:"", email:"", token:_fv3d_genToken(10) }));
+    };
+  }
+
+  if (btnSave) {
+    btnSave.onclick = async () => {
+      await _fv3d_saveRosterToCloudAndLocal();
     };
   }
 
@@ -2700,6 +2846,7 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents }){
 async function _fv3d_openRosterInline(bankId){
   _fv3d_ensureStyles();
   _fv3d_ensureRosterBox();
+
   const localMap = _fv3d_loadLocalRosterMap();
   const localStudents = (localMap[bankId] && Array.isArray(localMap[bankId].students)) ? localMap[bankId].students : [];
   const localName = (localMap[bankId] && localMap[bankId].bankName) ? localMap[bankId].bankName : "";
@@ -2981,7 +3128,7 @@ function _fv3d_bind(){
 
 document.addEventListener("DOMContentLoaded", _fv3d_bind);
 </script>
-<!-- slut SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (ROBUST LOAD) -->
+<!-- slut SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (ROBUST LOAD + SAVE ROSTER) -->
 
 
 
