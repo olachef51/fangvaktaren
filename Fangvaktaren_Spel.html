@@ -2288,6 +2288,13 @@ async function handleGoogleLogout() {
 <script>
 "use strict";
 
+/* =========================
+   3D – Patch:
+   - Säkerställer att knappen "Ladda frågebank från molnet" alltid har en fungerande loader
+   - Om loadCloudBanksList / loadCloudBanksListV4 saknas i andra sektioner skapas fallback här
+   - Rensar gamla listeners genom att klona knappen innan vi binder click
+   ========================= */
+
 function ensureCloudAndRosterStyles() {
   if (document.getElementById("fv-cloud-roster-styles")) return;
   const st = document.createElement("style");
@@ -2350,21 +2357,6 @@ function showLoadCloudBanksButtonIfPresent() {
   if (btn.style && btn.style.display === "none") btn.style.display = "";
 }
 
-function getLoadCloudBanksFn() {
-  if (typeof window.loadCloudBanksList === "function") return window.loadCloudBanksList;
-  if (typeof window.loadCloudBanksListV4 === "function") return window.loadCloudBanksListV4;
-  return null;
-}
-
-function callLoadCloudBanksList() {
-  const fn = getLoadCloudBanksFn();
-  if (!fn) {
-    alert("Hittar ingen funktion för att ladda moln-banker (loadCloudBanksList / loadCloudBanksListV4 saknas).");
-    return;
-  }
-  try { return fn(); } catch (e) { console.error("Fel vid laddning av moln-banker:", e); }
-}
-
 function forceReplaceButtonToClearOldListeners(btnId) {
   const btn = document.getElementById(btnId);
   if (!btn) return null;
@@ -2374,18 +2366,6 @@ function forceReplaceButtonToClearOldListeners(btnId) {
   if (clone.dataset) clone.dataset.fvReplaced = "1";
   btn.parentNode.replaceChild(clone, btn);
   return clone;
-}
-
-function safeAttachLoadCloudBanksButton() {
-  showLoadCloudBanksButtonIfPresent();
-
-  const b = forceReplaceButtonToClearOldListeners("btnLoadCloudBanks");
-  if (!b) return;
-
-  b.addEventListener("click", () => {
-    showLoadCloudBanksButtonIfPresent();
-    callLoadCloudBanksList();
-  });
 }
 
 function markActiveCloudBankUI() {
@@ -2416,43 +2396,235 @@ function markActiveCloudBankUI() {
   } catch {}
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  ensureCloudAndRosterStyles();
-  safeAttachLoadCloudBanksButton();
+/* =========================
+   3D – Fallback loader om loadCloudBanksList(V4) saknas
+   ========================= */
 
-  setTimeout(() => { try { safeAttachLoadCloudBanksButton(); } catch {} }, 0);
-  setTimeout(() => { try { safeAttachLoadCloudBanksButton(); } catch {} }, 600);
+function getOrCreateCloudListHost() {
+  let host =
+    document.getElementById("cloudBanksList") ||
+    document.getElementById("cloudBanksListV4") ||
+    document.getElementById("cloudBanksHost");
 
-  document.addEventListener("click", (e) => {
-    const target = e.target && e.target.closest ? e.target.closest("[data-bank-id],[data-cloud-bank-id]") : null;
-    if (!target) return;
+  if (host) return host;
+
+  const btn = document.getElementById("btnLoadCloudBanks");
+  if (!btn) return null;
+
+  const card = btn.closest(".card") || btn.parentElement;
+  if (!card) return null;
+
+  const h = document.createElement("div");
+  h.style.marginTop = "10px";
+
+  const title = document.createElement("div");
+  title.className = "mini";
+  title.textContent = "Moln-banker:";
+  h.appendChild(title);
+
+  const ul = document.createElement("ul");
+  ul.id = "cloudBanksList";
+  ul.className = "question-list";
+  ul.style.marginTop = "6px";
+  h.appendChild(ul);
+
+  card.appendChild(h);
+  return ul;
+}
+
+function setCloudHostStatus(text) {
+  const host = getOrCreateCloudListHost();
+  if (!host) return;
+  host.innerHTML = "";
+  const li = document.createElement("li");
+  li.className = "mini";
+  li.textContent = text;
+  host.appendChild(li);
+}
+
+async function fvFallbackLoadCloudBanksList() {
+  showLoadCloudBanksButtonIfPresent();
+
+  if (!firebaseDbInstance) {
+    setCloudHostStatus("⚠️ Firebase DB saknas (initFirebase körs inte eller saknar bibliotek).");
+    return;
+  }
+  if (!currentTeacherUser) {
+    setCloudHostStatus("☁️ Inte inloggad – logga in med Google först.");
+    return;
+  }
+
+  const host = getOrCreateCloudListHost();
+  if (!host) {
+    alert("Hittar ingen plats att visa moln-banker (saknar cloudBanksList + kan inte skapa).");
+    return;
+  }
+
+  setCloudHostStatus("Laddar moln-banker...");
+
+  try {
+    const col = firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION)
+      .doc(String(currentTeacherUser.uid))
+      .collection(CLOUD_BANKS_SUBCOLLECTION);
+
+    const snap = await col.get();
+
+    const docs = [];
+    snap.forEach((d) => {
+      const data = d.data() || {};
+      docs.push({ id: d.id, data });
+    });
+
+    docs.sort((a, b) => {
+      const ta = a.data && a.data.createdAt && a.data.createdAt.toMillis ? a.data.createdAt.toMillis() : 0;
+      const tb = b.data && b.data.createdAt && b.data.createdAt.toMillis ? b.data.createdAt.toMillis() : 0;
+      return tb - ta;
+    });
+
+    host.innerHTML = "";
+
+    if (!docs.length) {
+      const li = document.createElement("li");
+      li.className = "mini";
+      li.textContent = "Inga sparade moln-banker ännu.";
+      host.appendChild(li);
+      return;
+    }
+
+    docs.forEach((row) => {
+      const data = row.data || {};
+      const name = data.name || "Moln-bank";
+      const bank = data.bank || {};
+      const mcqCount = Array.isArray(bank.mcq) ? bank.mcq.length : 0;
+      const imgCount = Array.isArray(bank.img) ? bank.img.length : 0;
+      const dragCount = Array.isArray(bank.drag) ? bank.drag.length : 0;
+      const total = mcqCount + imgCount + dragCount;
+
+      const li = document.createElement("li");
+      li.className = "list-item";
+      li.setAttribute("data-bank-id", row.id);
+
+      li.innerHTML = `
+        <div class="list-main">
+          <div class="q-text">${escapeHtml(name)} <span class="mini">(${total} frågor)</span></div>
+          <div class="q-meta">MCQ: ${mcqCount}, bild: ${imgCount}, drag: ${dragCount}</div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button class="btn btn-sm btn-primary" type="button" data-activate-bank="${row.id}">Aktivera</button>
+        </div>
+      `;
+
+      host.appendChild(li);
+    });
+
+    host.querySelectorAll("button[data-activate-bank]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const bankId = btn.getAttribute("data-activate-bank");
+        if (!bankId) return;
+
+        try {
+          const ref = firebaseDbInstance
+            .collection(CLOUD_ROOT_COLLECTION)
+            .doc(String(currentTeacherUser.uid))
+            .collection(CLOUD_BANKS_SUBCOLLECTION)
+            .doc(String(bankId));
+
+          const doc = await ref.get();
+          if (!doc.exists) {
+            alert("Kunde inte hitta banken (den kanske är borttagen).");
+            return;
+          }
+
+          const data = doc.data() || {};
+          const bank = ensureBankShape(data.bank || {});
+          const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
+
+          setBankInState(bank);
+
+          const s = loadState();
+          s.goalsMap = goalsMap;
+          saveState(s);
+
+          setActiveBankMeta({
+            mode: "teacher",
+            ownerUid: String(currentTeacherUser.uid),
+            bankId: String(bankId),
+            publicId: ""
+          });
+
+          window.activeCloudBankId = String(bankId);
+
+          try { renderGoalsList(); } catch {}
+          try { renderMcqList(); } catch {}
+          try { renderImgList(); } catch {}
+          try { renderDragList(); } catch {}
+          try { populateGoalSelect("#mcqGoalPart"); } catch {}
+          try { populateGoalSelect("#imgGoalPart"); } catch {}
+          try { populateGoalSelect("#dragGoalPart"); } catch {}
+          try { populateGoalSelect("#mcqJsonGoalPart"); } catch {}
+          try { syncUI(); } catch {}
+          try { updateBankStatusUI(); } catch {}
+
+          try { markActiveCloudBankUI(); } catch {}
+        } catch (e) {
+          console.error("Fel vid aktivering av bank:", e);
+          alert("Kunde inte aktivera banken. Se konsolen för detaljer.");
+        }
+      });
+    });
+
     try { markActiveCloudBankUI(); } catch {}
+  } catch (e) {
+    console.error("Fel vid laddning av moln-banker:", e);
+    if (isPermissionDenied(e)) {
+      setCloudHostStatus("⛔ Saknar behörighet (permission-denied). Kolla Firestore rules för teachers/{uid}/banks.");
+    } else {
+      setCloudHostStatus("Fel vid laddning av moln-banker. Se konsolen för detaljer.");
+    }
+  }
+}
+
+function ensureCloudLoaderFnsExist() {
+  if (typeof window.loadCloudBanksListV4 !== "function") {
+    window.loadCloudBanksListV4 = fvFallbackLoadCloudBanksList;
+  }
+  if (typeof window.loadCloudBanksList !== "function") {
+    window.loadCloudBanksList = window.loadCloudBanksListV4;
+  }
+}
+
+function getLoadCloudBanksFn() {
+  if (typeof window.loadCloudBanksList === "function") return window.loadCloudBanksList;
+  if (typeof window.loadCloudBanksListV4 === "function") return window.loadCloudBanksListV4;
+  return null;
+}
+
+function callLoadCloudBanksList() {
+  const fn = getLoadCloudBanksFn();
+  if (!fn) {
+    alert("Hittar ingen funktion för att ladda moln-banker (loadCloudBanksList / loadCloudBanksListV4 saknas).");
+    return;
+  }
+  try { return fn(); } catch (e) { console.error("Fel vid laddning av moln-banker:", e); }
+}
+
+function safeAttachLoadCloudBanksButton() {
+  showLoadCloudBanksButtonIfPresent();
+  ensureCloudLoaderFnsExist();
+
+  const b = forceReplaceButtonToClearOldListeners("btnLoadCloudBanks");
+  if (!b) return;
+
+  b.addEventListener("click", () => {
+    showLoadCloudBanksButtonIfPresent();
+    callLoadCloudBanksList();
   });
+}
 
-  try {
-    if (typeof window.loadCloudBanksList === "function" && !window.loadCloudBanksList.__fv_hooked) {
-      const orig = window.loadCloudBanksList;
-      window.loadCloudBanksList = async function (...args) {
-        const res = await orig.apply(this, args);
-        try { markActiveCloudBankUI(); } catch {}
-        return res;
-      };
-      window.loadCloudBanksList.__fv_hooked = true;
-    }
-  } catch {}
-
-  try {
-    if (typeof window.loadCloudBanksListV4 === "function" && !window.loadCloudBanksListV4.__fv_hooked) {
-      const orig2 = window.loadCloudBanksListV4;
-      window.loadCloudBanksListV4 = async function (...args) {
-        const res = await orig2.apply(this, args);
-        try { markActiveCloudBankUI(); } catch {}
-        return res;
-      };
-      window.loadCloudBanksListV4.__fv_hooked = true;
-    }
-  } catch {}
-});
+/* =========================
+   3D – Modal: Spara molnbank + elevlista
+   ========================= */
 
 function ensureBankRosterModal() {
   ensureCloudAndRosterStyles();
@@ -2823,10 +2995,15 @@ function openSaveBankRosterFlow() {
   modal.classList.remove("hidden");
 }
 
+/* =========================
+   3D – Cloud UI (uppdaterad)
+   ========================= */
+
 function setupCloudBankUI() {
   ensureCloudAndRosterStyles();
   showLoadCloudBanksButtonIfPresent();
 
+  ensureCloudLoaderFnsExist();
   safeAttachLoadCloudBanksButton();
 
   const btnSave = document.getElementById("btnSaveToCloud");
@@ -2885,6 +3062,49 @@ function setupCloudBankUI() {
     });
   }
 }
+
+/* =========================
+   3D – Init hooks
+   ========================= */
+
+document.addEventListener("DOMContentLoaded", () => {
+  ensureCloudAndRosterStyles();
+  ensureCloudLoaderFnsExist();
+  safeAttachLoadCloudBanksButton();
+
+  setTimeout(() => { try { safeAttachLoadCloudBanksButton(); } catch {} }, 0);
+  setTimeout(() => { try { safeAttachLoadCloudBanksButton(); } catch {} }, 600);
+
+  document.addEventListener("click", (e) => {
+    const target = e.target && e.target.closest ? e.target.closest("[data-bank-id],[data-cloud-bank-id]") : null;
+    if (!target) return;
+    try { markActiveCloudBankUI(); } catch {}
+  });
+
+  try {
+    if (typeof window.loadCloudBanksList === "function" && !window.loadCloudBanksList.__fv_hooked) {
+      const orig = window.loadCloudBanksList;
+      window.loadCloudBanksList = async function (...args) {
+        const res = await orig.apply(this, args);
+        try { markActiveCloudBankUI(); } catch {}
+        return res;
+      };
+      window.loadCloudBanksList.__fv_hooked = true;
+    }
+  } catch {}
+
+  try {
+    if (typeof window.loadCloudBanksListV4 === "function" && !window.loadCloudBanksListV4.__fv_hooked) {
+      const orig2 = window.loadCloudBanksListV4;
+      window.loadCloudBanksListV4 = async function (...args) {
+        const res = await orig2.apply(this, args);
+        try { markActiveCloudBankUI(); } catch {}
+        return res;
+      };
+      window.loadCloudBanksListV4.__fv_hooked = true;
+    }
+  } catch {}
+});
 </script>
 <!-- slut SEKTION 3D: MOLN-BANK + ELEVLISTA & TOKENS (UI v2) -->
 
