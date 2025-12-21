@@ -4932,7 +4932,10 @@ async function saveCurrentResultToFirestore() {
 <!-- start SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, public autoload) -->
 <script>
 "use strict";
-/* Ändrat: Robust public-autoload med vänt/retry på firebaseDbInstance + dedupe (ingen trippel-laddning) + säkrar activeBank/token före inlämning. Omskrivna rader: ca 95 */
+/* ÄNDRING:
+- Lägger in retry-loop som väntar in firebaseDbInstance och auto-laddar public_banks vid ?public=... (så frågorna finns direkt vid start).
+- Synkar currentTeacherUser + window.currentTeacherUser konsekvent.
+Omskrivna rader: ca 78 */
 
 (function FV3L(){
   if (window.__fv3l_ran) return;
@@ -4940,7 +4943,6 @@ async function saveCurrentResultToFirestore() {
 
   function fvQS(sel){ try { return document.querySelector(sel); } catch { return null; } }
   function fvAll(sel){ try { return Array.from(document.querySelectorAll(sel)); } catch { return []; } }
-  function fvSleep(ms){ return new Promise(res => setTimeout(res, ms)); }
 
   function fvFindButtonByText(allNeedles){
     const needles = (allNeedles || []).map(s => String(s || "").toLowerCase()).filter(Boolean);
@@ -4958,12 +4960,21 @@ async function saveCurrentResultToFirestore() {
     if (!el || typeof fn !== "function") return false;
     if (el.dataset && el.dataset.fvBound === "1") return true;
     try{
-      el.addEventListener("click", (e)=>{ try{ fn(e); } catch(err){ console.error("FV3L click handler error:", err); }});
+      el.addEventListener("click", (e)=>{ try{ fn(e); } catch(err){ console.error("FV3L click handler error:", err); }} );
       if (el.dataset) el.dataset.fvBound = "1";
       return true;
     }catch{
       return false;
     }
+  }
+
+  function fvSleep(ms){ return new Promise(r => setTimeout(r, ms || 0)); }
+
+  function fvHasPublicParam(){
+    try{
+      if (typeof getQueryParam !== "function") return false;
+      return !!String(getQueryParam("public") || "").trim();
+    }catch{ return false; }
   }
 
   function fvEnsureStateTokenFromUrl(){
@@ -5006,99 +5017,60 @@ async function saveCurrentResultToFirestore() {
     }
   }
 
-  async function fvWaitForFirestoreDb(maxMs){
-    const deadline = Date.now() + (maxMs || 3500);
-
-    // försök initiera firebase om den inte är initierad ännu
-    try{
-      if (!window.__fv3l_firebaseInitDone) {
-        if (typeof initFirebase === "function") {
-          try{
-            if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) {
-              window.__fv3l_firebaseInitDone = true;
-            } else {
-              initFirebase();
-              window.__fv3l_firebaseInitDone = true;
-            }
-          }catch{}
-        }
-      }
-    }catch{}
-
-    while (Date.now() < deadline){
-      try{
-        if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return firebaseDbInstance;
-      }catch{}
-      await fvSleep(120);
-    }
-    return null;
-  }
-
   async function fvLoadPublicBankIfNeeded(){
     try{
       if (typeof getQueryParam !== "function") return;
       const publicId = (getQueryParam("public") || "").trim();
       if (!publicId) return;
 
-      // dedupe + undvik parallella calls
-      const keyLoaded = "__fv3l_loaded_publicId";
-      const keyProm = "__fv3l_publicLoadPromise";
+      if (!window.firebaseDbInstance) return;
 
-      if (window[keyLoaded] && String(window[keyLoaded]) === String(publicId)) return;
-      if (window[keyProm]) return await window[keyProm];
+      const key = "__fv3l_loaded_publicId";
+      if (window[key] && String(window[key]) === String(publicId)) return;
 
-      window[keyProm] = (async ()=>{
-        const db = await fvWaitForFirestoreDb(4500);
-        if (!db) return;
+      const ref = window.firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
+      const snap = await ref.get();
+      if (!snap.exists) {
+        console.warn("Public bank saknas:", publicId);
+        return;
+      }
 
-        const ref = db.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
-        const snap = await ref.get();
-        if (!snap.exists) {
-          console.warn("Public bank saknas:", publicId);
-          return;
+      const data = snap.data() || {};
+      const bank = (data.bank ? ensureBankShape(data.bank) : ensureBankShape({}));
+      const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
+
+      try{
+        if (typeof loadState === "function" && typeof saveState === "function") {
+          const s = loadState();
+          s.bank = bank;
+          s.goalsMap = goalsMap;
+          s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s.activeBank || {}, {
+            mode:"public", publicId:String(publicId), ownerUid:"", bankId:""
+          });
+          saveState(s);
         }
+      }catch(e2){
+        console.warn("Kunde inte skriva public bank till state:", e2);
+      }
 
-        const data = snap.data() || {};
-        const bank = (data.bank ? ensureBankShape(data.bank) : ensureBankShape({}));
-        const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
+      try { if (typeof renderGoalsList === "function") renderGoalsList(); } catch {}
+      try { if (typeof renderMcqList === "function") renderMcqList(); } catch {}
+      try { if (typeof renderImgList === "function") renderImgList(); } catch {}
+      try { if (typeof renderDragList === "function") renderDragList(); } catch {}
+      try { if (typeof syncUI === "function") syncUI(); } catch {}
+      try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
 
-        try{
-          if (typeof loadState === "function" && typeof saveState === "function") {
-            const s = loadState();
-            s.bank = bank;
-            s.goalsMap = goalsMap;
-            s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s.activeBank || {}, {
-              mode:"public", publicId:String(publicId), ownerUid:"", bankId:""
-            });
-            saveState(s);
-          }
-        }catch(e2){
-          console.warn("Kunde inte skriva public bank till state:", e2);
-        }
-
-        try { if (typeof renderGoalsList === "function") renderGoalsList(); } catch {}
-        try { if (typeof renderMcqList === "function") renderMcqList(); } catch {}
-        try { if (typeof renderImgList === "function") renderImgList(); } catch {}
-        try { if (typeof renderDragList === "function") renderDragList(); } catch {}
-        try { if (typeof syncUI === "function") syncUI(); } catch {}
-        try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
-
-        window[keyLoaded] = String(publicId);
-      })();
-
-      try { await window[keyProm]; } finally { try { window[keyProm] = null; } catch {} }
+      window[key] = String(publicId);
+      window.__fv3l_publicLoaded = true;
     }catch(e){
       console.warn("FV3L autoLoad public bank misslyckades:", e);
-      try { window.__fv3l_publicLoadPromise = null; } catch {}
     }
   }
 
   function fvEnsureTeacherMetaIfPossible(){
     try{
-      const hasTeacher = !!(window.currentTeacherUser && window.currentTeacherUser.uid) || !!(typeof currentTeacherUser !== "undefined" && currentTeacherUser && currentTeacherUser.uid);
+      const hasTeacher = !!(window.currentTeacherUser && window.currentTeacherUser.uid);
       if (!hasTeacher) return;
-
-      const uid = (window.currentTeacherUser && window.currentTeacherUser.uid) ? String(window.currentTeacherUser.uid) : String(currentTeacherUser.uid);
 
       let bankId = "";
       try{
@@ -5111,12 +5083,12 @@ async function saveCurrentResultToFirestore() {
       if (!bankId) return;
 
       if (typeof setActiveBankMeta === "function"){
-        setActiveBankMeta({ mode:"teacher", ownerUid:uid, bankId:String(bankId), publicId:"" });
+        setActiveBankMeta({ mode:"teacher", ownerUid:String(window.currentTeacherUser.uid), bankId:String(bankId), publicId:"" });
       } else if (typeof loadState === "function" && typeof saveState === "function"){
         const s2 = loadState();
         s2.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s2.activeBank || {}, {
           mode:"teacher",
-          ownerUid:uid,
+          ownerUid:String(window.currentTeacherUser.uid),
           bankId:String(bankId),
           publicId:""
         });
@@ -5165,6 +5137,37 @@ async function saveCurrentResultToFirestore() {
     }
   }
 
+  async function fvWaitForFirebaseDb(maxAttempts, delayMs){
+    const attempts = Math.max(1, parseInt(maxAttempts || 40, 10));
+    const delay = Math.max(50, parseInt(delayMs || 250, 10));
+
+    for (let i=0; i<attempts; i++){
+      try{
+        fvEnsureFirebaseInitOnce();
+        if (window.firebaseDbInstance) return true;
+      }catch{}
+      await fvSleep(delay);
+    }
+    return !!window.firebaseDbInstance;
+  }
+
+  async function fvEnsurePublicAutoload(){
+    try{
+      if (!fvHasPublicParam()) return;
+      if (window.__fv3l_publicLoaded) return;
+
+      fvEnsureStateTokenFromUrl();
+      fvEnsureActiveBankMetaFromUrl();
+
+      const ok = await fvWaitForFirebaseDb(40, 250);
+      if (!ok) return;
+
+      await fvLoadPublicBankIfNeeded();
+    }catch(e){
+      console.warn("FV3L ensure public autoload misslyckades:", e);
+    }
+  }
+
   function fvPatchSubmitToAutoMeta(){
     try{
       const fn = window.saveCurrentResultToFirestore;
@@ -5174,7 +5177,7 @@ async function saveCurrentResultToFirestore() {
       const wrapped = async function(){
         fvEnsureStateTokenFromUrl();
         fvEnsureActiveBankMetaFromUrl();
-        await fvLoadPublicBankIfNeeded();
+        await fvEnsurePublicAutoload();
         fvEnsureTeacherMetaIfPossible();
         return await fn();
       };
@@ -5192,17 +5195,19 @@ async function saveCurrentResultToFirestore() {
     fvEnsureStateTokenFromUrl();
     fvEnsureActiveBankMetaFromUrl();
 
-    await fvLoadPublicBankIfNeeded();
+    await fvEnsurePublicAutoload();
 
     fvPatchSubmitToAutoMeta();
 
     try{
-      if (typeof firebaseAuthInstance !== "undefined" && firebaseAuthInstance && typeof firebaseAuthInstance.onAuthStateChanged === "function"){
-        if (!firebaseAuthInstance.__fv3lHooked){
-          firebaseAuthInstance.__fv3lHooked = true;
-          firebaseAuthInstance.onAuthStateChanged((u)=>{
-            try{ window.currentTeacherUser = u || null; }catch{}
-            try{ currentTeacherUser = u || null; }catch{}
+      if (window.firebaseAuthInstance && typeof window.firebaseAuthInstance.onAuthStateChanged === "function"){
+        if (!window.firebaseAuthInstance.__fv3lHooked){
+          window.firebaseAuthInstance.__fv3lHooked = true;
+          window.firebaseAuthInstance.onAuthStateChanged((u)=>{
+            try{
+              window.currentTeacherUser = u || null;
+              try{ currentTeacherUser = window.currentTeacherUser; }catch{}
+            }catch{}
             fvEnsureTeacherMetaIfPossible();
           });
         }
@@ -5216,6 +5221,13 @@ async function saveCurrentResultToFirestore() {
 })();
 </script>
 <!-- slut SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, public autoload) -->
+
+
+
+
+
+
+
 
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
 
