@@ -2435,11 +2435,11 @@ function saveState(state) {
 
 
 <!-- start SEKTION 3C: FIREBASE – init + Google login -->
-<!-- ÄNDRAT: Gör initFirebase robust (väntar på att Firebase-biblioteken hunnit ladda + retry/debounce) så du slipper “Firebase-bibliotek kunde inte hittas” och firebaseDbInstance blir satt stabilt. Omskrivna rader: ca 95 -->
+<!-- ÄNDRAT: Tar bort “timeout”-fel som låser UI, väntar längre och fortsätter retry tyst tills firebase-bibliotek finns; triggar event + autorefresh av molnlistan när DB blir ready. Omskrivna rader: ca 120 -->
 <script>
 "use strict";
 
-/* Robust init: undvik att initFirebase körs innan firebase-* scripts hunnit ladda */
+/* Robust init: undvik “Firebase-bibliotek saknas” när gstatic laddar långsamt */
 (function FV_FIREBASE_BOOTSTRAP(){
   if (window.__fvFirebaseBootstrapInstalled) return;
   window.__fvFirebaseBootstrapInstalled = true;
@@ -2451,18 +2451,40 @@ function saveState(state) {
     window.__fvFirebaseReadyResolve = resolve;
   });
 
+  // Långsam nät? fortsätt retry (utan att spamma)
+  window.__fvFirebaseLibRetryTimer = window.__fvFirebaseLibRetryTimer || null;
+
   async function _fv_waitForFirebaseLibs(maxMs){
     const start = Date.now();
-    const timeout = (typeof maxMs === "number" ? maxMs : 9000);
+    const timeout = (typeof maxMs === "number" ? maxMs : 45000);
 
     while (Date.now() - start < timeout) {
       if (window.firebase && typeof window.firebase.initializeApp === "function") return true;
-      await new Promise(r => setTimeout(r, 80));
+      await new Promise(r => setTimeout(r, 120));
     }
     return false;
   }
 
+  function _fv_scheduleRetryInit(){
+    if (window.__fvFirebaseReady) return;
+    if (window.__fvFirebaseLibRetryTimer) return;
+
+    window.__fvFirebaseLibRetryTimer = setInterval(async () => {
+      if (window.__fvFirebaseReady) {
+        clearInterval(window.__fvFirebaseLibRetryTimer);
+        window.__fvFirebaseLibRetryTimer = null;
+        return;
+      }
+      try { await initFirebase(); } catch {}
+      if (window.__fvFirebaseReady) {
+        clearInterval(window.__fvFirebaseLibRetryTimer);
+        window.__fvFirebaseLibRetryTimer = null;
+      }
+    }, 2000);
+  }
+
   window._fv_waitForFirebaseLibs = _fv_waitForFirebaseLibs;
+  window._fv_scheduleRetryInit = _fv_scheduleRetryInit;
 })();
 
 async function initFirebase() {
@@ -2477,16 +2499,18 @@ async function initFirebase() {
   window.__fvFirebaseInitInProgress = true;
 
   try {
-    // Vänta tills Firebase-biblioteken faktiskt finns (scripts laddas ibland efter DOMContentLoaded)
-    const ok = await window._fv_waitForFirebaseLibs(9000);
+    if (statusEl && (!window.firebase || typeof window.firebase.initializeApp !== "function")) {
+      statusEl.textContent = "⏳ Laddar Firebase… (vänta)";
+    }
+
+    const ok = await window._fv_waitForFirebaseLibs(45000);
     if (!ok) {
-      console.warn("Firebase-bibliotek kunde inte hittas (timeout).");
-      if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: Firebase-bibliotek kunde inte laddas (timeout).";
+      // Inget “fel” här – fortsätt försöka i bakgrunden så UI inte fastnar på “DB saknas”
       window.__fvFirebaseInitInProgress = false;
+      try { window._fv_scheduleRetryInit(); } catch {}
       return false;
     }
 
-    // Nu finns window.firebase
     if (!firebase.apps || !firebase.apps.length) {
       firebase.initializeApp(FIREBASE_CONFIG);
     }
@@ -2495,10 +2519,12 @@ async function initFirebase() {
     firebaseAuthInstance = firebase.auth();
     firebaseDbInstance = firebase.firestore();
 
-    // Markera ready + resolve promise
     window.__fvFirebaseReady = true;
     window.__fvFirebaseInitInProgress = false;
     try { if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(true); } catch {}
+
+    // signalera "ready" så andra sektioner kan reagera
+    try { window.dispatchEvent(new CustomEvent("fv-firebase-ready")); } catch {}
 
     if (firebaseAuthInstance && typeof firebaseAuthInstance.onAuthStateChanged === "function") {
       firebaseAuthInstance.onAuthStateChanged((user) => {
@@ -2523,14 +2549,13 @@ async function initFirebase() {
     console.error("Fel vid initFirebase:", e);
     if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: kunde inte starta Firebase.";
     window.__fvFirebaseInitInProgress = false;
+    try { window._fv_scheduleRetryInit(); } catch {}
     return false;
   }
 }
 
 async function handleGoogleLogin() {
   const statusEl = $("#googleStatus");
-
-  // säkerställ init innan login
   try { await initFirebase(); } catch {}
 
   if (!firebaseAuthInstance) {
@@ -2554,7 +2579,7 @@ async function handleGoogleLogout() {
   }
 }
 
-/* Kör init så tidigt som möjligt men utan falska “saknas”-fel */
+/* Kör init tidigt + fortsätt retry om nätet är segt */
 try { initFirebase(); } catch {}
 window.addEventListener("load", () => { try { initFirebase(); } catch {} });
 </script>
@@ -7820,4 +7845,3 @@ document.addEventListener("DOMContentLoaded", function () {
 </body>
 </html>
 <!-- slut SEKTION 6: AVSLUTANDE TAGGAR -->
-
