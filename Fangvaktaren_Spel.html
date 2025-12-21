@@ -4784,154 +4784,220 @@ async function saveCurrentResultToFirestore() {
 </script>
 <!-- slut SEKTION 3K: INLÄMNING – spara resultat/progression via token (GDPR) -->
 
-<!-- start SEKTION 3L: PUBLIC AUTOLOAD + TOKEN INIT (elev utan inloggning) -->
-<!-- Ändrat: NY sektion som autoladdar public-bank via ?public= och sätter token via ?token=. Omskrivna rader: 0 (tillägg ca 165 rader). -->
+<!-- start SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, inlämning public) -->
 <script>
 "use strict";
+/* ÄNDRING: NY SEKTION 3L – binder lärarknappar robust + sätter activeBank meta från URL + patchar saveCurrentResultToFirestore så inlämning fungerar på public-länkar. Omskrivna rader: NY (ca 180). */
 
-/* =========================
-   3L – Auto-load public bank
-   URL:
-   - ?public=PUBLIC_ID   (ladda bank från public_banks)
-   - ?token=TOKEN        (sätt elevens token)
-   ========================= */
+(function FV3L(){
+  // Kör bara en gång
+  if (window.__fv3l_ran) return;
+  window.__fv3l_ran = true;
 
-function _fv3l_getParam(name){
-  try { return (typeof getQueryParam === "function") ? getQueryParam(name) : (new URL(location.href)).searchParams.get(name) || ""; }
-  catch { return ""; }
-}
+  function fvQS(sel){ try { return document.querySelector(sel); } catch { return null; } }
+  function fvAll(sel){ try { return Array.from(document.querySelectorAll(sel)); } catch { return []; } }
 
-function _fv3l_safeEnsureBankShape(bank){
-  try { return (typeof ensureBankShape === "function") ? ensureBankShape(bank) : (bank || { mcq:[], img:[], drag:[] }); }
-  catch { return (bank || { mcq:[], img:[], drag:[] }); }
-}
+  function fvFindButtonByText(allNeedles){
+    const needles = (allNeedles || []).map(s => String(s || "").toLowerCase()).filter(Boolean);
+    const btns = fvAll("button, [role='button'], a");
+    for (const b of btns){
+      const t = String(b.textContent || "").toLowerCase();
+      if (!t) continue;
+      const ok = needles.every(n => t.includes(n));
+      if (ok) return b;
+    }
+    return null;
+  }
 
-function _fv3l_setStudentTokenFromUrl(){
-  const token = String(_fv3l_getParam("token") || "").trim();
-  if (!token) return false;
-
-  try {
-    const s = loadState();
-    s.student = Object.assign({ name:"", klass:"", token:"" }, s.student || {});
-    if (!String(s.student.token || "").trim()) {
-      s.student.token = token;
-      saveState(s);
+  function fvBindClick(el, fn){
+    if (!el || typeof fn !== "function") return false;
+    if (el.dataset && el.dataset.fvBound === "1") return true;
+    try{
+      el.addEventListener("click", (e)=>{ try{ fn(e); } catch(err){ console.error("FV3L click handler error:", err); }});
+      if (el.dataset) el.dataset.fvBound = "1";
       return true;
-    }
-  } catch {}
-  return false;
-}
-
-function _fv3l_setActivePublicMeta(publicId, docData){
-  const sourceTeacherUid = docData && docData.sourceTeacherUid ? String(docData.sourceTeacherUid) : "";
-  const sourceBankId = docData && docData.sourceBankId ? String(docData.sourceBankId) : "";
-
-  try {
-    if (typeof setActiveBankMeta === "function") {
-      setActiveBankMeta({
-        mode: "public",
-        publicId: String(publicId || ""),
-        ownerUid: sourceTeacherUid,
-        bankId: sourceBankId
-      });
-      return;
-    }
-  } catch {}
-
-  try {
-    const s = loadState();
-    s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s.activeBank || {}, {
-      mode: "public",
-      publicId: String(publicId || ""),
-      ownerUid: sourceTeacherUid,
-      bankId: sourceBankId
-    });
-    saveState(s);
-  } catch {}
-}
-
-async function _fv3l_loadPublicBankIntoState(){
-  const publicId = String(_fv3l_getParam("public") || "").trim();
-  if (!publicId) return { loaded:false, reason:"no-public" };
-
-  // behöver firebaseDbInstance
-  if (!firebaseDbInstance) return { loaded:false, reason:"no-firebaseDbInstance" };
-
-  const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(publicId);
-  const snap = await ref.get();
-  if (!snap.exists) return { loaded:false, reason:"not-found" };
-
-  const data = snap.data() || {};
-  const bank = _fv3l_safeEnsureBankShape(data.bank || {});
-  const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
-
-  // skriv in i state (ERSÄTT bank, inte concat)
-  try {
-    const s = loadState();
-    s.bank = bank;
-    s.goalsMap = goalsMap;
-    saveState(s);
-  } catch {}
-
-  // sätt activeBank meta så 3K kan spara
-  _fv3l_setActivePublicMeta(publicId, data);
-
-  // försök uppdatera UI om funktionerna finns
-  try { if (typeof renderGoalsList === "function") renderGoalsList(); } catch {}
-  try { if (typeof renderMcqList === "function") renderMcqList(); } catch {}
-  try { if (typeof renderImgList === "function") renderImgList(); } catch {}
-  try { if (typeof renderDragList === "function") renderDragList(); } catch {}
-  try { if (typeof syncUI === "function") syncUI(); } catch {}
-  try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
-
-  return { loaded:true, publicId, name: data.name || "" };
-}
-
-async function _fv3l_bootstrapPublic(){
-  if (window.__fv3l_done) return;
-  window.__fv3l_done = true;
-
-  // 1) init firebase om inte redan gjort
-  try {
-    if (!firebaseDbInstance && typeof initFirebase === "function") initFirebase();
-  } catch {}
-
-  // 2) token från URL (sätts bara om tomt)
-  try { _fv3l_setStudentTokenFromUrl(); } catch {}
-
-  // 3) ladda public bank om public finns i URL
-  const hasPublic = !!String(_fv3l_getParam("public") || "").trim();
-  if (!hasPublic) return;
-
-  // Vänta en tick ifall initFirebase precis körts
-  if (!firebaseDbInstance) {
-    await new Promise(r => setTimeout(r, 0));
-  }
-
-  try {
-    const res = await _fv3l_loadPublicBankIntoState();
-
-    // liten statusindikator om du har någon plats i UI
-    const st = document.getElementById("bankStatus") || document.getElementById("status") || null;
-    if (st && res && res.loaded) {
-      st.textContent = `✅ Public bank laddad${res.name ? ": " + res.name : ""}`;
-    }
-  } catch (e) {
-    console.error("3L public autoload fel:", e);
-    const st = document.getElementById("bankStatus") || document.getElementById("status") || null;
-
-    // typiska elevfel: rules stoppar read
-    const msg = (e && e.message) ? String(e.message) : String(e || "");
-    if (st) st.textContent = "⚠️ Kunde inte ladda public bank. Se konsol.";
-    if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("insufficient")) {
-      alert("Public-bank kunde inte laddas p.g.a. Firestore-rättigheter (permission-denied). Kontrollera Firestore Rules för public_banks.");
+    }catch{
+      return false;
     }
   }
-}
 
-document.addEventListener("DOMContentLoaded", _fv3l_bootstrapPublic);
+  function fvEnsureStateTokenFromUrl(){
+    try{
+      if (typeof getQueryParam !== "function") return;
+      const token = (getQueryParam("token") || "").trim();
+      if (!token) return;
+
+      if (typeof loadState !== "function" || typeof saveState !== "function") return;
+      const s = loadState();
+      if (!s.student) s.student = { name:"", klass:"", token:"" };
+      if (String(s.student.token || "").trim() !== token){
+        s.student.token = token;
+        saveState(s);
+      }
+    }catch(e){
+      console.warn("FV3L token url -> state misslyckades:", e);
+    }
+  }
+
+  function fvEnsureActiveBankMetaFromUrl(){
+    try{
+      if (typeof getQueryParam !== "function") return;
+      const publicId = (getQueryParam("public") || "").trim();
+      if (!publicId) return;
+
+      // Sätt activeBank meta = public (så 3K kan lämna in)
+      if (typeof setActiveBankMeta === "function"){
+        setActiveBankMeta({ mode:"public", publicId: publicId, ownerUid:"", bankId:"" });
+      } else if (typeof loadState === "function" && typeof saveState === "function"){
+        const s = loadState();
+        s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s.activeBank || {}, {
+          mode:"public", publicId: publicId, ownerUid:"", bankId:""
+        });
+        saveState(s);
+      }
+
+      // Säkerställ att teacher-active inte “läcker” på elevsidan
+      try { window.activeCloudBankId = ""; } catch {}
+    }catch(e){
+      console.warn("FV3L public url -> activeBank meta misslyckades:", e);
+    }
+  }
+
+  function fvEnsureTeacherMetaIfPossible(){
+    // Om läraren är inloggad och vi har aktiv bankId, säkerställ meta teacher
+    try{
+      const hasTeacher = !!(window.currentTeacherUser && window.currentTeacherUser.uid);
+      if (!hasTeacher) return;
+
+      let bankId = "";
+      try{
+        if (typeof window.activeCloudBankId !== "undefined" && window.activeCloudBankId) bankId = String(window.activeCloudBankId);
+      }catch{}
+      if (!bankId && typeof loadState === "function"){
+        const s = loadState();
+        if (s && s.activeBank && s.activeBank.mode === "teacher" && s.activeBank.bankId) bankId = String(s.activeBank.bankId);
+      }
+      if (!bankId) return;
+
+      if (typeof setActiveBankMeta === "function"){
+        setActiveBankMeta({ mode:"teacher", ownerUid:String(window.currentTeacherUser.uid), bankId:String(bankId), publicId:"" });
+      } else if (typeof loadState === "function" && typeof saveState === "function"){
+        const s2 = loadState();
+        s2.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s2.activeBank || {}, {
+          mode:"teacher",
+          ownerUid:String(window.currentTeacherUser.uid),
+          bankId:String(bankId),
+          publicId:""
+        });
+        saveState(s2);
+      }
+    }catch(e){
+      console.warn("FV3L teacher meta safeguard misslyckades:", e);
+    }
+  }
+
+  function fvBindTeacherButtons(){
+    // Google login/logout + Ladda banker – funkar även om initApp kraschar
+    const btnLogin = document.getElementById("btnGoogleLogin") || fvFindButtonByText(["google", "logga"]);
+    const btnLogout = document.getElementById("btnGoogleLogout") || fvFindButtonByText(["logga", "ut"]);
+
+    const btnLoadCloud = document.getElementById("btnLoadCloudBanks")
+      || fvFindButtonByText(["ladda", "moln"])
+      || fvFindButtonByText(["moln", "bank"]);
+
+    if (btnLogin && typeof handleGoogleLogin === "function") fvBindClick(btnLogin, (e)=>{ e.preventDefault(); handleGoogleLogin(); });
+    if (btnLogout && typeof handleGoogleLogout === "function") fvBindClick(btnLogout, (e)=>{ e.preventDefault(); handleGoogleLogout(); });
+
+    if (btnLoadCloud){
+      const loader = (typeof window.loadCloudBanksListV4 === "function") ? window.loadCloudBanksListV4
+                   : (typeof window.loadCloudBanksList === "function") ? window.loadCloudBanksList
+                   : null;
+      if (loader) fvBindClick(btnLoadCloud, async (e)=>{ e.preventDefault(); await loader(); });
+    }
+  }
+
+  function fvEnsureFirebaseInitOnce(){
+    // Kör initFirebase en gång, även om initApp inte hinner
+    try{
+      if (window.__fv3l_firebaseInitDone) return;
+      if (typeof initFirebase !== "function") return;
+
+      // Om firebaseDbInstance redan finns, markera som klar
+      try{
+        if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance){
+          window.__fv3l_firebaseInitDone = true;
+          return;
+        }
+      }catch{}
+
+      initFirebase();
+      window.__fv3l_firebaseInitDone = true;
+    }catch(e){
+      console.warn("FV3L initFirebase misslyckades:", e);
+    }
+  }
+
+  function fvPatchSubmitToAutoMeta(){
+    // Patcha saveCurrentResultToFirestore så den auto-sätter meta om det saknas
+    try{
+      const fn = window.saveCurrentResultToFirestore;
+      if (typeof fn !== "function") return;
+      if (fn.__fv3l_patched) return;
+
+      const wrapped = async function(){
+        // Alltid: token + public meta från URL om det finns
+        fvEnsureStateTokenFromUrl();
+        fvEnsureActiveBankMetaFromUrl();
+
+        // Om lärarvy och aktiv bank finns: teacher meta
+        fvEnsureTeacherMetaIfPossible();
+
+        // Fortsätt original
+        return await fn();
+      };
+      wrapped.__fv3l_patched = true;
+      window.saveCurrentResultToFirestore = wrapped;
+    }catch(e){
+      console.warn("FV3L patch saveCurrentResultToFirestore misslyckades:", e);
+    }
+  }
+
+  function fvKick(){
+    fvEnsureFirebaseInitOnce();
+    fvBindTeacherButtons();
+
+    // Elevsida: sätt token + public meta direkt vid start
+    fvEnsureStateTokenFromUrl();
+    fvEnsureActiveBankMetaFromUrl();
+
+    // Patcha inlämningen så den aldrig saknar meta
+    fvPatchSubmitToAutoMeta();
+
+    // Om läraren loggar in senare, säkra teacher-meta
+    try{
+      if (window.firebaseAuthInstance && typeof window.firebaseAuthInstance.onAuthStateChanged === "function"){
+        if (!window.firebaseAuthInstance.__fv3lHooked){
+          window.firebaseAuthInstance.__fv3lHooked = true;
+          window.firebaseAuthInstance.onAuthStateChanged((u)=>{
+            try{ window.currentTeacherUser = u || null; }catch{}
+            fvEnsureTeacherMetaIfPossible();
+          });
+        }
+      }
+    }catch{}
+  }
+
+  // Kör tidigt + efter DOMContentLoaded
+  try{ fvKick(); }catch{}
+  document.addEventListener("DOMContentLoaded", ()=>{ try{ fvKick(); }catch{} });
+
+})();
 </script>
-<!-- slut SEKTION 3L: PUBLIC AUTOLOAD + TOKEN INIT (elev utan inloggning) -->
+<!-- slut SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, inlämning public) -->
+
+
+
+
 
 
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
