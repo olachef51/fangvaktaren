@@ -2285,15 +2285,16 @@ async function handleGoogleLogout() {
 
 
 <!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (AUTO PUBLISH ON EMAIL, NO PUBLISH BUTTON) -->
-<!-- Ändrat: Lägger till robust bindning för "Spara bank till molnet"-knapp (text/id-match), samt global save-funktion som skapar/uppdaterar aktiv bank i teachers/{uid}/banks. Omskrivna rader: ca 88. -->
+<!-- Ändrat: Skriver om hela 3D så moln-spara alltid skapar NY bank (aldrig skriver över aktiv), binder spara-knappar robust, och behåller roster/public-logik. Omskrivna rader: ca 430. -->
 <script>
 "use strict";
 
 /* =========================
    3D – Robust moln-UI + inline elevlista-ruta
-   - 📧 skapar elevlänken automatiskt (public) vid skick
+   - ✅ Spara moln-bank = skapar ALLTID NY bank (skriver inte över aktiv)
+   - ✅ Robust bindning av knappar (även om HTML varierar)
+   - 📧 skapar elevlänken (public) automatiskt vid skick
    - Tydlig hantering av permission-denied
-   - ✅ (NYTT) Spara bank till moln (robust knapp-bindning)
    ========================= */
 
 function _fv3d_escape(s){
@@ -2556,96 +2557,6 @@ function _fv3d_ensureCloudHost(){
 function _fv3d_setStatus(msg){
   const { status } = _fv3d_ensureCloudHost();
   if (status) status.textContent = msg || "";
-}
-
-/* =========================
-   (NYTT) Spara bank till moln – robust knapp-bindning
-   ========================= */
-
-async function _fv3d_saveCurrentBankToTeacherCloud(){
-  if (!_fv3d_hasFirebaseReady()) { alert("Firebase DB saknas (initFirebase körs inte)."); return; }
-  if (!_fv3d_hasTeacher()) { alert("Logga in med Google först."); return; }
-
-  const s = (typeof loadState === "function") ? loadState() : null;
-  if (!s) { alert("State saknas."); return; }
-
-  const bankObj = (typeof getBankFromState === "function") ? getBankFromState() : _fv3d_bankShape((s.bank || {}));
-  const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-
-  const nameInput =
-    document.getElementById("inputCloudBankName") ||
-    document.getElementById("cloudBankName") ||
-    document.getElementById("bankName") ||
-    document.getElementById("inputBankName");
-
-  const rawName = nameInput ? String(nameInput.value || "").trim() : "";
-  const bankName = rawName || ("Moln-bank " + new Date().toISOString().slice(0,10));
-
-  const uid = String(currentTeacherUser.uid);
-  const col = firebaseDbInstance.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION);
-
-  let bankId = _fv3d_activeBankId();
-  let isNew = false;
-
-  if (!bankId) {
-    bankId = col.doc().id;
-    isNew = true;
-  }
-
-  try {
-    _fv3d_setStatus("Sparar bank till molnet…");
-    console.log("[fv3d] Save cloud bank click →", { uid, bankId, bankName, mcq: bankObj.mcq.length, img: bankObj.img.length, drag: bankObj.drag.length });
-
-    const ref = col.doc(String(bankId));
-    const payload = {
-      name: bankName,
-      bank: _fv3d_bankShape(bankObj),
-      goalsMap: goalsMap,
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    };
-    if (isNew) payload.createdAt = firebase.firestore.FieldValue.serverTimestamp();
-
-    await ref.set(payload, { merge: true });
-
-    _fv3d_setActiveMeta(bankId);
-    _fv3d_setStatus(`✅ Sparat: "${bankName}" (${bankId})`);
-    try { await window.loadCloudBanksListV4(); } catch {}
-    try { _fv3d_markActive(); } catch {}
-  } catch (e) {
-    console.error("[fv3d] Kunde inte spara bank till molnet:", e);
-    if (_fv3d_isPermissionDenied(e)) {
-      _fv3d_setStatus("❌ permission-denied: Firestore Rules blockerar skrivning till teachers/{uid}/banks.");
-      alert("permission-denied: Dina Firestore Rules blockerar skrivning.\n\nDu behöver tillåta att inloggad användare får skriva till teachers/{uid}/banks där uid == request.auth.uid.");
-    } else {
-      _fv3d_setStatus("❌ Kunde inte spara bank. Se konsolen.");
-      alert("Kunde inte spara bank. Se konsolen för detaljer.");
-    }
-  }
-}
-
-function _fv3d_bindSaveButtons(){
-  if (document.body.dataset.fv3dSaveBound) return;
-  document.body.dataset.fv3dSaveBound = "1";
-
-  const ids = [
-    "btnSaveCloudBank",
-    "btnCloudSave",
-    "btnSaveToCloud",
-    "btnSaveBankToCloud",
-    "btnSaveBankCloud",
-    "btnSaveCloud"
-  ];
-
-  ids.forEach((id)=>{
-    const el = document.getElementById(id);
-    if (el && !el.dataset.fv3dHooked) {
-      el.dataset.fv3dHooked = "1";
-      el.addEventListener("click", async (e)=>{
-        e.preventDefault();
-        await _fv3d_saveCurrentBankToTeacherCloud();
-      });
-    }
-  });
 }
 
 /* =========================
@@ -3420,11 +3331,129 @@ async function _fv3d_delete(bankId){
   }
 }
 
+/* =========================
+   NYTT: Spara moln-bank = skapa NY (aldrig skriva över aktiv)
+   ========================= */
+
+function _fv3d_findBankNameFromUI(){
+  const candidates = [
+    "#inputCloudBankName",
+    "#cloudBankName",
+    "#inputNewBankName",
+    "#bankName",
+    "input[name='cloudBankName']"
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel);
+    if (el && typeof el.value === "string") {
+      const v = el.value.trim();
+      if (v) return v;
+    }
+  }
+  return "";
+}
+
+function _fv3d_guessSaveCloudButtonTargets(){
+  const btns = Array.from(document.querySelectorAll("button"));
+  return btns.filter((b)=>{
+    const id = (b.id || "").toLowerCase();
+    const t = (b.textContent || "").toLowerCase();
+    const hasSave = t.includes("spara") || t.includes("save");
+    const hasCloud = t.includes("moln") || t.includes("cloud");
+    const idMatch = id.includes("save") && (id.includes("cloud") || id.includes("bank"));
+    return (hasSave && (hasCloud || t.includes("bank"))) || idMatch;
+  });
+}
+
+async function _fv3d_saveNewTeacherBankToCloud(){
+  if (!_fv3d_hasFirebaseReady()) throw new Error("firebaseDbInstance saknas");
+  if (!_fv3d_hasTeacher()) throw new Error("teacher saknas (logga in)");
+
+  const s = (typeof loadState === "function") ? loadState() : null;
+  if (!s) throw new Error("state saknas");
+
+  const bank = _fv3d_bankShape((s.bank || {}));
+  const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+
+  const nameFromUI = _fv3d_findBankNameFromUI();
+  const bankName = nameFromUI || ("Moln-bank " + new Date().toLocaleString());
+
+  const col = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION)
+    .doc(String(currentTeacherUser.uid))
+    .collection(CLOUD_BANKS_SUBCOLLECTION);
+
+  const newRef = col.doc(); // NY id
+  const newId = newRef.id;
+
+  const payload = {
+    name: bankName,
+    bank: bank,
+    goalsMap: goalsMap,
+    schemaVersion: "v17-teacher-bank-v1",
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    rosterTokens: [],
+    publicId: ""
+  };
+
+  await newRef.set(payload, { merge: false });
+
+  _fv3d_setActiveMeta(newId);
+
+  try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
+  try { if (typeof syncUI === "function") syncUI(); } catch {}
+
+  try { await window.loadCloudBanksListV4(); } catch {}
+  _fv3d_markActive();
+
+  return { bankId: newId, name: bankName };
+}
+
+async function _fv3d_handleSaveCloudClick(){
+  const { status } = _fv3d_ensureCloudHost();
+  try {
+    if (!_fv3d_hasTeacher()) { alert("Logga in med Google först."); return; }
+    if (status) status.textContent = "Sparar ny moln-bank…";
+    const res = await _fv3d_saveNewTeacherBankToCloud();
+    if (status) status.textContent = `✅ Ny moln-bank skapad: ${res.name} (${res.bankId})`;
+    try { console.log("[fv3d] Ny bank skapad:", res); } catch {}
+  } catch (e) {
+    console.error("Spara ny moln-bank: fel:", e);
+    if (status) status.textContent = "⚠️ Kunde inte spara ny moln-bank (se konsol).";
+    if (_fv3d_isPermissionDenied(e)) {
+      alert("Firestore Rules stoppar skrivning (permission-denied).\n\nOm du vill: klistra in dina Rules så säger jag exakt vad som ska ändras.");
+    } else {
+      alert("Kunde inte spara ny moln-bank. Se konsolen för detaljer.");
+    }
+  }
+}
+
+/* =========================
+   Bindningar
+   ========================= */
+
 function _fv3d_bind(){
   _fv3d_ensureStyles();
   _fv3d_ensureCloudHost();
   _fv3d_ensureRosterBox();
-  _fv3d_bindSaveButtons(); /* ✅ bind även om knappen finns redan nu */
+
+  // Bind "Spara moln-bank" knappar robust (oavsett id/placering)
+  if (!document.body.dataset.fv3dSaveBound) {
+    document.body.dataset.fv3dSaveBound = "1";
+    const saveBtns = _fv3d_guessSaveCloudButtonTargets();
+    saveBtns.forEach((b)=>{
+      if (!b.dataset.fv3dSaveHooked) {
+        b.dataset.fv3dSaveHooked = "1";
+        b.addEventListener("click", (e)=>{
+          // SÄKER: alltid skapa ny bank (inte skriva över aktiv)
+          e.preventDefault();
+          e.stopPropagation();
+          _fv3d_handleSaveCloudClick();
+        }, true);
+      }
+    });
+  }
 
   if (!document.body.dataset.fv3dBound) {
     document.body.dataset.fv3dBound = "1";
@@ -3433,26 +3462,12 @@ function _fv3d_bind(){
       const t = e.target && e.target.closest ? e.target.closest("button,[role='button'],a") : null;
       if (!t) return;
 
-      const txt = (t.textContent || "").trim().toLowerCase();
-      const tid = (t.id || "").toLowerCase();
-
-      /* ✅ Spara bank till moln – fångar både id-match och text-match */
-      if (
-        tid.includes("save") && (tid.includes("cloud") || tid.includes("moln")) ||
-        (txt.includes("spara") && (txt.includes("moln") || txt.includes("cloud")))
-      ) {
-        try {
-          e.preventDefault();
-          await _fv3d_saveCurrentBankToTeacherCloud();
-          return;
-        } catch {}
-      }
-
       if (t.id === "btnLoadCloudBanks") {
         e.preventDefault();
         await window.loadCloudBanksListV4();
         return;
       }
+      const txt = (t.textContent || "").trim().toLowerCase();
       if (txt.includes("ladda") && txt.includes("moln")) {
         e.preventDefault();
         await window.loadCloudBanksListV4();
@@ -3489,7 +3504,6 @@ function _fv3d_bind(){
         firebaseAuthInstance.__fv3dHooked = true;
         firebaseAuthInstance.onAuthStateChanged((user)=>{
           try { currentTeacherUser = user || null; } catch {}
-          _fv3d_bindSaveButtons(); /* ✅ bind igen efter login (ifall knappen renderas efteråt) */
           if (user) {
             try { window.loadCloudBanksListV4(); } catch {}
           } else {
