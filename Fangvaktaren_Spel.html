@@ -2435,133 +2435,105 @@ function saveState(state) {
 
 
 <!-- start SEKTION 3C: FIREBASE – init + Google login -->
-<!-- ÄNDRAT: Tar bort “timeout”-fel som låser UI, väntar längre och fortsätter retry tyst tills firebase-bibliotek finns; triggar event + autorefresh av molnlistan när DB blir ready. Omskrivna rader: ca 120 -->
+<!-- ÄNDRAT: Gör initFirebase asynkron + väntar in firebase-script (ingen falsk “timeout” efter init OK) + exponerar __fvFirebaseReadyPromise + event "fv-firebase-ready". Omskrivna rader: ca 110 -->
 <script>
 "use strict";
 
-/* Robust init: undvik “Firebase-bibliotek saknas” när gstatic laddar långsamt */
-(function FV_FIREBASE_BOOTSTRAP(){
-  if (window.__fvFirebaseBootstrapInstalled) return;
-  window.__fvFirebaseBootstrapInstalled = true;
-
-  window.__fvFirebaseInitInProgress = false;
-  window.__fvFirebaseReady = false;
-
-  window.__fvFirebaseReadyPromise = window.__fvFirebaseReadyPromise || new Promise((resolve) => {
-    window.__fvFirebaseReadyResolve = resolve;
-  });
-
-  // Långsam nät? fortsätt retry (utan att spamma)
-  window.__fvFirebaseLibRetryTimer = window.__fvFirebaseLibRetryTimer || null;
-
-  async function _fv_waitForFirebaseLibs(maxMs){
-    const start = Date.now();
-    const timeout = (typeof maxMs === "number" ? maxMs : 45000);
-
-    while (Date.now() - start < timeout) {
-      if (window.firebase && typeof window.firebase.initializeApp === "function") return true;
-      await new Promise(r => setTimeout(r, 120));
-    }
-    return false;
+/* global readiness (används av 3Dc för att vänta in Firebase) */
+(function FV_FirebaseReadyBootstrap(){
+  if (!window.__fvFirebaseReadyPromise) {
+    window.__fvFirebaseReadyPromise = new Promise((resolve)=>{ window.__fvFirebaseReadyResolve = resolve; });
   }
-
-  function _fv_scheduleRetryInit(){
-    if (window.__fvFirebaseReady) return;
-    if (window.__fvFirebaseLibRetryTimer) return;
-
-    window.__fvFirebaseLibRetryTimer = setInterval(async () => {
-      if (window.__fvFirebaseReady) {
-        clearInterval(window.__fvFirebaseLibRetryTimer);
-        window.__fvFirebaseLibRetryTimer = null;
-        return;
-      }
-      try { await initFirebase(); } catch {}
-      if (window.__fvFirebaseReady) {
-        clearInterval(window.__fvFirebaseLibRetryTimer);
-        window.__fvFirebaseLibRetryTimer = null;
-      }
-    }, 2000);
-  }
-
-  window._fv_waitForFirebaseLibs = _fv_waitForFirebaseLibs;
-  window._fv_scheduleRetryInit = _fv_scheduleRetryInit;
 })();
+
+function _fv_sleep(ms){ return new Promise((r)=>setTimeout(r, ms)); }
 
 async function initFirebase() {
   const statusEl = $("#googleStatus");
 
-  // debounce: om redan klar eller pågår
-  if (window.__fvFirebaseReady) return true;
-  if (window.__fvFirebaseInitInProgress) {
-    try { await window.__fvFirebaseReadyPromise; } catch {}
-    return !!window.__fvFirebaseReady;
-  }
-  window.__fvFirebaseInitInProgress = true;
+  // idempotent: om vi redan initierat, återanvänd
+  if (window.__fvFirebaseInitPromise) return window.__fvFirebaseInitPromise;
 
-  try {
-    if (statusEl && (!window.firebase || typeof window.firebase.initializeApp !== "function")) {
-      statusEl.textContent = "⏳ Laddar Firebase… (vänta)";
-    }
+  window.__fvFirebaseInitPromise = (async ()=>{
+    try {
+      // Om firebase redan är redo (t.ex. init körd tidigare)
+      if (firebaseDbInstance && window.firebase && window.firebase.apps) {
+        try {
+          if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(true);
+          window.dispatchEvent(new CustomEvent("fv-firebase-ready"));
+        } catch {}
+        return true;
+      }
 
-    const ok = await window._fv_waitForFirebaseLibs(45000);
-    if (!ok) {
-      // Inget “fel” här – fortsätt försöka i bakgrunden så UI inte fastnar på “DB saknas”
-      window.__fvFirebaseInitInProgress = false;
-      try { window._fv_scheduleRetryInit(); } catch {}
+      // Vänta på att firebase-script laddas (förhindrar “kunde inte hittas” vid segt nät)
+      const start = Date.now();
+      while (!window.firebase && (Date.now() - start) < 15000) {
+        await _fv_sleep(120);
+      }
+
+      if (!window.firebase) {
+        console.warn("Firebase-bibliotek kunde inte hittas (timeout).");
+        if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: Firebase-bibliotek kunde inte laddas (timeout).";
+        try { if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(false); } catch {}
+        return false;
+      }
+
+      if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+
+      firebaseAppInstance = firebase.app();
+      firebaseAuthInstance = firebase.auth();
+      firebaseDbInstance = firebase.firestore();
+
+      // onAuthStateChanged – endast en gång
+      if (firebaseAuthInstance && !firebaseAuthInstance.__fvBound) {
+        firebaseAuthInstance.__fvBound = true;
+
+        firebaseAuthInstance.onAuthStateChanged((user) => {
+          currentTeacherUser = user || null;
+
+          const btnLogout = $("#btnGoogleLogout");
+          if (statusEl) {
+            if (user) {
+              statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
+              if (btnLogout) btnLogout.classList.remove("hidden");
+            } else {
+              statusEl.textContent = "☁️ Inte inloggad – klicka på Google för att logga in.";
+              if (btnLogout) btnLogout.classList.add("hidden");
+            }
+          }
+        });
+      }
+
+      console.log("Firebase init OK");
+
+      // signalera readiness till resten av appen
+      try {
+        if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(true);
+        window.dispatchEvent(new CustomEvent("fv-firebase-ready"));
+      } catch {}
+
+      return true;
+    } catch (e) {
+      console.error("Fel vid initFirebase:", e);
+      if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: kunde inte starta Firebase.";
+      try { if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(false); } catch {}
       return false;
     }
+  })();
 
-    if (!firebase.apps || !firebase.apps.length) {
-      firebase.initializeApp(FIREBASE_CONFIG);
-    }
-
-    firebaseAppInstance = firebase.app();
-    firebaseAuthInstance = firebase.auth();
-    firebaseDbInstance = firebase.firestore();
-
-    window.__fvFirebaseReady = true;
-    window.__fvFirebaseInitInProgress = false;
-    try { if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(true); } catch {}
-
-    // signalera "ready" så andra sektioner kan reagera
-    try { window.dispatchEvent(new CustomEvent("fv-firebase-ready")); } catch {}
-
-    if (firebaseAuthInstance && typeof firebaseAuthInstance.onAuthStateChanged === "function") {
-      firebaseAuthInstance.onAuthStateChanged((user) => {
-        currentTeacherUser = user || null;
-        const btnLogout = $("#btnGoogleLogout");
-        if (!statusEl) return;
-
-        if (user) {
-          statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
-          if (btnLogout) btnLogout.classList.remove("hidden");
-          try { if (typeof window.loadCloudBanksListV4 === "function") window.loadCloudBanksListV4(); } catch {}
-        } else {
-          statusEl.textContent = "☁️ Inte inloggad – klicka på Google för att logga in.";
-          if (btnLogout) btnLogout.classList.add("hidden");
-        }
-      });
-    }
-
-    console.log("Firebase init OK");
-    return true;
-  } catch (e) {
-    console.error("Fel vid initFirebase:", e);
-    if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: kunde inte starta Firebase.";
-    window.__fvFirebaseInitInProgress = false;
-    try { window._fv_scheduleRetryInit(); } catch {}
-    return false;
-  }
+  return window.__fvFirebaseInitPromise;
 }
 
 async function handleGoogleLogin() {
   const statusEl = $("#googleStatus");
-  try { await initFirebase(); } catch {}
 
-  if (!firebaseAuthInstance) {
+  // säkerställ init först
+  const ok = await initFirebase();
+  if (!ok || !firebaseAuthInstance) {
     alert("Tekniskt fel: Firebase Auth saknas.");
     return;
   }
+
   try {
     const provider = new firebase.auth.GoogleAuthProvider();
     await firebaseAuthInstance.signInWithPopup(provider);
@@ -2578,10 +2550,6 @@ async function handleGoogleLogout() {
     console.error("Kunde inte logga ut:", err);
   }
 }
-
-/* Kör init tidigt + fortsätt retry om nätet är segt */
-try { initFirebase(); } catch {}
-window.addEventListener("load", () => { try { initFirebase(); } catch {} });
 </script>
 <!-- slut SEKTION 3C: FIREBASE – init + Google login -->
 
@@ -3516,9 +3484,9 @@ async function _fv3d_saveRosterToCloudAndLocal(){
 
 
 <!-- start SEKTION 3Dc: MOLN-BANK – molnlistan, activate/delete, bind & ACTIVE-MARK (bankId + publicId) -->
+<!-- ÄNDRAT: Väntar in initFirebase/__fvFirebaseReadyPromise innan “Firebase DB saknas” visas + försöker initiera Firebase vid knapptryck & vid bind. Omskrivna rader: ca 70 -->
 <script>
 "use strict";
-/* Ändrat: Markerar aktiv bank som grön även när aktiviteten kommer från elevlänk (activeBank.publicId). Omskrivna rader: ca 22 */
 
 function _fv3d_markActive(){
   const { host } = _fv3d_ensureCloudHost();
@@ -3570,14 +3538,34 @@ function _fv3d_makeRow(docId, data){
   return li;
 }
 
+async function _fv3d_waitFirebaseReady(){
+  // försök initiera om funktionen finns
+  try { if (typeof initFirebase === "function") await initFirebase(); } catch {}
+
+  // vänta på readiness-promise om den finns
+  try {
+    if (window.__fvFirebaseReadyPromise) {
+      const res = await Promise.race([
+        window.__fvFirebaseReadyPromise,
+        new Promise((r)=>setTimeout(()=>r(false), 9000))
+      ]);
+      return !!res;
+    }
+  } catch {}
+  return _fv3d_hasFirebaseReady();
+}
+
 async function _fv3d_loadBanks(){
   _fv3d_ensureStyles();
   const { host } = _fv3d_ensureCloudHost();
 
   host.innerHTML = `<li class="mini">Laddar moln-banker…</li>`;
 
+  // ✅ Viktigt: vänta in att firebase-script verkligen finns/init är klar
+  await _fv3d_waitFirebaseReady();
+
   if (!_fv3d_hasFirebaseReady()) {
-    host.innerHTML = `<li class="mini">⚠️ Firebase DB saknas (initFirebase körs inte).</li>`;
+    host.innerHTML = `<li class="mini">⚠️ Firebase DB saknas (initFirebase körs inte eller bibliotek laddas ej).</li>`;
     _fv3d_setStatus("⚠️ Firebase DB saknas.");
     return;
   }
@@ -3630,6 +3618,7 @@ if (typeof window.loadCloudBanksListV4 !== "function") window.loadCloudBanksList
 if (typeof window.loadCloudBanksList !== "function") window.loadCloudBanksList = _fv3d_loadBanks;
 
 async function _fv3d_activate(bankId){
+  await _fv3d_waitFirebaseReady();
   if (!_fv3d_hasFirebaseReady() || !_fv3d_hasTeacher()) { alert("Logga in med Google först."); return; }
 
   try {
@@ -3674,6 +3663,7 @@ async function _fv3d_activate(bankId){
 }
 
 async function _fv3d_delete(bankId){
+  await _fv3d_waitFirebaseReady();
   if (!_fv3d_hasFirebaseReady() || !_fv3d_hasTeacher()) { alert("Logga in med Google först."); return; }
   if (!confirm("Ta bort moln-banken?")) return;
 
@@ -3711,6 +3701,9 @@ function _fv3d_bind(){
   _fv3d_ensureCloudHost();
   _fv3d_ensureRosterBox();
 
+  // försök initiera firebase tidigt (tar bort “DB saknas” race)
+  try { if (typeof initFirebase === "function") initFirebase(); } catch {}
+
   if (!document.body.dataset.fv3dBound) {
     document.body.dataset.fv3dBound = "1";
 
@@ -3746,32 +3739,14 @@ function _fv3d_bind(){
     });
   }
 
+  // när Firebase blir redo: försök markera aktiv bank (och lista vid inloggad)
   try {
-    if (_fv3d_hasFirebaseReady() && _fv3d_hasTeacher()) {
-      const { host } = _fv3d_ensureCloudHost();
-      const empty = !host || !host.children || host.children.length === 0;
-      if (empty) window.loadCloudBanksListV4();
-    }
-  } catch {}
-
-  try {
-    if (typeof firebaseAuthInstance !== "undefined" && firebaseAuthInstance && typeof firebaseAuthInstance.onAuthStateChanged === "function") {
-      if (!firebaseAuthInstance.__fv3dHooked) {
-        firebaseAuthInstance.__fv3dHooked = true;
-        firebaseAuthInstance.onAuthStateChanged((user)=>{
-          try { currentTeacherUser = user || null; } catch {}
-          if (user) {
-            try { window.loadCloudBanksListV4(); } catch {}
-          } else {
-            const { host } = _fv3d_ensureCloudHost();
-            if (host) host.innerHTML = `<li class="mini">☁️ Logga in med Google för att se dina banker.</li>`;
-            _fv3d_setStatus("☁️ Inte inloggad.");
-            const box = document.getElementById("fv3dRosterBox");
-            if (box) box.classList.add("hidden");
-          }
-        });
-      }
-    }
+    window.addEventListener("fv-firebase-ready", ()=>{
+      try { _fv3d_markActive(); } catch {}
+      try {
+        if (_fv3d_hasTeacher()) window.loadCloudBanksListV4();
+      } catch {}
+    });
   } catch {}
 
   // Viktigt: om activeBank.publicId redan finns i state (från elevvyn), markera när listan väl syns
@@ -3781,7 +3756,6 @@ function _fv3d_bind(){
 document.addEventListener("DOMContentLoaded", _fv3d_bind);
 </script>
 <!-- slut SEKTION 3Dc: MOLN-BANK – molnlistan, activate/delete, bind & ACTIVE-MARK (bankId + publicId) -->
-
 
 
 
