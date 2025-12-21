@@ -3487,141 +3487,188 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 
-
-<!-- start SEKTION 3E: FIX PUBLIC BANK-META FÖR INLÄMNING (PLACERA EFTER SEKTIONEN DÄR firebaseDbInstance INITIERAS) -->
-<!-- ÄNDRAT: Sätter aktiv bank-meta automatiskt när spelet öppnas med ?public=..., så inlämning fungerar (undviker "Ingen aktiv bank-meta"). Omskrivna rader: ca 95. -->
+<!-- start SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
 <script>
 "use strict";
+/* ÄNDRING: Skriver om SEKTION 3E så populateGoalSelect ALLTID finns globalt innan initApp använder den + renderar delbitar i samma “kort”-stil som MCQ (delmål = rubrik, delbit = underrubrik) + delete-knapp per ruta. Omskrivna rader: ca 165 */
 
-/* =========================
-   3E – Public bank-meta fix (elevsida)
-   - När URL har ?public=PUBLIC_ID: hämta public_banks-doc
-   - Sätt activeBank meta: mode="public", ownerUid=sourceTeacherUid, bankId=sourceBankId, publicId
-   - Kör med retry om Firebase inte är redo direkt
-   ========================= */
+function populateGoalSelect(selectElIdOrEl) {
+  try {
+    const sel =
+      (typeof selectElIdOrEl === "string")
+        ? document.querySelector(selectElIdOrEl)
+        : selectElIdOrEl;
 
-(function(){
-  function _fv3e_hasDb(){
-    return !!(typeof firebaseDbInstance !== "undefined" && firebaseDbInstance);
-  }
+    if (!sel) return;
 
-  function _fv3e_getPublicId(){
-    try{
-      const p = new URLSearchParams(window.location.search || "");
-      const id = (p.get("public") || "").trim();
-      return id || "";
-    }catch{ return ""; }
-  }
+    const s = (typeof loadState === "function") ? loadState() : { goalsMap: [] };
+    const goals = Array.isArray(s.goalsMap) ? s.goalsMap : [];
 
-  function _fv3e_setActiveMeta(meta){
-    try{
-      if (typeof setActiveBankMeta === "function") {
-        setActiveBankMeta(meta);
-        return;
-      }
-    }catch{}
+    sel.innerHTML = "";
+    const def = document.createElement("option");
+    def.value = "";
+    def.textContent = "Ingen koppling";
+    sel.appendChild(def);
 
-    try{
-      if (typeof loadState === "function" && typeof saveState === "function") {
-        const s = loadState();
-        s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s.activeBank || {}, meta);
-        saveState(s);
-      }
-    }catch{}
-  }
-
-  async function _fv3e_fetchPublicDoc(publicId){
-    const colName = (typeof PUBLIC_BANKS_COLLECTION !== "undefined" && PUBLIC_BANKS_COLLECTION) ? String(PUBLIC_BANKS_COLLECTION) : "public_banks";
-    const ref = firebaseDbInstance.collection(colName).doc(String(publicId));
-    const snap = await ref.get();
-    if (!snap.exists) return null;
-    return snap.data() || {};
-  }
-
-  async function _fv3e_ensurePublicMetaOnce(){
-    const publicId = _fv3e_getPublicId();
-    if (!publicId) return false;
-
-    if (!_fv3e_hasDb()) return false;
-
-    // Om meta redan finns och matchar publicId – klart
-    try{
-      if (typeof loadState === "function") {
-        const s = loadState();
-        const ab = s && s.activeBank ? s.activeBank : null;
-        if (ab && String(ab.mode || "") === "public" && String(ab.publicId || "") === String(publicId) && ab.ownerUid && ab.bankId) {
-          return true;
-        }
-      }
-    }catch{}
-
-    const data = await _fv3e_fetchPublicDoc(publicId);
-    if (!data) return false;
-
-    const sourceTeacherUid = (data.sourceTeacherUid || data.ownerUid || data.teacherUid || "").toString().trim();
-    const sourceBankId = (data.sourceBankId || data.sourceBank || data.bankId || "").toString().trim();
-
-    if (!sourceTeacherUid || !sourceBankId) {
-      console.warn("[3E] public_banks saknar sourceTeacherUid/sourceBankId:", { publicId, dataKeys: Object.keys(data||{}) });
-      return false;
-    }
-
-    _fv3e_setActiveMeta({
-      mode: "public",
-      ownerUid: sourceTeacherUid,
-      bankId: sourceBankId,
-      publicId: publicId
+    goals.forEach((g) => {
+      const opt = document.createElement("option");
+      opt.value = String(g.id);
+      const goal = (g.goal || "-");
+      const parts = (g.parts || "-");
+      opt.textContent = `${goal} • ${parts}`;
+      sel.appendChild(opt);
     });
+  } catch (e) {
+    console.warn("populateGoalSelect misslyckades:", e);
+  }
+}
 
-    // (Valfritt men hjälpsamt) spegla även i globalt fält om det används på andra ställen
-    try { window.activeCloudBankId = String(sourceBankId); } catch {}
+function _goals_refreshAllGoalSelects() {
+  try { populateGoalSelect("#mcqGoalPart"); } catch {}
+  try { populateGoalSelect("#imgGoalPart"); } catch {}
+  try { populateGoalSelect("#dragGoalPart"); } catch {}
+  try { populateGoalSelect("#mcqJsonGoalPart"); } catch {}
+}
 
-    return true;
+function renderGoalsList() {
+  const host = document.querySelector("#goalsList");
+  if (!host) return;
+
+  const s = (typeof loadState === "function") ? loadState() : { goalsMap: [] };
+  const list = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+
+  host.innerHTML = "";
+
+  if (!list.length) {
+    const li = document.createElement("li");
+    li.className = "mini";
+    li.textContent = "Inga sparade delmål/delbitar ännu.";
+    host.appendChild(li);
+    _goals_refreshAllGoalSelects();
+    return;
   }
 
-  async function _fv3e_ensurePublicMetaWithRetry(){
-    const publicId = _fv3e_getPublicId();
-    if (!publicId) return;
+  list.forEach((g) => {
+    const li = document.createElement("li");
+    li.className = "list-item";
+    li.setAttribute("data-goal-id", String(g.id));
 
-    let tries = 0;
-    const maxTries = 25; // ~5 sek vid 200ms
-    const waitMs = 200;
+    const goal = (typeof escapeHtml === "function") ? escapeHtml(g.goal || "-") : String(g.goal || "-");
+    const parts = (typeof escapeHtml === "function") ? escapeHtml(g.parts || "-") : String(g.parts || "-");
 
-    const tick = async () => {
-      tries++;
-      try{
-        const ok = await _fv3e_ensurePublicMetaOnce();
-        if (ok) {
-          // console.log("[3E] Public bank-meta OK");
-          return;
-        }
-      }catch(e){
-        console.warn("[3E] Kunde inte sätta public bank-meta:", e);
-      }
-
-      if (tries < maxTries) {
-        setTimeout(tick, waitMs);
-      } else {
-        console.warn("[3E] Gav upp efter retries – public meta sattes inte (inlämning kan falla).");
-      }
-    };
-
-    tick();
-  }
-
-  // Kör ASAP + på DOMContentLoaded
-  try{
-    _fv3e_ensurePublicMetaWithRetry();
-  }catch{}
-
-  document.addEventListener("DOMContentLoaded", ()=>{
-    try { _fv3e_ensurePublicMetaWithRetry(); } catch {}
+    li.innerHTML = `
+      <div class="list-main">
+        <div class="q-text">${goal}</div>
+        <div class="q-meta">${parts}</div>
+      </div>
+      <div>
+        <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${String(g.id)}">🗑️</button>
+      </div>
+    `;
+    host.appendChild(li);
   });
 
-})();
-</script>
-<!-- slut SEKTION 3E: FIX PUBLIC BANK-META FÖR INLÄMNING (PLACERA EFTER SEKTIONEN DÄR firebaseDbInstance INITIERAS) -->
+  host.querySelectorAll("button[data-del-goal-id]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.getAttribute("data-del-goal-id");
+      if (!id) return;
 
+      const s2 = (typeof loadState === "function") ? loadState() : null;
+      if (!s2 || typeof saveState !== "function") return;
+
+      s2.goalsMap = (Array.isArray(s2.goalsMap) ? s2.goalsMap : []).filter((g) => String(g.id) !== String(id));
+      saveState(s2);
+
+      renderGoalsList();
+      if (typeof syncUI === "function") syncUI();
+    });
+  });
+
+  _goals_refreshAllGoalSelects();
+}
+
+function initGoalsMap() {
+  if (window.__goalsMapInited) return;
+  window.__goalsMapInited = true;
+
+  const inputGoal = document.querySelector("#inputGoalSingle");
+  const inputPart = document.querySelector("#inputPartSingle");
+  const btnAdd = document.querySelector("#btnAddGoalPart");
+  const btnSave = document.querySelector("#btnSaveGoalsMap");
+  const btnClear = document.querySelector("#btnClearGoalsMap");
+  const statusEl = document.querySelector("#goalsStatus");
+
+  if (btnAdd) {
+    btnAdd.addEventListener("click", () => {
+      const goalText = (inputGoal && inputGoal.value.trim()) || "";
+      const partsText = (inputPart && inputPart.value.trim()) || "";
+
+      if (!goalText || !partsText) {
+        if (statusEl) statusEl.textContent = "Skriv både delmål (rubrik) och delbit (text).";
+        return;
+      }
+
+      const s = (typeof loadState === "function") ? loadState() : null;
+      if (!s || typeof saveState !== "function") return;
+
+      if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
+      s.goalsMap.push({ id: Date.now(), goal: goalText, parts: partsText });
+      saveState(s);
+
+      if (inputGoal) inputGoal.value = "";
+      if (inputPart) inputPart.value = "";
+      if (statusEl) statusEl.textContent = "Delbit tillagd.";
+
+      renderGoalsList();
+      if (typeof syncUI === "function") syncUI();
+    });
+  }
+
+  if (btnSave) {
+    btnSave.addEventListener("click", () => {
+      try {
+        const s = (typeof loadState === "function") ? loadState() : null;
+        if (s && typeof saveState === "function") saveState(s);
+        if (statusEl) statusEl.textContent = "Delmål & delbitar sparade.";
+      } catch (e) {
+        if (statusEl) statusEl.textContent = "Kunde inte spara (se konsol).";
+        console.error(e);
+      }
+      renderGoalsList();
+    });
+  }
+
+  if (btnClear) {
+    btnClear.addEventListener("click", () => {
+      if (!confirm("Ta bort alla delmål och delbitar?")) return;
+
+      const s = (typeof loadState === "function") ? loadState() : null;
+      if (!s || typeof saveState !== "function") return;
+
+      s.goalsMap = [];
+      saveState(s);
+
+      if (statusEl) statusEl.textContent = "Alla delmål/delbitar borttagna.";
+      renderGoalsList();
+      if (typeof syncUI === "function") syncUI();
+    });
+  }
+
+  renderGoalsList();
+}
+
+/* Failsafe: spegla globalt (så initApp alltid hittar dem) */
+window.populateGoalSelect = populateGoalSelect;
+window.renderGoalsList = renderGoalsList;
+window.initGoalsMap = initGoalsMap;
+
+/* Se till att listan renderas direkt vid öppning (så den inte “vaknar” först när du sparar nytt) */
+document.addEventListener("DOMContentLoaded", () => {
+  try { initGoalsMap(); } catch {}
+  try { renderGoalsList(); } catch {}
+});
+</script>
+<!-- slut SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
 
 
 
