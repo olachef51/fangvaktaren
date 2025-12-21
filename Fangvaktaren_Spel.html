@@ -2305,10 +2305,13 @@ async function handleGoogleLogout() {
 
 
 
+
+
 <!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (AUTO PUBLISH ON EMAIL, NO PUBLISH BUTTON) -->
 <script>
 "use strict";
-/* Ändrat: 1) Auto-republish vid 📧 och “Kopiera länkar” även om elevlänk redan finns (säkrar rosterTokens + återskapar public_banks-doc om den saknas). 2) Grön “skickat”-markering tillbaka på 📧 (sparas lokalt via rosterMap). Omskrivna rader: ca 95 */
+
+/* Ändrat: (1) Tar bort auto-laddning av molnlistan (visas först efter “Ladda banker”), (2) Återinför grön “skickat”-markering per elevrad efter 📧 + sparar lokalt. Omskrivna rader: ca 65 */
 
 /* =========================
    FAILSAFE SHIM: populateGoalSelect
@@ -2522,11 +2525,10 @@ function _fv3d_ensureStyles(){
       border-radius:999px;
     }
 
+    /* ✅ Skickat-markering för 📧 */
     .fv3d-mail-sent{
-      border-color:rgba(74,222,128,.95) !important;
-      box-shadow:
-        0 0 0 1px rgba(22,163,74,1),
-        0 0 14px rgba(34,197,94,.55) !important;
+      border-color:rgba(74,222,128,.65) !important;
+      box-shadow: 0 0 0 1px rgba(22,163,74,1), 0 0 14px rgba(34,197,94,.35) !important;
       color:#bbf7d0 !important;
     }
 
@@ -2648,7 +2650,7 @@ function _fv3d_ensureRosterBox(){
     <div id="fv3dRosterLinkBox" class="field">
       <label class="small-label" for="fv3dRosterLink">Elevlänk (public)</label>
       <input id="fv3dRosterLink" class="input" readonly value="" placeholder="Skapas automatiskt när du trycker 📧 på en elev..." />
-      <div class="mini" style="margin-top:4px;">📧 på en elev uppdaterar alltid public-banken (rosterTokens) så inlämning funkar.</div>
+      <div class="mini" style="margin-top:4px;">📧 på en elev skapar elevlänk automatiskt om den saknas.</div>
     </div>
 
     <div id="fv3dRosterGrid"></div>
@@ -2707,7 +2709,9 @@ function _fv3d_makeRosterCard(data){
   token.readOnly = true;
   token.value = (data && typeof data.token === "string") ? data.token : "";
 
-  let sentAt = (data && data.sentAt) ? String(data.sentAt) : "";
+  // ✅ skickat-state (lokalt)
+  const sentAtInit = (data && (data.sentAt || data.mailSentAt || data.sent || data.mailSent)) ? String(data.sentAt || data.mailSentAt || data.sent || data.mailSent) : "";
+  if (sentAtInit) card.dataset.sentAt = sentAtInit;
 
   function ensureToken(){
     if (!token.value.trim()) token.value = _fv3d_genToken(10);
@@ -2751,9 +2755,10 @@ function _fv3d_makeRosterCard(data){
   btnMail.className = "btn fv3d-btn-xs";
   btnMail.type = "button";
   btnMail.textContent = "📧";
-  btnMail.title = "Skapa mejl till denna elev (uppdaterar public-banken automatiskt)";
+  btnMail.title = "Skapa mejl till denna elev (skapar elevlänk automatiskt)";
 
-  if (sentAt) btnMail.classList.add("fv3d-mail-sent");
+  // ✅ grön markering om redan skickat
+  if (card.dataset.sentAt) btnMail.classList.add("fv3d-mail-sent");
 
   btnMail.addEventListener("click", async ()=>{
     const em = email.value.trim();
@@ -2764,31 +2769,31 @@ function _fv3d_makeRosterCard(data){
 
     const tkn = ensureToken();
 
-    // Samla tokens från UI (så public-banken alltid har rosterTokens som matchar elevlänkar)
+    // Samla tokens från UI (så public-banken kan få rosterTokens direkt)
     let rosterTokensFromUI = [];
     try {
       const collected = _fv3d_collectRosterFromUI();
       rosterTokensFromUI = (collected && Array.isArray(collected.tokens)) ? collected.tokens : [];
-      if (!rosterTokensFromUI.includes(tkn)) rosterTokensFromUI.push(tkn);
     } catch {}
 
-    // ALLTID: republish/patch (även om elevlänk redan finns)
     let publicUrl = (linkInput && linkInput.value.trim()) ? linkInput.value.trim() : "";
-    if (status) status.textContent = "Säkrar elevlänk & rosterTokens…";
-    try {
-      const pub = await _fv3d_publishActiveBankToPublic({ rosterTokensOverride: rosterTokensFromUI, silent: true });
-      publicUrl = pub && pub.publicUrl ? String(pub.publicUrl) : publicUrl;
-      if (linkInput && publicUrl) linkInput.value = publicUrl;
-    } catch (e) {
-      console.error("Kunde inte säkra elevlänk/rosterTokens:", e);
-      if (_fv3d_isPermissionDenied(e)) {
-        if (status) status.textContent = "❌ Kan inte skapa/uppdatera elevlänk: permission-denied (Firestore Rules).";
-        alert("Kan inte skapa/uppdatera elevlänk eftersom Firestore-reglerna stoppar skrivning till public_banks.\n\nLösning: uppdatera Firestore Rules för public_banks så att din inloggade läraranvändare får skriva.");
-      } else {
-        if (status) status.textContent = "❌ Kunde inte skapa/uppdatera elevlänk. Se konsolen.";
-        alert("Kunde inte skapa/uppdatera elevlänk. Se konsolen för detaljer.");
+    if (!publicUrl) {
+      if (status) status.textContent = "Skapar elevlänk…";
+      try {
+        const pub = await _fv3d_publishActiveBankToPublic({ rosterTokensOverride: rosterTokensFromUI });
+        publicUrl = pub && pub.publicUrl ? String(pub.publicUrl) : "";
+        if (linkInput && publicUrl) linkInput.value = publicUrl;
+      } catch (e) {
+        console.error("Kunde inte skapa elevlänk:", e);
+        if (_fv3d_isPermissionDenied(e)) {
+          if (status) status.textContent = "❌ Kan inte skapa elevlänk: saknar rättigheter i Firestore (permission-denied).";
+          alert("Kan inte skapa elevlänk eftersom Firestore-reglerna stoppar skrivning till public_banks.\n\nLösning: uppdatera Firestore Rules för public_banks så att din inloggade läraranvändare får skriva.");
+        } else {
+          if (status) status.textContent = "❌ Kunde inte skapa elevlänk. Se konsolen.";
+          alert("Kunde inte skapa elevlänk. Se konsolen för detaljer.");
+        }
+        return;
       }
-      return;
     }
 
     if (!publicUrl) {
@@ -2809,10 +2814,26 @@ function _fv3d_makeRosterCard(data){
 
     _fv3d_mailto(em, subj, body);
 
-    // Markera skickat (grönt) + spara lokalt nästa gång man sparar roster
-    sentAt = new Date().toISOString();
-    btnMail.classList.add("fv3d-mail-sent");
-    if (status) status.textContent = "✅ Mejl öppnat för utskick (public-banken uppdaterad).";
+    // ✅ markera som skickat + spara lokalt direkt
+    try{
+      const now = new Date().toISOString();
+      card.dataset.sentAt = now;
+      btnMail.classList.add("fv3d-mail-sent");
+      if (status) status.textContent = "✅ Mejl öppnat för utskick.";
+
+      const box = document.getElementById("fv3dRosterBox");
+      const bankId = box ? String(box.dataset.bankId || "") : "";
+      if (bankId) {
+        const map = _fv3d_loadLocalRosterMap();
+        const collected = _fv3d_collectRosterFromUI();
+        const rosterLocal = (collected && Array.isArray(collected.rosterLocal)) ? collected.rosterLocal : [];
+        map[bankId] = Object.assign({}, map[bankId] || {}, {
+          savedAt: new Date().toISOString(),
+          students: rosterLocal
+        });
+        _fv3d_saveLocalRosterMap(map);
+      }
+    }catch{}
   });
 
   const btnDel = document.createElement("button");
@@ -2834,7 +2855,7 @@ function _fv3d_makeRosterCard(data){
     klass: klass.value.trim(),
     email: email.value.trim(),
     token: token.value.trim(),
-    sentAt: sentAt,
+    sentAt: (card.dataset && card.dataset.sentAt) ? String(card.dataset.sentAt) : "",
     _isUsed: isUsedRow()
   });
 
@@ -2884,16 +2905,6 @@ function _fv3d_collectRosterFromUI(){
   return { rosterLocal, tokens };
 }
 
-function _fv3d_localTokensForBank(bankId){
-  try{
-    const map = _fv3d_loadLocalRosterMap();
-    const students = (map[bankId] && Array.isArray(map[bankId].students)) ? map[bankId].students : [];
-    return students.map(s=>String(s.token||"").trim()).filter(Boolean);
-  }catch{
-    return [];
-  }
-}
-
 /* =========================
    Publicera bank till public_banks
    ========================= */
@@ -2903,8 +2914,6 @@ async function _fv3d_publishActiveBankToPublic(opts){
 
   const status = document.getElementById("fv3dRosterStatus");
   const linkInput = document.getElementById("fv3dRosterLink");
-
-  const silent = !!(opts && opts.silent);
 
   const activeId = _fv3d_activeBankId();
   if (!activeId) throw new Error("Ingen aktiv bank");
@@ -2923,21 +2932,12 @@ async function _fv3d_publishActiveBankToPublic(opts){
   const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
 
   let rosterTokens = Array.isArray(data.rosterTokens) ? data.rosterTokens.map(String) : [];
-
-  // Om lärarbanken saknar rosterTokens: försök ta från lokalt roster-map (så public kan funka direkt)
-  if (!rosterTokens.length) {
-    const localTokens = _fv3d_localTokensForBank(String(activeId));
-    if (localTokens.length) rosterTokens = localTokens.map(String);
-  }
-
   if (opts && Array.isArray(opts.rosterTokensOverride) && opts.rosterTokensOverride.length) {
     rosterTokens = opts.rosterTokensOverride.map(String).filter(t=>String(t||"").trim());
-
-    // skriv rosterTokens tillbaka till teacher banken (merge) så banklistan får korrekt “Tilldelade elever”
     await teacherRef.set({ rosterTokens: rosterTokens }, { merge: true });
   }
 
-  let publicId = (opts && opts.forcePublicId) ? String(opts.forcePublicId) : (data.publicId ? String(data.publicId) : "");
+  let publicId = data.publicId ? String(data.publicId) : "";
 
   if (!publicId) {
     publicId = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc().id;
@@ -2966,10 +2966,9 @@ async function _fv3d_publishActiveBankToPublic(opts){
   const base = _fv3d_getBaseUrl();
   const publicUrl = base ? `${base}?public=${encodeURIComponent(publicId)}` : "";
 
-  if (linkInput && publicUrl) linkInput.value = publicUrl;
-  if (!silent && status) status.textContent = `✅ Elevlänk skapad/uppdaterad.`;
+  if (linkInput) linkInput.value = publicUrl;
+  if (status) status.textContent = `✅ Elevlänk skapad.`;
 
-  // spara publicId även lokalt för vald bank (om rosterbox är öppen)
   try {
     const box = document.getElementById("fv3dRosterBox");
     const bankId = box ? String(box.dataset.bankId || "") : "";
@@ -3000,7 +2999,7 @@ async function _fv3d_saveRosterToCloudAndLocal(){
   const clickedPublicId = String(box.dataset.publicId || "");
 
   const activeId = _fv3d_activeBankId();
-  const targetBankId = clickedBankId || activeId; // vald bank (roster) först, annars aktiv
+  const targetBankId = clickedBankId || activeId;
 
   if (!targetBankId) {
     if (status) status.textContent = "⚠️ Ingen vald/aktiv bank. Aktivera en bank först.";
@@ -3016,7 +3015,6 @@ async function _fv3d_saveRosterToCloudAndLocal(){
     return;
   }
 
-  // lokalt alltid
   try {
     const map = _fv3d_loadLocalRosterMap();
     map[targetBankId] = {
@@ -3052,7 +3050,6 @@ async function _fv3d_saveRosterToCloudAndLocal(){
       .collection(CLOUD_BANKS_SUBCOLLECTION)
       .doc(String(targetBankId));
 
-    // VIKTIGT: verifiera att banken finns (annars skapas “spökbank” vid .set)
     const existsSnap = await ref.get();
     if (!existsSnap.exists) {
       if (status) status.textContent = "❌ Banken finns inte i molnet. Ladda/aktivera banken igen och försök.";
@@ -3071,7 +3068,6 @@ async function _fv3d_saveRosterToCloudAndLocal(){
       { merge: true }
     );
 
-    // skapa/uppdatera students/{token} (utan PII)
     const batch = firebaseDbInstance.batch();
     const studentsCol = ref.collection("students");
 
@@ -3093,7 +3089,6 @@ async function _fv3d_saveRosterToCloudAndLocal(){
 
     await batch.commit();
 
-    // om publicId finns: håll public-banken uppdaterad med rosterTokens
     if (publicIdToUse) {
       try {
         await firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicIdToUse)).set(
@@ -3172,23 +3167,20 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents, publicId }){
       const st = document.getElementById("fv3dRosterStatus");
       const linkEl = document.getElementById("fv3dRosterLink");
 
-      // ALLTID: republish/patch innan kopiering (säkrar rosterTokens + återskapar public-doc om den saknas)
-      let rosterTokensFromUI = [];
-      try { rosterTokensFromUI = (_fv3d_collectRosterFromUI().tokens || []); } catch {}
-      try {
-        if (st) st.textContent = "Säkrar elevlänk & rosterTokens…";
-        const pub = await _fv3d_publishActiveBankToPublic({ rosterTokensOverride: rosterTokensFromUI, silent: true });
-        if (linkEl && pub && pub.publicUrl) linkEl.value = String(pub.publicUrl);
-      } catch (e) {
-        console.error("Kopiera länkar: kunde inte säkra elevlänk:", e);
-        if (_fv3d_isPermissionDenied(e)) {
-          if (st) st.textContent = "❌ Kan inte skapa/uppdatera elevlänk (permission-denied). Fix Firestore Rules för public_banks.";
-          alert("Kan inte skapa/uppdatera elevlänk (permission-denied). Fix Firestore Rules för public_banks.");
-        } else {
-          if (st) st.textContent = "❌ Kunde inte skapa/uppdatera elevlänk. Se konsol.";
-          alert("Kunde inte skapa/uppdatera elevlänk. Se konsolen.");
+      if (linkEl && !linkEl.value.trim()) {
+        let rosterTokensFromUI = [];
+        try { rosterTokensFromUI = (_fv3d_collectRosterFromUI().tokens || []); } catch {}
+        try { await _fv3d_publishActiveBankToPublic({ rosterTokensOverride: rosterTokensFromUI }); } catch (e) {
+          console.error("Kopiera länkar: kunde inte skapa elevlänk:", e);
+          if (_fv3d_isPermissionDenied(e)) {
+            if (st) st.textContent = "❌ Kan inte skapa elevlänk (permission-denied). Fix Firestore Rules för public_banks.";
+            alert("Kan inte skapa elevlänk (permission-denied). Fix Firestore Rules för public_banks.");
+          } else {
+            if (st) st.textContent = "❌ Kunde inte skapa elevlänk. Se konsol.";
+            alert("Kunde inte skapa elevlänk. Se konsolen.");
+          }
+          return;
         }
-        return;
       }
 
       const basePublic = linkEl ? linkEl.value.trim() : "";
@@ -3456,6 +3448,15 @@ function _fv3d_bind(){
   _fv3d_ensureCloudHost();
   _fv3d_ensureRosterBox();
 
+  // ✅ Visas inte förrän du trycker "Ladda banker" (ingen auto-load)
+  try{
+    const { host } = _fv3d_ensureCloudHost();
+    if (host && (!host.innerHTML || !host.innerHTML.trim())) {
+      host.innerHTML = `<li class="mini">Tryck “Ladda banker” för att visa moln-banker.</li>`;
+    }
+    _fv3d_setStatus("Redo.");
+  }catch{}
+
   if (!document.body.dataset.fv3dBound) {
     document.body.dataset.fv3dBound = "1";
 
@@ -3492,27 +3493,21 @@ function _fv3d_bind(){
   }
 
   try {
-    if (_fv3d_hasFirebaseReady() && _fv3d_hasTeacher()) {
-      const { host } = _fv3d_ensureCloudHost();
-      const empty = !host || !host.children || host.children.length === 0;
-      if (empty) window.loadCloudBanksListV4();
-    }
-  } catch {}
-
-  try {
     if (typeof firebaseAuthInstance !== "undefined" && firebaseAuthInstance && typeof firebaseAuthInstance.onAuthStateChanged === "function") {
       if (!firebaseAuthInstance.__fv3dHooked) {
         firebaseAuthInstance.__fv3dHooked = true;
         firebaseAuthInstance.onAuthStateChanged((user)=>{
           try { currentTeacherUser = user || null; } catch {}
-          if (user) {
-            try { window.loadCloudBanksListV4(); } catch {}
-          } else {
-            const { host } = _fv3d_ensureCloudHost();
+          const { host } = _fv3d_ensureCloudHost();
+          if (!user) {
             if (host) host.innerHTML = `<li class="mini">☁️ Logga in med Google för att se dina banker.</li>`;
             _fv3d_setStatus("☁️ Inte inloggad.");
             const box = document.getElementById("fv3dRosterBox");
             if (box) box.classList.add("hidden");
+          } else {
+            // ✅ ingen auto-load av banker här (kräver klick på “Ladda banker”)
+            if (host) host.innerHTML = `<li class="mini">Inloggad. Tryck “Ladda banker”.</li>`;
+            _fv3d_setStatus("Inloggad.");
           }
         });
       }
@@ -3523,6 +3518,9 @@ function _fv3d_bind(){
 document.addEventListener("DOMContentLoaded", _fv3d_bind);
 </script>
 <!-- slut SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (AUTO PUBLISH ON EMAIL, NO PUBLISH BUTTON) -->
+
+
+
 
 
 
