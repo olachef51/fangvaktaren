@@ -2285,7 +2285,7 @@ async function handleGoogleLogout() {
 
 
 <!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (AUTO PUBLISH ON EMAIL, NO PUBLISH BUTTON) -->
-<!-- Ändrat: Tog bort knappen "Skapa elevlänk" och all dess koppling. Omskrivna rader: ca 14. -->
+<!-- Ändrat: Lägger till robust bindning för "Spara bank till molnet"-knapp (text/id-match), samt global save-funktion som skapar/uppdaterar aktiv bank i teachers/{uid}/banks. Omskrivna rader: ca 88. -->
 <script>
 "use strict";
 
@@ -2293,6 +2293,7 @@ async function handleGoogleLogout() {
    3D – Robust moln-UI + inline elevlista-ruta
    - 📧 skapar elevlänken automatiskt (public) vid skick
    - Tydlig hantering av permission-denied
+   - ✅ (NYTT) Spara bank till moln (robust knapp-bindning)
    ========================= */
 
 function _fv3d_escape(s){
@@ -2555,6 +2556,96 @@ function _fv3d_ensureCloudHost(){
 function _fv3d_setStatus(msg){
   const { status } = _fv3d_ensureCloudHost();
   if (status) status.textContent = msg || "";
+}
+
+/* =========================
+   (NYTT) Spara bank till moln – robust knapp-bindning
+   ========================= */
+
+async function _fv3d_saveCurrentBankToTeacherCloud(){
+  if (!_fv3d_hasFirebaseReady()) { alert("Firebase DB saknas (initFirebase körs inte)."); return; }
+  if (!_fv3d_hasTeacher()) { alert("Logga in med Google först."); return; }
+
+  const s = (typeof loadState === "function") ? loadState() : null;
+  if (!s) { alert("State saknas."); return; }
+
+  const bankObj = (typeof getBankFromState === "function") ? getBankFromState() : _fv3d_bankShape((s.bank || {}));
+  const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+
+  const nameInput =
+    document.getElementById("inputCloudBankName") ||
+    document.getElementById("cloudBankName") ||
+    document.getElementById("bankName") ||
+    document.getElementById("inputBankName");
+
+  const rawName = nameInput ? String(nameInput.value || "").trim() : "";
+  const bankName = rawName || ("Moln-bank " + new Date().toISOString().slice(0,10));
+
+  const uid = String(currentTeacherUser.uid);
+  const col = firebaseDbInstance.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION);
+
+  let bankId = _fv3d_activeBankId();
+  let isNew = false;
+
+  if (!bankId) {
+    bankId = col.doc().id;
+    isNew = true;
+  }
+
+  try {
+    _fv3d_setStatus("Sparar bank till molnet…");
+    console.log("[fv3d] Save cloud bank click →", { uid, bankId, bankName, mcq: bankObj.mcq.length, img: bankObj.img.length, drag: bankObj.drag.length });
+
+    const ref = col.doc(String(bankId));
+    const payload = {
+      name: bankName,
+      bank: _fv3d_bankShape(bankObj),
+      goalsMap: goalsMap,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    if (isNew) payload.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+
+    await ref.set(payload, { merge: true });
+
+    _fv3d_setActiveMeta(bankId);
+    _fv3d_setStatus(`✅ Sparat: "${bankName}" (${bankId})`);
+    try { await window.loadCloudBanksListV4(); } catch {}
+    try { _fv3d_markActive(); } catch {}
+  } catch (e) {
+    console.error("[fv3d] Kunde inte spara bank till molnet:", e);
+    if (_fv3d_isPermissionDenied(e)) {
+      _fv3d_setStatus("❌ permission-denied: Firestore Rules blockerar skrivning till teachers/{uid}/banks.");
+      alert("permission-denied: Dina Firestore Rules blockerar skrivning.\n\nDu behöver tillåta att inloggad användare får skriva till teachers/{uid}/banks där uid == request.auth.uid.");
+    } else {
+      _fv3d_setStatus("❌ Kunde inte spara bank. Se konsolen.");
+      alert("Kunde inte spara bank. Se konsolen för detaljer.");
+    }
+  }
+}
+
+function _fv3d_bindSaveButtons(){
+  if (document.body.dataset.fv3dSaveBound) return;
+  document.body.dataset.fv3dSaveBound = "1";
+
+  const ids = [
+    "btnSaveCloudBank",
+    "btnCloudSave",
+    "btnSaveToCloud",
+    "btnSaveBankToCloud",
+    "btnSaveBankCloud",
+    "btnSaveCloud"
+  ];
+
+  ids.forEach((id)=>{
+    const el = document.getElementById(id);
+    if (el && !el.dataset.fv3dHooked) {
+      el.dataset.fv3dHooked = "1";
+      el.addEventListener("click", async (e)=>{
+        e.preventDefault();
+        await _fv3d_saveCurrentBankToTeacherCloud();
+      });
+    }
+  });
 }
 
 /* =========================
@@ -3333,6 +3424,7 @@ function _fv3d_bind(){
   _fv3d_ensureStyles();
   _fv3d_ensureCloudHost();
   _fv3d_ensureRosterBox();
+  _fv3d_bindSaveButtons(); /* ✅ bind även om knappen finns redan nu */
 
   if (!document.body.dataset.fv3dBound) {
     document.body.dataset.fv3dBound = "1";
@@ -3341,12 +3433,26 @@ function _fv3d_bind(){
       const t = e.target && e.target.closest ? e.target.closest("button,[role='button'],a") : null;
       if (!t) return;
 
+      const txt = (t.textContent || "").trim().toLowerCase();
+      const tid = (t.id || "").toLowerCase();
+
+      /* ✅ Spara bank till moln – fångar både id-match och text-match */
+      if (
+        tid.includes("save") && (tid.includes("cloud") || tid.includes("moln")) ||
+        (txt.includes("spara") && (txt.includes("moln") || txt.includes("cloud")))
+      ) {
+        try {
+          e.preventDefault();
+          await _fv3d_saveCurrentBankToTeacherCloud();
+          return;
+        } catch {}
+      }
+
       if (t.id === "btnLoadCloudBanks") {
         e.preventDefault();
         await window.loadCloudBanksListV4();
         return;
       }
-      const txt = (t.textContent || "").trim().toLowerCase();
       if (txt.includes("ladda") && txt.includes("moln")) {
         e.preventDefault();
         await window.loadCloudBanksListV4();
@@ -3383,6 +3489,7 @@ function _fv3d_bind(){
         firebaseAuthInstance.__fv3dHooked = true;
         firebaseAuthInstance.onAuthStateChanged((user)=>{
           try { currentTeacherUser = user || null; } catch {}
+          _fv3d_bindSaveButtons(); /* ✅ bind igen efter login (ifall knappen renderas efteråt) */
           if (user) {
             try { window.loadCloudBanksListV4(); } catch {}
           } else {
@@ -3410,7 +3517,7 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 <!-- start SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
-<!-- Ändrat: Varje delbit renderas som en egen list-item som MCQ (full bredd), med delmål som överskrift (q-text) och delbit som underrubrik (q-meta) + delete-knapp till höger. Omskrivna rader: ca 85 -->
+<!-- Ändrat: Låser init/render av delmål så UI alltid byggs korrekt direkt (även om panelen renderas sent). Omskrivna rader: ca 38. -->
 <script>
 "use strict";
 
@@ -3440,7 +3547,7 @@ function renderGoalsList() {
   if (!host) return;
 
   const s = loadState();
-  const list = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+  const list = s.goalsMap || [];
 
   host.innerHTML = "";
   if (!list.length) {
@@ -3455,40 +3562,18 @@ function renderGoalsList() {
     return;
   }
 
-  // Tolka "Delbit 123: X. Rubrik" => delmål = "X. Rubrik", delbit = parts eller "Delbit 123"
-  function parseGoalAndPart(g){
-    const rawGoal = String(g.goal || "").trim();
-    const rawPart = String(g.parts || "").trim();
-
-    let goalTitle = rawGoal || "-";
-    let partText = rawPart || "-";
-
-    const m = rawGoal.match(/^Delbit\s+(\d+)\s*:\s*(.+)$/i);
-    if (m && (!rawPart || rawPart === "-" || rawPart === "")) {
-      goalTitle = String(m[2] || "").trim() || "-";
-      partText = `Delbit ${String(m[1] || "").trim()}`.trim() || "-";
-    }
-
-    return { goalTitle, partText };
-  }
-
-  // Rendera varje delbit som en "MCQ-lik" list-item (full bredd)
   list.forEach((g) => {
-    const { goalTitle, partText } = parseGoalAndPart(g);
-
     const li = document.createElement("li");
     li.className = "list-item";
-
     li.innerHTML = `
       <div class="list-main">
-        <div class="q-text">${escapeHtml(goalTitle)}</div>
-        <div class="q-meta">${escapeHtml(partText)}</div>
+        <div class="q-text">${escapeHtml(g.goal || "-")}</div>
+        <div class="q-meta">Delbitar: ${escapeHtml(g.parts || "-")}</div>
       </div>
       <div>
-        <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${escapeHtml(g.id)}">🗑️</button>
+        <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${g.id}">🗑️</button>
       </div>
     `;
-
     host.appendChild(li);
   });
 
@@ -3496,7 +3581,7 @@ function renderGoalsList() {
     btn.addEventListener("click", () => {
       const id = btn.getAttribute("data-del-goal-id");
       const s2 = loadState();
-      s2.goalsMap = (Array.isArray(s2.goalsMap) ? s2.goalsMap : []).filter((x) => String(x.id) !== String(id));
+      s2.goalsMap = (s2.goalsMap || []).filter((g) => String(g.id) !== String(id));
       saveState(s2);
       renderGoalsList();
     });
@@ -3556,6 +3641,24 @@ function initGoalsMap() {
 
   renderGoalsList();
 }
+
+/* 🔒 Boot: säkerställ att UI init+render körs även om panelen laddas senare */
+function _fv_goalsBoot(retry = 40) {
+  try {
+    if (window.__fvGoalsBootDone) return;
+    const hasList = !!document.getElementById("goalsList");
+    const hasForm = !!document.getElementById("btnAddGoalPart") || !!document.getElementById("btnSaveGoalsMap");
+    if (hasList || hasForm) {
+      window.__fvGoalsBootDone = true;
+      try { initGoalsMap(); } catch {}
+      try { renderGoalsList(); } catch {}
+      return;
+    }
+  } catch {}
+  if (retry > 0) setTimeout(() => _fv_goalsBoot(retry - 1), 80);
+}
+
+document.addEventListener("DOMContentLoaded", () => _fv_goalsBoot(40));
 </script>
 <!-- slut SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
 
