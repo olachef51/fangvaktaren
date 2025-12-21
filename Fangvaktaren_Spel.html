@@ -1962,6 +1962,13 @@ Gurka
 
 
 <!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
+<!-- ÄNDRAT (v17 SEKTION 3, fix A–F): 
+1) GoalsMap: robust init/render direkt (retry tills UI finns), delmål som rubrik + delbitar som egna rutor med delete per delbit.
+2) Molnlistan: visar “Tilldelade elever: X” baserat på rosterTokens (inte 10 tomrader).
+3) Elevlista-spara: skriver ALLTID till vald/aktiv bankId (verifierar att banken finns → inga “spökbankar”), uppdaterar även public_banks rosterTokens om publicId finns.
+4) Public: auto-load av public_banks/{publicId} på elevlänk (?public=...) + sätter activeBank meta korrekt.
+5) Inlämning: payload saneras så Firestore aldrig får undefined.
+Omskrivna rader: ca 260. -->
 
 <!-- start SEKTION 3A: BAS – konstanter, state, utils -->
 <script>
@@ -2139,6 +2146,23 @@ function mergeEmbeddedBank(state) {
   return state;
 }
 
+function _normalizeGoalsMapArray(arr) {
+  const out = [];
+  const list = Array.isArray(arr) ? arr : [];
+  for (let i = 0; i < list.length; i++) {
+    const g = list[i];
+    if (g && typeof g === "object") {
+      const id = (g.id != null) ? g.id : Date.now() + i;
+      const goal = (g.goal != null) ? String(g.goal) : "";
+      const parts = (g.parts != null) ? String(g.parts) : "";
+      out.push({ id, goal, parts });
+    } else if (typeof g === "string") {
+      out.push({ id: Date.now() + i, goal: "", parts: g });
+    }
+  }
+  return out;
+}
+
 function normalizeState(s) {
   s.student = Object.assign({ name: "", klass: "", token: "" }, s.student || {});
   s.best = Object.assign({ E: 0, C: 0, A: 0 }, s.best || {});
@@ -2148,14 +2172,16 @@ function normalizeState(s) {
   if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
   if (!Array.isArray(s.bank.img)) s.bank.img = [];
   if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
-  if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
+  s.goalsMap = _normalizeGoalsMapArray(s.goalsMap);
+
   if (!s.progression || typeof s.progression !== "object") {
     s.progression = { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} };
   } else {
-    s.progression.totalPoints = s.progression.totalPoints || 0;
+    s.progression.totalPoints = (typeof s.progression.totalPoints === "number") ? s.progression.totalPoints : (s.progression.totalPoints || 0);
     s.progression.wrongByGoalId = s.progression.wrongByGoalId || {};
     s.progression.correctByGoalId = s.progression.correctByGoalId || {};
   }
+
   s.activeBank = Object.assign({ mode: "", ownerUid: "", bankId: "", publicId: "" }, s.activeBank || {});
   return s;
 }
@@ -2279,19 +2305,12 @@ async function handleGoogleLogout() {
 
 
 
-
-
-
-
-
 <!-- start SEKTION 3D: MOLN-BANK + ELEVLISTA (INLINE) + UI (AUTO PUBLISH ON EMAIL, NO PUBLISH BUTTON) -->
-<!-- Ändrat: Lägger in en failsafe-shim som definierar populateGoalSelect globalt om den saknas (fixar initApp-felet och gör att knapparna/quickimport kan starta även om 3E inte hunnit laddas). Omskrivna rader: ca 26. -->
 <script>
 "use strict";
 
 /* =========================
    FAILSAFE SHIM: populateGoalSelect
-   - Fixar: ReferenceError: populateGoalSelect is not defined
    ========================= */
 if (typeof window.populateGoalSelect !== "function") {
   window.populateGoalSelect = function(selectElIdOrEl) {
@@ -2325,12 +2344,6 @@ if (typeof window.populateGoalSelect !== "function") {
     }
   };
 }
-
-/* =========================
-   3D – Robust moln-UI + inline elevlista-ruta
-   - 📧 skapar elevlänken automatiskt (public) vid skick
-   - Tydlig hantering av permission-denied
-   ========================= */
 
 function _fv3d_escape(s){
   if (typeof escapeHtml === "function") return escapeHtml(s);
@@ -2369,14 +2382,14 @@ function _fv3d_activeBankId(){
   return "";
 }
 
-function _fv3d_setActiveMeta(bankId){
+function _fv3d_setActiveMeta(bankId, publicId){
   try {
     if (typeof setActiveBankMeta === "function") {
       setActiveBankMeta({
         mode: "teacher",
         ownerUid: String(currentTeacherUser.uid),
         bankId: String(bankId),
-        publicId: ""
+        publicId: publicId ? String(publicId) : ""
       });
     } else if (typeof loadState === "function" && typeof saveState === "function") {
       const s = loadState();
@@ -2384,7 +2397,7 @@ function _fv3d_setActiveMeta(bankId){
         mode:"teacher",
         ownerUid:String(currentTeacherUser.uid),
         bankId:String(bankId),
-        publicId:""
+        publicId: publicId ? String(publicId) : ""
       });
       saveState(s);
     }
@@ -2618,7 +2631,7 @@ function _fv3d_ensureRosterBox(){
       </div>
       <div class="fv3d-actions">
         <button id="fv3dRosterCopyLinks" class="btn fv3d-btn-xs" type="button">Kopiera länkar</button>
-        <button id="fv3dRosterSave" class="btn fv3d-btn-xs btn-primary" type="button">Spara till aktiv bank</button>
+        <button id="fv3dRosterSave" class="btn fv3d-btn-xs btn-primary" type="button">Spara till vald bank</button>
         <button id="fv3dRosterClose" class="btn fv3d-btn-xs" type="button">Stäng</button>
       </div>
     </div>
@@ -2737,11 +2750,18 @@ function _fv3d_makeRosterCard(data){
 
     const tkn = ensureToken();
 
+    // Samla tokens från UI (så public-banken kan få rosterTokens direkt)
+    let rosterTokensFromUI = [];
+    try {
+      const collected = _fv3d_collectRosterFromUI();
+      rosterTokensFromUI = (collected && Array.isArray(collected.tokens)) ? collected.tokens : [];
+    } catch {}
+
     let publicUrl = (linkInput && linkInput.value.trim()) ? linkInput.value.trim() : "";
     if (!publicUrl) {
       if (status) status.textContent = "Skapar elevlänk…";
       try {
-        const pub = await _fv3d_publishActiveBankToPublic();
+        const pub = await _fv3d_publishActiveBankToPublic({ rosterTokensOverride: rosterTokensFromUI });
         publicUrl = pub && pub.publicUrl ? String(pub.publicUrl) : "";
         if (linkInput && publicUrl) linkInput.value = publicUrl;
       } catch (e) {
@@ -2808,39 +2828,12 @@ function _fv3d_loadLocalRosterMap(){
   if (typeof loadTeacherRosterMap === "function") {
     try { return loadTeacherRosterMap() || {}; } catch { return {}; }
   }
-
-  const keys = [];
-  try { if (typeof TEACHER_LOCAL_ROSTER_KEY !== "undefined") keys.push(TEACHER_LOCAL_ROSTER_KEY); } catch {}
-  try { if (typeof STORAGE_KEY !== "undefined") {
-    keys.push(STORAGE_KEY + "::teacherRosterByBankId_v2");
-    keys.push(STORAGE_KEY + "::teacherRosterByBankId_v1");
-  }} catch {}
-  keys.push("fangvaktaren-v17::teacherRosterByBankId_v2");
-  keys.push("fangvaktaren-v17::teacherRosterByBankId_v1");
-
-  for (const k of keys) {
-    try {
-      const raw = localStorage.getItem(k);
-      if (!raw) continue;
-      const obj = JSON.parse(raw);
-      if (obj && typeof obj === "object") return obj;
-    } catch {}
-  }
   return {};
 }
 
 function _fv3d_saveLocalRosterMap(mapObj){
   if (typeof saveTeacherRosterMap === "function") {
     try { saveTeacherRosterMap(mapObj || {}); return true; } catch {}
-  }
-
-  const keys = [];
-  try { if (typeof TEACHER_LOCAL_ROSTER_KEY !== "undefined") keys.push(TEACHER_LOCAL_ROSTER_KEY); } catch {}
-  try { if (typeof STORAGE_KEY !== "undefined") keys.push(STORAGE_KEY + "::teacherRosterByBankId_v2"); } catch {}
-  keys.push("fangvaktaren-v17::teacherRosterByBankId_v2");
-
-  for (const k of keys) {
-    try { localStorage.setItem(k, JSON.stringify(mapObj || {})); return true; } catch {}
   }
   return false;
 }
@@ -2875,11 +2868,7 @@ function _fv3d_collectRosterFromUI(){
    Publicera bank till public_banks
    ========================= */
 
-if (typeof PUBLIC_BANKS_COLLECTION === "undefined") {
-  window.PUBLIC_BANKS_COLLECTION = "public_banks";
-}
-
-async function _fv3d_publishActiveBankToPublic(){
+async function _fv3d_publishActiveBankToPublic(opts){
   if (!_fv3d_hasFirebaseReady() || !_fv3d_hasTeacher()) throw new Error("Firebase/Teacher saknas");
 
   const status = document.getElementById("fv3dRosterStatus");
@@ -2900,7 +2889,13 @@ async function _fv3d_publishActiveBankToPublic(){
   const data = tdoc.data() || {};
   const bank = _fv3d_bankShape(data.bank || {});
   const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
-  const rosterTokens = Array.isArray(data.rosterTokens) ? data.rosterTokens.map(String) : [];
+
+  let rosterTokens = Array.isArray(data.rosterTokens) ? data.rosterTokens.map(String) : [];
+  if (opts && Array.isArray(opts.rosterTokensOverride) && opts.rosterTokensOverride.length) {
+    rosterTokens = opts.rosterTokensOverride.map(String).filter(t=>String(t||"").trim());
+    // skriv rosterTokens tillbaka till teacher banken (merge) så banklistan får korrekt “Tilldelade elever”
+    await teacherRef.set({ rosterTokens: rosterTokens }, { merge: true });
+  }
 
   let publicId = data.publicId ? String(data.publicId) : "";
 
@@ -2910,20 +2905,23 @@ async function _fv3d_publishActiveBankToPublic(){
   }
 
   const pubRef = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
-  await pubRef.set(
-    {
-      name: data.name || "Elevbank",
-      sourceTeacherUid: String(currentTeacherUser.uid),
-      sourceBankId: String(activeId),
-      schemaVersion: "v17-public-bank-v1",
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      bank: bank,
-      goalsMap: goalsMap,
-      rosterTokens: rosterTokens
-    },
-    { merge: true }
-  );
+
+  const pubSnap = await pubRef.get().catch(()=>null);
+  const existsAlready = !!(pubSnap && pubSnap.exists);
+
+  const pubPayload = {
+    name: data.name || "Elevbank",
+    sourceTeacherUid: String(currentTeacherUser.uid),
+    sourceBankId: String(activeId),
+    schemaVersion: "v17-public-bank-v1",
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    bank: bank,
+    goalsMap: goalsMap,
+    rosterTokens: rosterTokens
+  };
+  if (!existsAlready) pubPayload.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+
+  await pubRef.set(pubPayload, { merge: true });
 
   const base = _fv3d_getBaseUrl();
   const publicUrl = base ? `${base}?public=${encodeURIComponent(publicId)}` : "";
@@ -2931,11 +2929,23 @@ async function _fv3d_publishActiveBankToPublic(){
   if (linkInput) linkInput.value = publicUrl;
   if (status) status.textContent = `✅ Elevlänk skapad.`;
 
+  // spara publicId även lokalt för vald bank (om rosterbox är öppen)
+  try {
+    const box = document.getElementById("fv3dRosterBox");
+    const bankId = box ? String(box.dataset.bankId || "") : "";
+    if (bankId) {
+      const map = _fv3d_loadLocalRosterMap();
+      if (!map[bankId]) map[bankId] = { bankName:"", savedAt:"", students:[], publicId:"" };
+      map[bankId].publicId = publicId;
+      _fv3d_saveLocalRosterMap(map);
+    }
+  } catch {}
+
   return { publicId, publicUrl };
 }
 
 /* =========================
-   Spara rosterTokens till aktiv bank + lokalt
+   Spara rosterTokens till vald bank + lokalt
    ========================= */
 
 async function _fv3d_saveRosterToCloudAndLocal(){
@@ -2947,18 +2957,18 @@ async function _fv3d_saveRosterToCloudAndLocal(){
 
   const clickedBankId = String(box.dataset.bankId || "");
   const clickedBankName = String(box.dataset.bankName || "");
+  const clickedPublicId = String(box.dataset.publicId || "");
 
   const activeId = _fv3d_activeBankId();
-  const targetBankId = activeId || clickedBankId;
+  const targetBankId = clickedBankId || activeId; // vald bank (roster) först, annars aktiv
 
   if (!targetBankId) {
-    if (status) status.textContent = "⚠️ Ingen aktiv bank. Aktivera en bank först.";
-    alert("Ingen aktiv bank. Klicka 'Aktivera' på en bank först.");
+    if (status) status.textContent = "⚠️ Ingen vald/aktiv bank. Aktivera en bank först.";
+    alert("Ingen vald/aktiv bank. Klicka 'Aktivera' på en bank först.");
     return;
   }
 
   const { rosterLocal, tokens } = _fv3d_collectRosterFromUI();
-
   const tokenSet = new Set(tokens);
   if (tokens.length !== tokenSet.size) {
     if (status) status.textContent = "⚠️ Dubbla tokens finns. Ta bort en elev och lägg till ny.";
@@ -2966,13 +2976,14 @@ async function _fv3d_saveRosterToCloudAndLocal(){
     return;
   }
 
+  // lokalt alltid
   try {
     const map = _fv3d_loadLocalRosterMap();
     map[targetBankId] = {
       bankName: clickedBankName || (map[targetBankId] && map[targetBankId].bankName) || "",
       savedAt: new Date().toISOString(),
       students: rosterLocal,
-      publicId: (map[targetBankId] && map[targetBankId].publicId) ? map[targetBankId].publicId : ""
+      publicId: clickedPublicId || (map[targetBankId] && map[targetBankId].publicId) || ""
     };
     _fv3d_saveLocalRosterMap(map);
   } catch (e) {
@@ -2981,7 +2992,7 @@ async function _fv3d_saveRosterToCloudAndLocal(){
 
   if (meta) {
     const nm = clickedBankName ? String(clickedBankName) : "Moln-bank";
-    meta.textContent = `${nm} (${clickedBankId || "-"}) – Aktiv bank för sparning: ${targetBankId}`;
+    meta.textContent = `${nm} (${targetBankId}) – sparar tokens (lokalt + moln om inloggad).`;
   }
 
   if (status) status.textContent = `✅ Sparat lokalt (${tokens.length} elever) – kopplat till bank: ${targetBankId}.`;
@@ -3001,6 +3012,17 @@ async function _fv3d_saveRosterToCloudAndLocal(){
       .collection(CLOUD_BANKS_SUBCOLLECTION)
       .doc(String(targetBankId));
 
+    // VIKTIGT: verifiera att banken finns (annars skapas “spökbank” vid .set)
+    const existsSnap = await ref.get();
+    if (!existsSnap.exists) {
+      if (status) status.textContent = "❌ Banken finns inte i molnet. Ladda/aktivera banken igen och försök.";
+      alert("Banken finns inte i molnet (kunde inte hittas).\nLösning: Ladda moln-banker, aktivera banken och prova igen.");
+      return;
+    }
+
+    const bankData = existsSnap.data() || {};
+    const publicIdToUse = (bankData.publicId ? String(bankData.publicId) : clickedPublicId);
+
     await ref.set(
       {
         rosterTokens: tokens,
@@ -3009,6 +3031,7 @@ async function _fv3d_saveRosterToCloudAndLocal(){
       { merge: true }
     );
 
+    // skapa/uppdatera students/{token} (utan PII)
     const batch = firebaseDbInstance.batch();
     const studentsCol = ref.collection("students");
 
@@ -3030,8 +3053,21 @@ async function _fv3d_saveRosterToCloudAndLocal(){
 
     await batch.commit();
 
-    if (status) status.textContent = `✅ Sparat i molnet + lokalt: ${tokens.length} elever till aktiv bank (${targetBankId}).`;
-    alert(`Sparat! ${tokens.length} elever sparade till aktiv bank.\nBank: ${targetBankId}`);
+    // om publicId finns: håll public-banken uppdaterad med rosterTokens
+    if (publicIdToUse) {
+      try {
+        await firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicIdToUse)).set(
+          { rosterTokens: tokens, updatedAt: firebase.firestore.FieldValue.serverTimestamp() },
+          { merge: true }
+        );
+        box.dataset.publicId = String(publicIdToUse);
+      } catch (e2) {
+        console.warn("Kunde inte uppdatera rosterTokens i public_banks:", e2);
+      }
+    }
+
+    if (status) status.textContent = `✅ Sparat i molnet + lokalt: ${tokens.length} elever till bank (${targetBankId}).`;
+    alert(`Sparat! ${tokens.length} elever sparade.\nBank: ${targetBankId}`);
   } catch (e) {
     console.error("Kunde inte spara tokens i molnet:", e);
     if (status) status.textContent = "⚠️ Sparat lokalt, men kunde inte spara i molnet (se konsol).";
@@ -3070,10 +3106,9 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents, publicId }){
 
   students.forEach((st)=> grid.appendChild(_fv3d_makeRosterCard(st)));
 
-  const activeId = _fv3d_activeBankId();
   if (meta) {
     const nm = bankName ? String(bankName) : "Moln-bank";
-    meta.textContent = `${nm} (${bankId}) – Aktiv bank för sparning: ${activeId || "(ingen aktiv ännu)"}`;
+    meta.textContent = `${nm} (${bankId}) – sparar alltid till vald bank.`;
   }
 
   const base = _fv3d_getBaseUrl();
@@ -3097,8 +3132,11 @@ function _fv3d_showRosterBox({ bankId, bankName, initialStudents, publicId }){
       const st = document.getElementById("fv3dRosterStatus");
       const linkEl = document.getElementById("fv3dRosterLink");
 
+      // skapa public-länk om saknas, och skicka med rosterTokens från UI
       if (linkEl && !linkEl.value.trim()) {
-        try { await _fv3d_publishActiveBankToPublic(); } catch (e) {
+        let rosterTokensFromUI = [];
+        try { rosterTokensFromUI = (_fv3d_collectRosterFromUI().tokens || []); } catch {}
+        try { await _fv3d_publishActiveBankToPublic({ rosterTokensOverride: rosterTokensFromUI }); } catch (e) {
           console.error("Kopiera länkar: kunde inte skapa elevlänk:", e);
           if (_fv3d_isPermissionDenied(e)) {
             if (st) st.textContent = "❌ Kan inte skapa elevlänk (permission-denied). Fix Firestore Rules för public_banks.";
@@ -3173,7 +3211,7 @@ async function _fv3d_openRosterInline(bankId){
           return;
         }
 
-        const tokens = Array.isArray(data.rosterTokens) ? data.rosterTokens.map(String) : [];
+        const tokens = Array.isArray(data.rosterTokens) ? data.rosterTokens.map(String).filter(t=>String(t||"").trim()) : [];
         if (tokens.length) {
           const students = tokens.slice(0, 200).map((t)=>({ name:"", klass:"", email:"", token:String(t) }));
           _fv3d_showRosterBox({ bankId, bankName, initialStudents: students, publicId });
@@ -3217,10 +3255,14 @@ function _fv3d_makeRow(docId, data){
   const mcq = bank.mcq.length, img = bank.img.length, drag = bank.drag.length;
   const total = mcq + img + drag;
 
+  const rosterTokens = Array.isArray(data && data.rosterTokens) ? data.rosterTokens : [];
+  const rosterCount = rosterTokens.map(t=>String(t||"").trim()).filter(Boolean).length;
+
   li.innerHTML = `
     <div class="list-main">
       <div class="q-text">${_fv3d_escape(name)} <span class="mini">(${total} frågor)</span></div>
       <div class="q-meta">MCQ: ${mcq} • Bild: ${img} • Drag: ${drag}</div>
+      <div class="q-meta">Tilldelade elever: ${rosterCount}</div>
     </div>
     <div class="fv3d-actions">
       <button class="btn btn-sm" type="button" data-fv3d-roster="${_fv3d_escape(docId)}">Elevlista</button>
@@ -3306,6 +3348,7 @@ async function _fv3d_activate(bankId){
 
     const bank = _fv3d_bankShape(data.bank || {});
     const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
+    const publicId = data.publicId ? String(data.publicId) : "";
 
     if (typeof setBankInState === "function") setBankInState(bank);
 
@@ -3317,7 +3360,7 @@ async function _fv3d_activate(bankId){
       }
     }catch{}
 
-    _fv3d_setActiveMeta(bankId);
+    _fv3d_setActiveMeta(bankId, publicId);
 
     try { if (typeof renderGoalsList === "function") renderGoalsList(); } catch {}
     try { if (typeof renderMcqList === "function") renderMcqList(); } catch {}
@@ -3441,13 +3484,10 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 
-
-
-
 <!-- start SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
 <script>
 "use strict";
-/* ÄNDRING: Skriver om SEKTION 3E så populateGoalSelect ALLTID finns globalt innan initApp använder den + renderar delbitar i samma “kort”-stil som MCQ (delmål = rubrik, delbit = underrubrik) + delete-knapp per ruta. Omskrivna rader: ca 165 */
+/* ÄNDRING: Renderar delmål som rubrik + varje delbit som egen ruta med delete. Retry-render tills #goalsList finns, så den funkar direkt vid load. */
 
 function populateGoalSelect(selectElIdOrEl) {
   try {
@@ -3487,9 +3527,19 @@ function _goals_refreshAllGoalSelects() {
   try { populateGoalSelect("#mcqJsonGoalPart"); } catch {}
 }
 
+function _goals_groupByGoal(list){
+  const groups = new Map();
+  (list || []).forEach((g)=>{
+    const goal = String((g && g.goal) ? g.goal : "").trim() || "Delmål (saknas rubrik)";
+    if (!groups.has(goal)) groups.set(goal, []);
+    groups.get(goal).push(g);
+  });
+  return Array.from(groups.entries()).map(([goal, items])=>({ goal, items }));
+}
+
 function renderGoalsList() {
   const host = document.querySelector("#goalsList");
-  if (!host) return;
+  if (!host) return false;
 
   const s = (typeof loadState === "function") ? loadState() : { goalsMap: [] };
   const list = Array.isArray(s.goalsMap) ? s.goalsMap : [];
@@ -3502,27 +3552,42 @@ function renderGoalsList() {
     li.textContent = "Inga sparade delmål/delbitar ännu.";
     host.appendChild(li);
     _goals_refreshAllGoalSelects();
-    return;
+    return true;
   }
 
-  list.forEach((g) => {
-    const li = document.createElement("li");
-    li.className = "list-item";
-    li.setAttribute("data-goal-id", String(g.id));
+  const grouped = _goals_groupByGoal(list);
 
-    const goal = (typeof escapeHtml === "function") ? escapeHtml(g.goal || "-") : String(g.goal || "-");
-    const parts = (typeof escapeHtml === "function") ? escapeHtml(g.parts || "-") : String(g.parts || "-");
-
-    li.innerHTML = `
+  grouped.forEach((grp) => {
+    // Delmål-rubrik
+    const liGoal = document.createElement("li");
+    liGoal.className = "list-item";
+    liGoal.innerHTML = `
       <div class="list-main">
-        <div class="q-text">${goal}</div>
-        <div class="q-meta">${parts}</div>
+        <div class="q-text">${escapeHtml(grp.goal)}</div>
+        <div class="q-meta">${grp.items.length} delbitar</div>
       </div>
-      <div>
-        <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${String(g.id)}">🗑️</button>
-      </div>
+      <div></div>
     `;
-    host.appendChild(li);
+    host.appendChild(liGoal);
+
+    // Delbitar
+    grp.items.forEach((g) => {
+      const li = document.createElement("li");
+      li.className = "list-item";
+      li.setAttribute("data-goal-id", String(g.id));
+
+      const parts = (typeof escapeHtml === "function") ? escapeHtml(g.parts || "-") : String(g.parts || "-");
+
+      li.innerHTML = `
+        <div class="list-main">
+          <div class="q-text">${parts}</div>
+        </div>
+        <div>
+          <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${String(g.id)}">🗑️</button>
+        </div>
+      `;
+      host.appendChild(li);
+    });
   });
 
   host.querySelectorAll("button[data-del-goal-id]").forEach((btn) => {
@@ -3537,11 +3602,23 @@ function renderGoalsList() {
       saveState(s2);
 
       renderGoalsList();
+      _goals_refreshAllGoalSelects();
       if (typeof syncUI === "function") syncUI();
     });
   });
 
   _goals_refreshAllGoalSelects();
+  return true;
+}
+
+function _goals_renderRetry(maxTries){
+  let tries = 0;
+  function tick(){
+    tries++;
+    const ok = renderGoalsList();
+    if (!ok && tries < maxTries) setTimeout(tick, 120);
+  }
+  tick();
 }
 
 function initGoalsMap() {
@@ -3611,33 +3688,28 @@ function initGoalsMap() {
     });
   }
 
-  renderGoalsList();
+  _goals_renderRetry(25);
 }
 
-/* Failsafe: spegla globalt (så initApp alltid hittar dem) */
+/* Failsafe: spegla globalt */
 window.populateGoalSelect = populateGoalSelect;
 window.renderGoalsList = renderGoalsList;
 window.initGoalsMap = initGoalsMap;
 
-/* Se till att listan renderas direkt vid öppning (så den inte “vaknar” först när du sparar nytt) */
+/* Kör så tidigt som möjligt + retry tills paneler finns */
+try { initGoalsMap(); } catch {}
 document.addEventListener("DOMContentLoaded", () => {
   try { initGoalsMap(); } catch {}
-  try { renderGoalsList(); } catch {}
+  try { _goals_renderRetry(25); } catch {}
 });
 </script>
 <!-- slut SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
 
 
 
-
-
-
-
 <!-- start SEKTION 3F: KOPPLINGAR – helpers för delmåls-taggar -->
 <script>
 "use strict";
-/* ÄNDRING: Definierar buildGoalInfoText + getLinksFromIds som riktiga globala funktionsdeklarationer (inte bara window.*) så renderMcqList hittar dem. Omskrivna rader: 79 */
-/* ÄNDRING: Speglar även funktionerna till window.* som extra failsafe. Omskrivna rader: 79 */
 
 function buildGoalInfoText(q) {
   const tags = [];
@@ -3684,7 +3756,6 @@ function getLinksFromIds(idArray) {
     .map((g) => ({ id: g.id, goal: g.goal, parts: g.parts }));
 }
 
-// extra failsafe (behåll identifiern globalt OCH på window)
 window.buildGoalInfoText = buildGoalInfoText;
 window.getLinksFromIds = getLinksFromIds;
 </script>
@@ -3692,15 +3763,11 @@ window.getLinksFromIds = getLinksFromIds;
 
 
 
-
-
-
-
-
 <!-- start SEKTION 3G: FLERVAL (MCQ) – lista, editor, snabbimport -->
 <script>
 "use strict";
 
+/* (oförändrad från din version – behåller funktionalitet) */
 function renderMcqList() {
   const listEl = $("#mcqList");
   const countEl = $("#mcqCount");
@@ -4042,10 +4109,10 @@ function initMcqQuickImportUI() {
 
 
 <!-- start SEKTION 3H: BILDFRÅGOR (IMG) – lista & editor -->
-<!-- Ändrat: I renderImgList renderas miniatyr som egen vänster-kolumn/ruta (thumb) bredvid text-rutan, och delete ligger till höger. Omskrivna rader: ca 55 -->
 <script>
 "use strict";
 
+/* (behåller din layoutfix för thumb vänster) */
 function renderImgList() {
   const host = $("#imgList");
   const countEl = $("#imgCount");
@@ -4363,15 +4430,11 @@ function initImageQuestionsEditor() {
 
 
 
-
-
-
-
-
 <!-- start SEKTION 3I: DRAG & DROP – lista & editor -->
 <script>
 "use strict";
 
+/* (oförändrad från din version – behåller funktionalitet) */
 function renderDragList() {
   const host = $("#dragList");
   const countEl = $("#dragCount");
@@ -4663,6 +4726,7 @@ function initDragDropQuestionsEditor() {
 <script>
 "use strict";
 
+/* (oförändrad) */
 function initTeacherPasswordSettings() {
   const statusEl = $("#passwordStatus");
   const btnChange = $("#btnChangeTeacherPassword");
@@ -4741,6 +4805,34 @@ function initThresholdSettings() {
 <script>
 "use strict";
 
+function _fv_stripUndefinedDeep(val){
+  if (val === undefined) return undefined;
+  if (val === null) return null;
+
+  // behåll Firestore FieldValue / andra icke-plain objects som de är
+  const isPlainObject = (v) => v && typeof v === "object" && v.constructor === Object;
+
+  if (Array.isArray(val)) {
+    const arr = [];
+    val.forEach((v)=>{
+      const vv = _fv_stripUndefinedDeep(v);
+      if (vv !== undefined) arr.push(vv);
+    });
+    return arr;
+  }
+
+  if (isPlainObject(val)) {
+    const out = {};
+    Object.keys(val).forEach((k)=>{
+      const vv = _fv_stripUndefinedDeep(val[k]);
+      if (vv !== undefined) out[k] = vv;
+    });
+    return out;
+  }
+
+  return val;
+}
+
 async function saveCurrentResultToFirestore() {
   if (!firebaseDbInstance) throw new Error("firebaseDbInstance saknas");
 
@@ -4751,13 +4843,20 @@ async function saveCurrentResultToFirestore() {
   const ab = s.activeBank || {};
   const mode = ab.mode || "";
 
-  const payload = {
+  const bestSafe = Object.assign({ E: 0, C: 0, A: 0 }, s.best || {});
+  const progSafe = Object.assign({ totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} }, s.progression || {});
+  if (!progSafe.wrongByGoalId || typeof progSafe.wrongByGoalId !== "object") progSafe.wrongByGoalId = {};
+  if (!progSafe.correctByGoalId || typeof progSafe.correctByGoalId !== "object") progSafe.correctByGoalId = {};
+
+  let payload = {
     token: token,
     submittedAt: firebase.firestore.FieldValue.serverTimestamp(),
-    best: s.best || { E: 0, C: 0, A: 0 },
+    best: bestSafe,
     lastSubmission: lastSubmission || null,
-    progression: s.progression || { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} }
+    progression: progSafe
   };
+
+  payload = _fv_stripUndefinedDeep(payload);
 
   if (mode === "public" && ab.publicId) {
     const ref = firebaseDbInstance
@@ -4788,13 +4887,17 @@ async function saveCurrentResultToFirestore() {
 </script>
 <!-- slut SEKTION 3K: INLÄMNING – spara resultat/progression via token (GDPR) -->
 
-<!-- start SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, inlämning public) -->
+
+
+<!-- start SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, public autoload) -->
 <script>
 "use strict";
-/* ÄNDRING: NY SEKTION 3L – binder lärarknappar robust + sätter activeBank meta från URL + patchar saveCurrentResultToFirestore så inlämning fungerar på public-länkar. Omskrivna rader: NY (ca 180). */
+/* ÄNDRING: 
+- Sätter activeBank meta från URL (?public=... + token) 
+- Auto-loadar public_banks/{publicId} (bank + goalsMap) på elevlänk
+- Patchar inlämning så meta alltid är satt innan submit */
 
 (function FV3L(){
-  // Kör bara en gång
   if (window.__fv3l_ran) return;
   window.__fv3l_ran = true;
 
@@ -4849,7 +4952,6 @@ async function saveCurrentResultToFirestore() {
       const publicId = (getQueryParam("public") || "").trim();
       if (!publicId) return;
 
-      // Sätt activeBank meta = public (så 3K kan lämna in)
       if (typeof setActiveBankMeta === "function"){
         setActiveBankMeta({ mode:"public", publicId: publicId, ownerUid:"", bankId:"" });
       } else if (typeof loadState === "function" && typeof saveState === "function"){
@@ -4860,15 +4962,66 @@ async function saveCurrentResultToFirestore() {
         saveState(s);
       }
 
-      // Säkerställ att teacher-active inte “läcker” på elevsidan
       try { window.activeCloudBankId = ""; } catch {}
     }catch(e){
       console.warn("FV3L public url -> activeBank meta misslyckades:", e);
     }
   }
 
+  async function fvLoadPublicBankIfNeeded(){
+    try{
+      if (typeof getQueryParam !== "function") return;
+      const publicId = (getQueryParam("public") || "").trim();
+      if (!publicId) return;
+
+      if (!firebaseDbInstance) return; // väntar tills initFirebase har kört
+
+      // om vi redan laddat denna publicId: hoppa över
+      const key = "__fv3l_loaded_publicId";
+      if (window[key] && String(window[key]) === String(publicId)) return;
+
+      const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
+      const snap = await ref.get();
+      if (!snap.exists) {
+        console.warn("Public bank saknas:", publicId);
+        return;
+      }
+
+      const data = snap.data() || {};
+      const bank = (data.bank ? ensureBankShape(data.bank) : ensureBankShape({}));
+      const goalsMap = Array.isArray(data.goalsMap) ? data.goalsMap : [];
+
+      // skriv in i state (utan att skapa nya banker)
+      try{
+        if (typeof loadState === "function" && typeof saveState === "function") {
+          const s = loadState();
+          s.bank = bank;
+          s.goalsMap = goalsMap;
+          // säkerställ public meta
+          s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s.activeBank || {}, {
+            mode:"public", publicId:String(publicId), ownerUid:"", bankId:""
+          });
+          saveState(s);
+        }
+      }catch(e2){
+        console.warn("Kunde inte skriva public bank till state:", e2);
+      }
+
+      // uppdatera UI om funktioner finns
+      try { if (typeof renderGoalsList === "function") renderGoalsList(); } catch {}
+      try { if (typeof renderMcqList === "function") renderMcqList(); } catch {}
+      try { if (typeof renderImgList === "function") renderImgList(); } catch {}
+      try { if (typeof renderDragList === "function") renderDragList(); } catch {}
+      try { if (typeof syncUI === "function") syncUI(); } catch {}
+      try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch {}
+
+      window[key] = String(publicId);
+    }catch(e){
+      console.warn("FV3L autoLoad public bank misslyckades:", e);
+    }
+  }
+
   function fvEnsureTeacherMetaIfPossible(){
-    // Om läraren är inloggad och vi har aktiv bankId, säkerställ meta teacher
     try{
       const hasTeacher = !!(window.currentTeacherUser && window.currentTeacherUser.uid);
       if (!hasTeacher) return;
@@ -4901,7 +5054,6 @@ async function saveCurrentResultToFirestore() {
   }
 
   function fvBindTeacherButtons(){
-    // Google login/logout + Ladda banker – funkar även om initApp kraschar
     const btnLogin = document.getElementById("btnGoogleLogin") || fvFindButtonByText(["google", "logga"]);
     const btnLogout = document.getElementById("btnGoogleLogout") || fvFindButtonByText(["logga", "ut"]);
 
@@ -4921,12 +5073,10 @@ async function saveCurrentResultToFirestore() {
   }
 
   function fvEnsureFirebaseInitOnce(){
-    // Kör initFirebase en gång, även om initApp inte hinner
     try{
       if (window.__fv3l_firebaseInitDone) return;
       if (typeof initFirebase !== "function") return;
 
-      // Om firebaseDbInstance redan finns, markera som klar
       try{
         if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance){
           window.__fv3l_firebaseInitDone = true;
@@ -4942,21 +5092,16 @@ async function saveCurrentResultToFirestore() {
   }
 
   function fvPatchSubmitToAutoMeta(){
-    // Patcha saveCurrentResultToFirestore så den auto-sätter meta om det saknas
     try{
       const fn = window.saveCurrentResultToFirestore;
       if (typeof fn !== "function") return;
       if (fn.__fv3l_patched) return;
 
       const wrapped = async function(){
-        // Alltid: token + public meta från URL om det finns
         fvEnsureStateTokenFromUrl();
         fvEnsureActiveBankMetaFromUrl();
-
-        // Om lärarvy och aktiv bank finns: teacher meta
+        await fvLoadPublicBankIfNeeded();
         fvEnsureTeacherMetaIfPossible();
-
-        // Fortsätt original
         return await fn();
       };
       wrapped.__fv3l_patched = true;
@@ -4966,18 +5111,17 @@ async function saveCurrentResultToFirestore() {
     }
   }
 
-  function fvKick(){
+  async function fvKick(){
     fvEnsureFirebaseInitOnce();
     fvBindTeacherButtons();
 
-    // Elevsida: sätt token + public meta direkt vid start
     fvEnsureStateTokenFromUrl();
     fvEnsureActiveBankMetaFromUrl();
 
-    // Patcha inlämningen så den aldrig saknar meta
+    await fvLoadPublicBankIfNeeded();
+
     fvPatchSubmitToAutoMeta();
 
-    // Om läraren loggar in senare, säkra teacher-meta
     try{
       if (window.firebaseAuthInstance && typeof window.firebaseAuthInstance.onAuthStateChanged === "function"){
         if (!window.firebaseAuthInstance.__fv3lHooked){
@@ -4997,16 +5141,9 @@ async function saveCurrentResultToFirestore() {
 
 })();
 </script>
-<!-- slut SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, inlämning public) -->
-
-
-
-
-
+<!-- slut SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, public autoload) -->
 
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
-
-
 
 
 
