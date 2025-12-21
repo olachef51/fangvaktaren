@@ -2434,83 +2434,118 @@ function saveState(state) {
 
 
 
-
-
-
-
 <!-- start SEKTION 3C: FIREBASE – init + Google login -->
-<!-- ÄNDRAT: Säkrar att Firebase init körs automatiskt (även elevläge) + Firestore settings/persistence + uppdaterar login/logout-knappar. Ca 30 rader ändrade/tillagda. -->
 <script>
 "use strict";
-
-let _firebaseInitDone = false;
+/* ÄNDRAT: Gör initFirebase “retry” tills Firebase-biblioteket faktiskt finns (slutar visa DB saknas fast det blir OK senare). Omskrivna rader: ca 85 */
 
 function initFirebase() {
   const statusEl = $("#googleStatus");
-  try {
-    if (_firebaseInitDone && firebaseAppInstance && firebaseDbInstance) return;
 
-    if (!window.firebase) {
-      console.warn("Firebase-bibliotek kunde inte hittas.");
-      if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: Firebase-bibliotek kunde inte laddas.";
-      return;
-    }
+  // 🔁 Retry tills firebase-scripts hunnit laddas
+  if (!window.__fv_fb_retry) window.__fv_fb_retry = { tries: 0, max: 30, timer: null, warned: false };
 
-    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
-
-    firebaseAppInstance = firebase.app();
-    firebaseAuthInstance = firebase.auth();
-    firebaseDbInstance = firebase.firestore();
-
-    try {
-      if (firebaseDbInstance && firebaseDbInstance.settings) {
-        firebaseDbInstance.settings({ ignoreUndefinedProperties: true });
-      }
-    } catch (e) {
-      console.warn("Firestore settings misslyckades (ok):", e);
-    }
-
-    try {
-      if (firebase.firestore && firebase.firestore().enablePersistence) {
-        firebase.firestore().enablePersistence().catch(() => {});
-      }
-    } catch (e) {
-      console.warn("Firestore persistence kunde inte aktiveras (ok):", e);
-    }
-
-    if (firebaseAuthInstance) {
-      firebaseAuthInstance.onAuthStateChanged((user) => {
-        currentTeacherUser = user || null;
-
-        const btnLogout = $("#btnGoogleLogout");
-        const btnLogin = $("#btnGooglePlaceholder");
-
-        if (user) {
-          if (statusEl) statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
-          if (btnLogout) btnLogout.classList.remove("hidden");
-          if (btnLogin) btnLogin.classList.add("hidden");
-        } else {
-          if (statusEl) statusEl.textContent = "☁️ Inte inloggad – klicka på Google för att logga in.";
-          if (btnLogout) btnLogout.classList.add("hidden");
-          if (btnLogin) btnLogin.classList.remove("hidden");
-        }
-      });
-    }
-
-    _firebaseInitDone = true;
-    console.log("Firebase init OK");
-  } catch (e) {
-    console.error("Fel vid initFirebase:", e);
-    if (statusEl) statusEl.textContent = "⚠️ Tekniskt fel: kunde inte starta Firebase.";
+  function setStatus(msg) {
+    try { if (statusEl) statusEl.textContent = msg; } catch {}
   }
+
+  function hasFirebaseGlobal() {
+    try {
+      return !!(window.firebase && firebase.initializeApp && firebase.auth && firebase.firestore);
+    } catch {
+      return false;
+    }
+  }
+
+  function tryInitNow() {
+    try {
+      // redan init
+      if (firebaseAppInstance && firebaseAuthInstance && firebaseDbInstance) {
+        return true;
+      }
+
+      if (!hasFirebaseGlobal()) {
+        // Vänta – visa inte “saknas” permanent direkt
+        if (!window.__fv_fb_retry.warned) {
+          window.__fv_fb_retry.warned = true;
+          console.warn("Firebase-bibliotek kunde inte hittas (väntar in script).");
+          setStatus("⏳ Laddar Firebase…");
+        }
+        return false;
+      }
+
+      // init app (compat)
+      if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+
+      firebaseAppInstance = firebase.app();
+      firebaseAuthInstance = firebase.auth();
+      firebaseDbInstance = firebase.firestore();
+
+      if (firebaseAuthInstance && !firebaseAuthInstance.__fvHooked) {
+        firebaseAuthInstance.__fvHooked = true;
+
+        firebaseAuthInstance.onAuthStateChanged((user) => {
+          currentTeacherUser = user || null;
+          const btnLogout = $("#btnGoogleLogout");
+
+          if (user) {
+            setStatus(`☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`);
+            if (btnLogout) btnLogout.classList.remove("hidden");
+
+            // När inloggning blir klar: försök ladda listor
+            try { if (typeof window.loadCloudBanksListV4 === "function") window.loadCloudBanksListV4(); } catch {}
+            try { if (typeof window.loadCloudBanksList === "function") window.loadCloudBanksList(); } catch {}
+            try { if (typeof window._fv3f_reloadStudents === "function") window._fv3f_reloadStudents(); } catch {}
+          } else {
+            setStatus("☁️ Inte inloggad – klicka på Google för att logga in.");
+            if (btnLogout) btnLogout.classList.add("hidden");
+          }
+        });
+      }
+
+      console.log("Firebase init OK");
+      return true;
+    } catch (e) {
+      console.error("Fel vid initFirebase:", e);
+      setStatus("⚠️ Tekniskt fel: kunde inte starta Firebase.");
+      return true; // stoppa retry vid hårdfel
+    }
+  }
+
+  // Försök init nu, annars retry
+  const ok = tryInitNow();
+  if (ok) return;
+
+  // starta retry-loop (max ~3 sek)
+  if (window.__fv_fb_retry.timer) return;
+
+  window.__fv_fb_retry.timer = setInterval(() => {
+    window.__fv_fb_retry.tries++;
+
+    const done = tryInitNow();
+    if (done || window.__fv_fb_retry.tries >= window.__fv_fb_retry.max) {
+      clearInterval(window.__fv_fb_retry.timer);
+      window.__fv_fb_retry.timer = null;
+
+      if (!done) {
+        console.warn("Firebase-bibliotek kunde inte hittas (timeout).");
+        setStatus("⚠️ Tekniskt fel: Firebase-bibliotek kunde inte laddas.");
+      }
+    }
+  }, 120);
 }
 
 async function handleGoogleLogin() {
   const statusEl = $("#googleStatus");
+
+  // Säkerställ init först (retry kan vara igång)
+  try { initFirebase(); } catch {}
+
   if (!firebaseAuthInstance) {
     alert("Tekniskt fel: Firebase Auth saknas.");
     return;
   }
+
   try {
     const provider = new firebase.auth.GoogleAuthProvider();
     await firebaseAuthInstance.signInWithPopup(provider);
@@ -2527,13 +2562,12 @@ async function handleGoogleLogout() {
     console.error("Kunde inte logga ut:", err);
   }
 }
-
-/* Viktigt: init körs även i elevläge så att token-resultat kan sparas i Firestore */
-(function _autoInitFirebaseNow() {
-  try { initFirebase(); } catch {}
-})();
 </script>
 <!-- slut SEKTION 3C: FIREBASE – init + Google login -->
+
+
+
+
 
 
 
@@ -7790,5 +7824,3 @@ document.addEventListener("DOMContentLoaded", function () {
 </body>
 </html>
 <!-- slut SEKTION 6: AVSLUTANDE TAGGAR -->
-
-
