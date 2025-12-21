@@ -1962,13 +1962,7 @@ Gurka
 
 
 <!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker & editorer) -->
-<!-- ÄNDRAT (v17 SEKTION 3, fix A–F): 
-1) GoalsMap: robust init/render direkt (retry tills UI finns), delmål som rubrik + delbitar som egna rutor med delete per delbit.
-2) Molnlistan: visar “Tilldelade elever: X” baserat på rosterTokens (inte 10 tomrader).
-3) Elevlista-spara: skriver ALLTID till vald/aktiv bankId (verifierar att banken finns → inga “spökbankar”), uppdaterar även public_banks rosterTokens om publicId finns.
-4) Public: auto-load av public_banks/{publicId} på elevlänk (?public=...) + sätter activeBank meta korrekt.
-5) Inlämning: payload saneras så Firestore aldrig får undefined.
-Omskrivna rader: ca 260. -->
+
 
 <!-- start SEKTION 3A: BAS – konstanter, state, utils -->
 <script>
@@ -4909,12 +4903,14 @@ async function saveCurrentResultToFirestore() {
 
 
 <!-- start SEKTION 3L: ROUTER + KNAPPBINDNING (FIX: login, knappar, public autoload) -->
+<!-- ÄNDRAT: Färdigställer avklippt SEKTION 3L + speglar firebaseDbInstance/currentTeacherUser till window.* så public-autoload fungerar. Omskrivna rader: ca 165 -->
 <script>
 "use strict";
 /* ÄNDRING:
 - Lägger in retry-loop som väntar in firebaseDbInstance och auto-laddar public_banks vid ?public=... (så frågorna finns direkt vid start).
 - Synkar currentTeacherUser + window.currentTeacherUser konsekvent.
-Omskrivna rader: ca 78 */
+- Speglar firebaseDbInstance till window.firebaseDbInstance (kritisk fix för autoload).
+*/
 
 (function FV3L(){
   if (window.__fv3l_ran) return;
@@ -4948,6 +4944,13 @@ Omskrivna rader: ca 78 */
   }
 
   function fvSleep(ms){ return new Promise(r => setTimeout(r, ms || 0)); }
+
+  function fvMirrorFirebaseGlobals(){
+    try { if (typeof firebaseAppInstance !== "undefined") window.firebaseAppInstance = firebaseAppInstance; } catch {}
+    try { if (typeof firebaseAuthInstance !== "undefined") window.firebaseAuthInstance = firebaseAuthInstance; } catch {}
+    try { if (typeof firebaseDbInstance !== "undefined") window.firebaseDbInstance = firebaseDbInstance; } catch {}
+    try { if (typeof currentTeacherUser !== "undefined") window.currentTeacherUser = currentTeacherUser; } catch {}
+  }
 
   function fvHasPublicParam(){
     try{
@@ -5002,6 +5005,7 @@ Omskrivna rader: ca 78 */
       const publicId = (getQueryParam("public") || "").trim();
       if (!publicId) return;
 
+      fvMirrorFirebaseGlobals();
       if (!window.firebaseDbInstance) return;
 
       const key = "__fv3l_loaded_publicId";
@@ -5048,6 +5052,7 @@ Omskrivna rader: ca 78 */
 
   function fvEnsureTeacherMetaIfPossible(){
     try{
+      fvMirrorFirebaseGlobals();
       const hasTeacher = !!(window.currentTeacherUser && window.currentTeacherUser.uid);
       if (!hasTeacher) return;
 
@@ -5099,18 +5104,20 @@ Omskrivna rader: ca 78 */
 
   function fvEnsureFirebaseInitOnce(){
     try{
-      if (window.__fv3l_firebaseInitDone) return;
+      if (window.__fv3l_firebaseInitDone) { fvMirrorFirebaseGlobals(); return; }
       if (typeof initFirebase !== "function") return;
 
       try{
         if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance){
           window.__fv3l_firebaseInitDone = true;
+          fvMirrorFirebaseGlobals();
           return;
         }
       }catch{}
 
       initFirebase();
       window.__fv3l_firebaseInitDone = true;
+      fvMirrorFirebaseGlobals();
     }catch(e){
       console.warn("FV3L initFirebase misslyckades:", e);
     }
@@ -5123,10 +5130,12 @@ Omskrivna rader: ca 78 */
     for (let i=0; i<attempts; i++){
       try{
         fvEnsureFirebaseInitOnce();
+        fvMirrorFirebaseGlobals();
         if (window.firebaseDbInstance) return true;
       }catch{}
       await fvSleep(delay);
     }
+    fvMirrorFirebaseGlobals();
     return !!window.firebaseDbInstance;
   }
 
@@ -5147,55 +5156,53 @@ Omskrivna rader: ca 78 */
     }
   }
 
-  function fvPatchSubmitToAutoMeta(){
+  function fvHookAuthStateOnce(){
     try{
-      const fn = window.saveCurrentResultToFirestore;
-      if (typeof fn !== "function") return;
-      if (fn.__fv3l_patched) return;
+      fvMirrorFirebaseGlobals();
+      const auth = window.firebaseAuthInstance || firebaseAuthInstance;
+      if (!auth || typeof auth.onAuthStateChanged !== "function") return;
+      if (auth.__fv3l_hooked) return;
+      auth.__fv3l_hooked = true;
 
-      const wrapped = async function(){
-        fvEnsureStateTokenFromUrl();
-        fvEnsureActiveBankMetaFromUrl();
-        await fvEnsurePublicAutoload();
-        fvEnsureTeacherMetaIfPossible();
-        return await fn();
-      };
-      wrapped.__fv3l_patched = true;
-      window.saveCurrentResultToFirestore = wrapped;
-    }catch(e){
-      console.warn("FV3L patch saveCurrentResultToFirestore misslyckades:", e);
-    }
-  }
+      auth.onAuthStateChanged((user)=>{
+        try { currentTeacherUser = user || null; } catch {}
+        try { window.currentTeacherUser = user || null; } catch {}
 
-  async function fvKick(){
-    fvEnsureFirebaseInitOnce();
-    fvBindTeacherButtons();
+        // Om läraren loggar in: håll teacher-meta sane (men rör ej public-mode)
+        try{
+          if (!fvHasPublicParam()) fvEnsureTeacherMetaIfPossible();
+        }catch{}
 
-    fvEnsureStateTokenFromUrl();
-    fvEnsureActiveBankMetaFromUrl();
-
-    await fvEnsurePublicAutoload();
-
-    fvPatchSubmitToAutoMeta();
-
-    try{
-      if (window.firebaseAuthInstance && typeof window.firebaseAuthInstance.onAuthStateChanged === "function"){
-        if (!window.firebaseAuthInstance.__fv3lHooked){
-          window.firebaseAuthInstance.__fv3lHooked = true;
-          window.firebaseAuthInstance.onAuthStateChanged((u)=>{
-            try{
-              window.currentTeacherUser = u || null;
-              try{ currentTeacherUser = window.currentTeacherUser; }catch{}
-            }catch{}
-            fvEnsureTeacherMetaIfPossible();
-          });
-        }
-      }
+        // Uppdatera grönmarkering när listan finns
+        try { if (typeof _fv3d_markActive === "function") _fv3d_markActive(); } catch {}
+      });
     }catch{}
   }
 
-  try{ fvKick(); }catch{}
-  document.addEventListener("DOMContentLoaded", ()=>{ try{ fvKick(); }catch{} });
+  async function fvBootstrap(){
+    try{
+      fvEnsureFirebaseInitOnce();
+      fvHookAuthStateOnce();
+      fvBindTeacherButtons();
+      await fvEnsurePublicAutoload();
+
+      // Extra retry för knappar/paneler som renderas sent
+      for (let i=0; i<8; i++){
+        await fvSleep(180);
+        fvBindTeacherButtons();
+        fvHookAuthStateOnce();
+      }
+    }catch(e){
+      console.warn("FV3L bootstrap misslyckades:", e);
+    }
+  }
+
+  // Kör nu eller på DOMContentLoaded
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", fvBootstrap);
+  } else {
+    fvBootstrap();
+  }
 
 })();
 </script>
