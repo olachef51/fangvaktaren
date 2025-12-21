@@ -3488,151 +3488,139 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 
-<!-- start SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
-<!-- Ändrat: Låser init/render av delmål så UI alltid byggs korrekt direkt (även om panelen renderas sent). Omskrivna rader: ca 38. -->
+<!-- start SEKTION 3E: FIX PUBLIC BANK-META FÖR INLÄMNING (PLACERA EFTER SEKTIONEN DÄR firebaseDbInstance INITIERAS) -->
+<!-- ÄNDRAT: Sätter aktiv bank-meta automatiskt när spelet öppnas med ?public=..., så inlämning fungerar (undviker "Ingen aktiv bank-meta"). Omskrivna rader: ca 95. -->
 <script>
 "use strict";
 
-function populateGoalSelect(selectElId) {
-  const sel = typeof selectElId === "string" ? $(selectElId) : $("#mcqGoalPart");
-  if (!sel) return;
+/* =========================
+   3E – Public bank-meta fix (elevsida)
+   - När URL har ?public=PUBLIC_ID: hämta public_banks-doc
+   - Sätt activeBank meta: mode="public", ownerUid=sourceTeacherUid, bankId=sourceBankId, publicId
+   - Kör med retry om Firebase inte är redo direkt
+   ========================= */
 
-  const s = loadState();
-  const goals = s.goalsMap || [];
-
-  sel.innerHTML = "";
-  const def = document.createElement("option");
-  def.value = "";
-  def.textContent = "Ingen koppling";
-  sel.appendChild(def);
-
-  goals.forEach((g) => {
-    const opt = document.createElement("option");
-    opt.value = String(g.id);
-    opt.textContent = `${g.goal || "-"} (Delbitar: ${g.parts || "-"})`;
-    sel.appendChild(opt);
-  });
-}
-
-function renderGoalsList() {
-  const host = $("#goalsList");
-  if (!host) return;
-
-  const s = loadState();
-  const list = s.goalsMap || [];
-
-  host.innerHTML = "";
-  if (!list.length) {
-    const li = document.createElement("li");
-    li.className = "mini";
-    li.textContent = "Inga sparade delmål ännu.";
-    host.appendChild(li);
-    populateGoalSelect("#mcqGoalPart");
-    populateGoalSelect("#imgGoalPart");
-    populateGoalSelect("#dragGoalPart");
-    populateGoalSelect("#mcqJsonGoalPart");
-    return;
+(function(){
+  function _fv3e_hasDb(){
+    return !!(typeof firebaseDbInstance !== "undefined" && firebaseDbInstance);
   }
 
-  list.forEach((g) => {
-    const li = document.createElement("li");
-    li.className = "list-item";
-    li.innerHTML = `
-      <div class="list-main">
-        <div class="q-text">${escapeHtml(g.goal || "-")}</div>
-        <div class="q-meta">Delbitar: ${escapeHtml(g.parts || "-")}</div>
-      </div>
-      <div>
-        <button class="btn btn-sm btn-danger" type="button" data-del-goal-id="${g.id}">🗑️</button>
-      </div>
-    `;
-    host.appendChild(li);
-  });
+  function _fv3e_getPublicId(){
+    try{
+      const p = new URLSearchParams(window.location.search || "");
+      const id = (p.get("public") || "").trim();
+      return id || "";
+    }catch{ return ""; }
+  }
 
-  host.querySelectorAll("button[data-del-goal-id]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.getAttribute("data-del-goal-id");
-      const s2 = loadState();
-      s2.goalsMap = (s2.goalsMap || []).filter((g) => String(g.id) !== String(id));
-      saveState(s2);
-      renderGoalsList();
-    });
-  });
-
-  populateGoalSelect("#mcqGoalPart");
-  populateGoalSelect("#imgGoalPart");
-  populateGoalSelect("#dragGoalPart");
-  populateGoalSelect("#mcqJsonGoalPart");
-}
-
-function initGoalsMap() {
-  const inputGoal = $("#inputGoalSingle");
-  const inputPart = $("#inputPartSingle");
-  const btnAdd = $("#btnAddGoalPart");
-  const btnSave = $("#btnSaveGoalsMap");
-  const btnClear = $("#btnClearGoalsMap");
-  const statusEl = $("#goalsStatus");
-
-  if (btnAdd) {
-    btnAdd.addEventListener("click", () => {
-      const goalText = (inputGoal && inputGoal.value.trim()) || "";
-      const partsText = (inputPart && inputPart.value.trim()) || "";
-      if (!goalText || !partsText) {
-        if (statusEl) statusEl.textContent = "Skriv både delmål och delbit.";
+  function _fv3e_setActiveMeta(meta){
+    try{
+      if (typeof setActiveBankMeta === "function") {
+        setActiveBankMeta(meta);
         return;
       }
-      const s = loadState();
-      if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
-      s.goalsMap.push({ id: Date.now(), goal: goalText, parts: partsText });
-      saveState(s);
-      if (inputGoal) inputGoal.value = "";
-      if (inputPart) inputPart.value = "";
-      if (statusEl) statusEl.textContent = "Delbit tillagd (glöm inte att spara).";
-      renderGoalsList();
-    });
+    }catch{}
+
+    try{
+      if (typeof loadState === "function" && typeof saveState === "function") {
+        const s = loadState();
+        s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"" }, s.activeBank || {}, meta);
+        saveState(s);
+      }
+    }catch{}
   }
 
-  if (btnSave) {
-    btnSave.addEventListener("click", () => {
-      const s = loadState();
-      saveState(s);
-      if (statusEl) statusEl.textContent = "Delmål & delbitar sparade.";
-    });
+  async function _fv3e_fetchPublicDoc(publicId){
+    const colName = (typeof PUBLIC_BANKS_COLLECTION !== "undefined" && PUBLIC_BANKS_COLLECTION) ? String(PUBLIC_BANKS_COLLECTION) : "public_banks";
+    const ref = firebaseDbInstance.collection(colName).doc(String(publicId));
+    const snap = await ref.get();
+    if (!snap.exists) return null;
+    return snap.data() || {};
   }
 
-  if (btnClear) {
-    btnClear.addEventListener("click", () => {
-      if (!confirm("Ta bort alla delmål och delbitar?")) return;
-      const s = loadState();
-      s.goalsMap = [];
-      saveState(s);
-      if (statusEl) statusEl.textContent = "Alla delmål borttagna.";
-      renderGoalsList();
-    });
-  }
+  async function _fv3e_ensurePublicMetaOnce(){
+    const publicId = _fv3e_getPublicId();
+    if (!publicId) return false;
 
-  renderGoalsList();
-}
+    if (!_fv3e_hasDb()) return false;
 
-/* 🔒 Boot: säkerställ att UI init+render körs även om panelen laddas senare */
-function _fv_goalsBoot(retry = 40) {
-  try {
-    if (window.__fvGoalsBootDone) return;
-    const hasList = !!document.getElementById("goalsList");
-    const hasForm = !!document.getElementById("btnAddGoalPart") || !!document.getElementById("btnSaveGoalsMap");
-    if (hasList || hasForm) {
-      window.__fvGoalsBootDone = true;
-      try { initGoalsMap(); } catch {}
-      try { renderGoalsList(); } catch {}
-      return;
+    // Om meta redan finns och matchar publicId – klart
+    try{
+      if (typeof loadState === "function") {
+        const s = loadState();
+        const ab = s && s.activeBank ? s.activeBank : null;
+        if (ab && String(ab.mode || "") === "public" && String(ab.publicId || "") === String(publicId) && ab.ownerUid && ab.bankId) {
+          return true;
+        }
+      }
+    }catch{}
+
+    const data = await _fv3e_fetchPublicDoc(publicId);
+    if (!data) return false;
+
+    const sourceTeacherUid = (data.sourceTeacherUid || data.ownerUid || data.teacherUid || "").toString().trim();
+    const sourceBankId = (data.sourceBankId || data.sourceBank || data.bankId || "").toString().trim();
+
+    if (!sourceTeacherUid || !sourceBankId) {
+      console.warn("[3E] public_banks saknar sourceTeacherUid/sourceBankId:", { publicId, dataKeys: Object.keys(data||{}) });
+      return false;
     }
-  } catch {}
-  if (retry > 0) setTimeout(() => _fv_goalsBoot(retry - 1), 80);
-}
 
-document.addEventListener("DOMContentLoaded", () => _fv_goalsBoot(40));
+    _fv3e_setActiveMeta({
+      mode: "public",
+      ownerUid: sourceTeacherUid,
+      bankId: sourceBankId,
+      publicId: publicId
+    });
+
+    // (Valfritt men hjälpsamt) spegla även i globalt fält om det används på andra ställen
+    try { window.activeCloudBankId = String(sourceBankId); } catch {}
+
+    return true;
+  }
+
+  async function _fv3e_ensurePublicMetaWithRetry(){
+    const publicId = _fv3e_getPublicId();
+    if (!publicId) return;
+
+    let tries = 0;
+    const maxTries = 25; // ~5 sek vid 200ms
+    const waitMs = 200;
+
+    const tick = async () => {
+      tries++;
+      try{
+        const ok = await _fv3e_ensurePublicMetaOnce();
+        if (ok) {
+          // console.log("[3E] Public bank-meta OK");
+          return;
+        }
+      }catch(e){
+        console.warn("[3E] Kunde inte sätta public bank-meta:", e);
+      }
+
+      if (tries < maxTries) {
+        setTimeout(tick, waitMs);
+      } else {
+        console.warn("[3E] Gav upp efter retries – public meta sattes inte (inlämning kan falla).");
+      }
+    };
+
+    tick();
+  }
+
+  // Kör ASAP + på DOMContentLoaded
+  try{
+    _fv3e_ensurePublicMetaWithRetry();
+  }catch{}
+
+  document.addEventListener("DOMContentLoaded", ()=>{
+    try { _fv3e_ensurePublicMetaWithRetry(); } catch {}
+  });
+
+})();
 </script>
-<!-- slut SEKTION 3E: DELMÅL & DELBITAR (goalsMap) -->
+<!-- slut SEKTION 3E: FIX PUBLIC BANK-META FÖR INLÄMNING (PLACERA EFTER SEKTIONEN DÄR firebaseDbInstance INITIERAS) -->
 
 
 
