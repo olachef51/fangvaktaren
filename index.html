@@ -4153,8 +4153,8 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 
-<!-- start SEKTION 3Dd: ELEVRESULTAT – elevflikar (tokens->namn via lokal roster), auto-select, stabil ordning -->
-<!-- ÄNDRING: (1) Tar bort dubbla elevlistor genom att dölja ev. gamla playedStudentsList-kortet, (2) renderar elevnamn som flikar (namn/klass från lokal roster om finns), (3) auto-väljer topp-elev och placerar kortet överst i Progress. Omskrivna/nya rader: ca 210 -->
+<!-- start SEKTION 3Dd: ELEVRESULTAT – elevflikar (snabb), filtrerar tomma, klick visar elevinfo -->
+<!-- ÄNDRING: (1) Tar bort extra vänteloopar för snabb laddning, (2) filtrerar bort “tomma” elever utan namn/klass/poäng (om ej finns i lokal roster), (3) fixar klick så elevinfo alltid renderas i Poäng/Starka/Svaga/Export. Omskrivna/nya rader: ca 235 -->
 <script>
 "use strict";
 
@@ -4175,31 +4175,20 @@ function _fv3d_hideLegacyPlayedStudentsUI(){
   }catch{}
 }
 
-function _fv3d_waitDbReady(maxMs){
-  const start = Date.now();
-  return new Promise((resolve)=>{
-    (function tick(){
-      try{
-        if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return resolve(true);
-      }catch{}
-      if ((Date.now() - start) >= (maxMs || 4500)) return resolve(false);
-      setTimeout(tick, 80);
-    })();
-  });
-}
-
 function _fv3d_safeNum(x){ return (typeof x === "number" && isFinite(x)) ? x : 0; }
 
-function _fv3d_formatBestLines(best, thres){
+function _fv3d_formatBestLinesHtml(best, thres){
   const b = best || { E:0, C:0, A:0 };
   const t = thres || { E:0, C:0, A:0 };
-  const lineE = `Bästa E: ${_fv3d_safeNum(b.E)}% (gräns ${_fv3d_safeNum(t.E)}%)`;
-  const lineC = `Bästa C: ${_fv3d_safeNum(b.C)}% (gräns ${_fv3d_safeNum(t.C)}%)`;
-  const lineA = `Bästa A: ${_fv3d_safeNum(b.A)}% (gräns ${_fv3d_safeNum(t.A)}%)`;
-  return `${lineE}\n${lineC}\n${lineA}`;
+  return [
+    `Bästa:`,
+    `• E ${_fv3d_safeNum(b.E)}% (gräns ${_fv3d_safeNum(t.E)}%)`,
+    `• C ${_fv3d_safeNum(b.C)}% (gräns ${_fv3d_safeNum(t.C)}%)`,
+    `• A ${_fv3d_safeNum(b.A)}% (gräns ${_fv3d_safeNum(t.A)}%)`
+  ].join("<br>");
 }
 
-function _fv3d_formatLastLine(lastSubmission){
+function _fv3d_formatLastLineHtml(lastSubmission){
   if (!lastSubmission || typeof lastSubmission !== "object") return "Senast: -";
   const lvl = String(lastSubmission.level || lastSubmission.currentLevel || "-");
   const pct = (typeof lastSubmission.percent === "number") ? `${Math.round(lastSubmission.percent)}%` : (lastSubmission.scorePct != null ? `${lastSubmission.scorePct}%` : "-");
@@ -4210,77 +4199,6 @@ function _fv3d_formatLastLine(lastSubmission){
   const ratio = (corr != null && tot != null) ? ` (${corr}/${tot} rätt)` : "";
   const add   = (pts != null) ? ` +${pts}p` : "";
   return `Senast: nivå ${lvl} – ${pct}${ratio}${add}`;
-}
-
-function _fv3d_applyStudentToProgressUI(studentDoc){
-  const pointsEl = document.getElementById("progressPointsText");
-  if (!pointsEl) return;
-
-  const s = (typeof loadState === "function") ? loadState() : null;
-  const thres = (s && s.thres) ? s.thres : {E:0,C:0,A:0};
-
-  const totalPoints = _fv3d_safeNum(
-    studentDoc && studentDoc.totalPoints != null
-      ? studentDoc.totalPoints
-      : (studentDoc && studentDoc.progression && studentDoc.progression.totalPoints)
-  );
-
-  const lastSub = studentDoc && (studentDoc.lastSubmission || studentDoc.lastResult || studentDoc.last);
-  const best = studentDoc && (studentDoc.best || {E:0,C:0,A:0});
-
-  const lines =
-    `Totalt: ${totalPoints} p.` + "\n" +
-    _fv3d_formatLastLine(lastSub) + "\n" +
-    _fv3d_formatBestLines(best, thres);
-
-  pointsEl.textContent = lines;
-
-  const prog = studentDoc && (studentDoc.progression || { totalPoints: totalPoints, wrongByGoalId:{}, correctByGoalId:{} });
-  try { if (typeof _fv3d_renderStrongWeakFromProgression === "function") _fv3d_renderStrongWeakFromProgression(prog); } catch {}
-
-  const exportEl = document.getElementById("progressExportJson");
-  if (exportEl) {
-    try {
-      const payload = {
-        token: studentDoc && studentDoc.token ? String(studentDoc.token) : "",
-        name: studentDoc && studentDoc.name ? String(studentDoc.name) : "",
-        klass: studentDoc && studentDoc.klass ? String(studentDoc.klass) : "",
-        totalPoints: totalPoints,
-        best: best,
-        last: lastSub || null,
-        progression: prog
-      };
-      exportEl.value = JSON.stringify(payload);
-    } catch {}
-  }
-}
-
-function _fv3d_getActiveContextForResults(){
-  try {
-    if (typeof loadState === "function") {
-      const s = loadState();
-      const ab = (s && s.activeBank) ? s.activeBank : {};
-      return {
-        mode: String(ab.mode || ""),
-        ownerUid: String(ab.ownerUid || ""),
-        bankId: String(ab.bankId || ""),
-        publicId: String(ab.publicId || "")
-      };
-    }
-  } catch {}
-  return { mode:"", ownerUid:"", bankId:"", publicId:"" };
-}
-
-async function _fv3d_resolveTeacherBankFromPublic(publicId){
-  if (!_fv3d_hasFirebaseReady()) throw new Error("Firebase saknas");
-  const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
-  const snap = await ref.get();
-  if (!snap.exists) throw new Error("Public bank finns inte");
-  const data = snap.data() || {};
-  const uid = String(data.sourceTeacherUid || "").trim();
-  const bid = String(data.sourceBankId || "").trim();
-  if (!uid || !bid) throw new Error("Public bank saknar sourceTeacherUid/sourceBankId");
-  return { ownerUid: uid, bankId: bid };
 }
 
 function _fv3d_localRosterTokenMap(bankId){
@@ -4305,12 +4223,14 @@ function _fv3d_localRosterTokenMap(bankId){
   }
 }
 
-function _fv3d_labelFromToken(token, rosterMap){
-  const tk = String(token || "").trim();
-  const r = rosterMap && rosterMap[tk] ? rosterMap[tk] : null;
-  const nm = r && r.name ? r.name : "";
-  const kl = r && r.klass ? r.klass : "";
-  if (nm || kl) return `${nm || "Okänd"}${kl ? " (" + kl + ")" : ""}`;
+function _fv3d_labelFromStudent(st, rosterMap){
+  const tk = String((st && st.token) ? st.token : "").trim();
+  const rm = rosterMap && rosterMap[tk] ? rosterMap[tk] : null;
+
+  const name = String((st && st.name) ? st.name : (rm && rm.name) ? rm.name : "").trim();
+  const klass = String((st && st.klass) ? st.klass : (rm && rm.klass) ? rm.klass : "").trim();
+
+  if (name || klass) return `${name || "Okänd"}${klass ? " (" + klass + ")" : ""}`;
   return tk ? `Token: ${tk}` : "Okänd elev";
 }
 
@@ -4364,22 +4284,148 @@ function _fv3d_setActiveTab(token){
   }catch{}
 }
 
-async function _fv3d_loadStudentsAndRenderTabs(){
+/* ====== stark/svag (lokalt i 3Dd för att undvika “ingen info”) ====== */
+
+function _fv3d_renderStrongWeakFromProgression(prog){
+  const strongList = document.getElementById("progressStrongList");
+  const weakList = document.getElementById("progressWeakList");
+  if (!strongList || !weakList) return;
+
+  const s = (typeof loadState === "function") ? loadState() : null;
+  const goalsMap = (s && Array.isArray(s.goalsMap)) ? s.goalsMap : [];
+
+  const correct = (prog && prog.correctByGoalId) ? prog.correctByGoalId : {};
+  const wrong   = (prog && prog.wrongByGoalId) ? prog.wrongByGoalId : {};
+
+  const rows = [];
+  const keys = new Set([ ...Object.keys(correct||{}), ...Object.keys(wrong||{}) ]);
+
+  keys.forEach((k)=>{
+    const c = _fv3d_safeNum(correct[k]);
+    const w = _fv3d_safeNum(wrong[k]);
+    const a = c + w;
+    if (!a) return;
+    const acc = a ? (c / a) : 0;
+    const gm = goalsMap.find(g => String(g.id) === String(k));
+    const label = gm ? `${gm.parts || ""} – ${gm.goal || "Delmål"}`.trim() : `Delbit-id: ${k}`;
+    rows.push({ key:String(k), c, w, a, acc, label });
+  });
+
+  const strong = rows
+    .filter(r => r.a >= 2 && r.acc >= 0.80)
+    .sort((a,b)=> (b.acc - a.acc) || (b.a - a.a))
+    .slice(0, 8);
+
+  const weak = rows
+    .filter(r => (r.a >= 2 && r.acc <= 0.60) || (r.w >= 2 && r.acc < 0.80))
+    .sort((a,b)=> (b.w - a.w) || (a.acc - b.acc) || (b.a - a.a))
+    .slice(0, 8);
+
+  strongList.innerHTML = "";
+  weakList.innerHTML = "";
+
+  if (!strong.length) strongList.innerHTML = `<li>Inga starka delbitar hittades ännu.</li>`;
+  else {
+    strong.forEach(r=>{
+      const li = document.createElement("li");
+      li.textContent = `${r.label} • ${Math.round(r.acc*100)}% (${r.c} rätt, ${r.w} fel)`;
+      strongList.appendChild(li);
+    });
+  }
+
+  if (!weak.length) weakList.innerHTML = `<li>Inga delbitar att öva på hittades ännu.</li>`;
+  else {
+    weak.forEach(r=>{
+      const li = document.createElement("li");
+      li.textContent = `${r.label} • ${Math.round(r.acc*100)}% (${r.c} rätt, ${r.w} fel)`;
+      weakList.appendChild(li);
+    });
+  }
+}
+
+function _fv3d_applyStudentToProgressUI(studentDoc){
+  const pointsEl = document.getElementById("progressPointsText");
+  if (!pointsEl) return;
+
+  const s = (typeof loadState === "function") ? loadState() : null;
+  const thres = (s && s.thres) ? s.thres : {E:0,C:0,A:0};
+
+  const totalPoints = _fv3d_safeNum(
+    studentDoc && studentDoc.totalPoints != null
+      ? studentDoc.totalPoints
+      : (studentDoc && studentDoc.progression && studentDoc.progression.totalPoints)
+  );
+
+  const lastSub = studentDoc && (studentDoc.lastSubmission || studentDoc.lastResult || studentDoc.last);
+  const best = studentDoc && (studentDoc.best || {E:0,C:0,A:0});
+  const label = (studentDoc && studentDoc._label) ? String(studentDoc._label) : "";
+
+  const html =
+    (label ? `<span class="mini">${label}</span><br>` : ``) +
+    `Totalt: <strong>${totalPoints} p</strong>.<br>` +
+    `${_fv3d_formatLastLineHtml(lastSub)}<br>` +
+    `${_fv3d_formatBestLinesHtml(best, thres)}`;
+
+  pointsEl.innerHTML = html;
+
+  const prog = studentDoc && (studentDoc.progression || { totalPoints: totalPoints, wrongByGoalId:{}, correctByGoalId:{} });
+  _fv3d_renderStrongWeakFromProgression(prog);
+
+  const exportEl = document.getElementById("progressExportJson");
+  if (exportEl) {
+    try {
+      const payload = {
+        token: studentDoc && studentDoc.token ? String(studentDoc.token) : "",
+        name: studentDoc && studentDoc.name ? String(studentDoc.name) : "",
+        klass: studentDoc && studentDoc.klass ? String(studentDoc.klass) : "",
+        totalPoints: totalPoints,
+        best: best,
+        last: lastSub || null,
+        progression: prog
+      };
+      exportEl.value = JSON.stringify(payload);
+    } catch {}
+  }
+}
+
+function _fv3d_getActiveContextForResults(){
+  try {
+    if (typeof loadState === "function") {
+      const s = loadState();
+      const ab = (s && s.activeBank) ? s.activeBank : {};
+      return {
+        mode: String(ab.mode || ""),
+        ownerUid: String(ab.ownerUid || ""),
+        bankId: String(ab.bankId || ""),
+        publicId: String(ab.publicId || "")
+      };
+    }
+  } catch {}
+  return { mode:"", ownerUid:"", bankId:"", publicId:"" };
+}
+
+async function _fv3d_resolveTeacherBankFromPublic(publicId){
+  if (!_fv3d_hasFirebaseReady()) throw new Error("Firebase saknas");
+  const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Public bank finns inte");
+  const data = snap.data() || {};
+  const uid = String(data.sourceTeacherUid || "").trim();
+  const bid = String(data.sourceBankId || "").trim();
+  if (!uid || !bid) throw new Error("Public bank saknar sourceTeacherUid/sourceBankId");
+  return { ownerUid: uid, bankId: bid };
+}
+
+async function _fv3d_loadStudentsAndRenderTabs(force){
   _fv3d_ensureStudentsTabsUI();
 
   const row = document.getElementById("fv3dStudentsTabsRow");
   if (!row) return;
 
   row.innerHTML = "";
-  _fv3d_setTabsStatus("Laddar elevresultat…");
+  _fv3d_setTabsStatus("Laddar…");
 
-  // vänta in DB (minskar “seg/inget händer”)
-  try{
-    if (typeof _fv3d_waitFirebaseReady === "function") await _fv3d_waitFirebaseReady();
-  }catch{}
-  await _fv3d_waitDbReady(5500);
-
-  if (!_fv3d_hasFirebaseReady()) { _fv3d_setTabsStatus("⚠️ Firebase saknas (initFirebase körs inte)."); return; }
+  if (!_fv3d_hasFirebaseReady()) { _fv3d_setTabsStatus("⚠️ Firebase saknas."); return; }
   if (!_fv3d_hasTeacher()) { _fv3d_setTabsStatus("☁️ Inte inloggad."); return; }
 
   const ctx = _fv3d_getActiveContextForResults();
@@ -4401,79 +4447,105 @@ async function _fv3d_loadStudentsAndRenderTabs(){
 
   if (!bankId) { _fv3d_setTabsStatus("⚠️ Ingen aktiv bank. Aktivera en bank i Frågebank-fliken."); return; }
 
-  const rosterMap = _fv3d_localRosterTokenMap(bankId);
+  const now = Date.now();
+  window.__fv3d_studentsCache = window.__fv3d_studentsCache || {};
+  const cache = window.__fv3d_studentsCache[String(bankId)] || null;
+  const cacheFresh = cache && cache.students && (now - (cache.ts || 0)) < 4000;
 
-  try {
-    const studentsCol = firebaseDbInstance
-      .collection(CLOUD_ROOT_COLLECTION)
-      .doc(String(ownerUid))
-      .collection(CLOUD_BANKS_SUBCOLLECTION)
-      .doc(String(bankId))
-      .collection("students");
+  let students = [];
+  if (!force && cacheFresh) {
+    students = cache.students.slice();
+  } else {
+    try {
+      const studentsCol = firebaseDbInstance
+        .collection(CLOUD_ROOT_COLLECTION)
+        .doc(String(ownerUid))
+        .collection(CLOUD_BANKS_SUBCOLLECTION)
+        .doc(String(bankId))
+        .collection("students");
 
-    const snap = await studentsCol.limit(200).get();
-    const docs = (snap && snap.docs) ? snap.docs : [];
+      const snap = await studentsCol.limit(200).get();
+      const docs = (snap && snap.docs) ? snap.docs : [];
 
-    if (!docs.length) {
-      _fv3d_setTabsStatus(`Ingen elev inläst ännu.\nBank: ${bankId}\nTips: låt en elev spela och lämna in nivå – då skapas students/{token}.`);
-      return;
-    }
-
-    const students = docs.map(d=>{
-      const data = d.data() || {};
-      if (!data.token) data.token = d.id;
-      if (data.totalPoints == null && data.progression && typeof data.progression.totalPoints === "number") data.totalPoints = data.progression.totalPoints;
-
-      // om namn/klass saknas i firestore: fyll från lokal roster om finns
-      const tk = String(data.token || "").trim();
-      const r = rosterMap[tk];
-      if (r) {
-        if (!data.name && r.name) data.name = r.name;
-        if (!data.klass && r.klass) data.klass = r.klass;
-      }
-      return data;
-    });
-
-    // sort: mest poäng först
-    students.sort((a,b)=> _fv3d_safeNum(b.totalPoints) - _fv3d_safeNum(a.totalPoints));
-
-    // render tabs
-    students.forEach((st)=>{
-      const tk = String(st.token || "").trim();
-      const label = _fv3d_labelFromToken(tk, rosterMap);
-
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn btn-sm";
-      btn.setAttribute("data-token", tk);
-      btn.textContent = label;
-
-      btn.addEventListener("click", ()=>{
-        _fv3d_setActiveTab(tk);
-        _fv3d_applyStudentToProgressUI(st);
-        _fv3d_setTabsStatus(`Visar: ${label}\nBank: ${bankId}`);
+      students = docs.map(d=>{
+        const data = d.data() || {};
+        if (!data.token) data.token = d.id;
+        if (data.totalPoints == null && data.progression && typeof data.progression.totalPoints === "number") data.totalPoints = data.progression.totalPoints;
+        return data;
       });
 
-      row.appendChild(btn);
-    });
+      window.__fv3d_studentsCache[String(bankId)] = { ts: now, students: students.slice() };
+    } catch (e) {
+      console.error("Fel vid laddning av elever:", e);
+      if (typeof _fv3d_isPermissionDenied === "function" && _fv3d_isPermissionDenied(e)) _fv3d_setTabsStatus("❌ permission-denied: Firestore Rules stoppar läsning av students.");
+      else _fv3d_setTabsStatus("⚠️ Fel vid laddning (se konsol).");
+      return;
+    }
+  }
 
-    // auto-select top student
-    const first = students[0];
-    if (first && first.token) {
-      const tk = String(first.token);
+  if (!students.length) {
+    _fv3d_setTabsStatus(`Ingen elev inläst ännu.\nBank: ${bankId}`);
+    return;
+  }
+
+  const rosterMap = _fv3d_localRosterTokenMap(bankId);
+
+  students = students.map(st=>{
+    const tk = String(st.token || "").trim();
+    const r = rosterMap[tk];
+    if (r) {
+      if (!st.name && r.name) st.name = r.name;
+      if (!st.klass && r.klass) st.klass = r.klass;
+    }
+    st._label = _fv3d_labelFromStudent(st, rosterMap);
+    return st;
+  });
+
+  // filtrera bort “tomma” elever: inget namn/klass, inte i roster, och 0 poäng
+  students = students.filter(st=>{
+    const tk = String(st.token || "").trim();
+    const inRoster = !!(rosterMap && rosterMap[tk]);
+    const hasName = !!String(st.name || "").trim();
+    const hasKlass = !!String(st.klass || "").trim();
+    const pts = _fv3d_safeNum(st.totalPoints);
+    return inRoster || hasName || hasKlass || pts > 0;
+  });
+
+  if (!students.length) {
+    _fv3d_setTabsStatus(`Inga elever med data att visa ännu.\nBank: ${bankId}`);
+    return;
+  }
+
+  students.sort((a,b)=> _fv3d_safeNum(b.totalPoints) - _fv3d_safeNum(a.totalPoints));
+
+  // render tabs
+  students.forEach((st)=>{
+    const tk = String(st.token || "").trim();
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-sm";
+    btn.setAttribute("data-token", tk);
+    btn.textContent = String(st._label || "");
+
+    btn.onclick = (ev)=>{
+      try { ev.preventDefault(); ev.stopPropagation(); } catch {}
       _fv3d_setActiveTab(tk);
-      _fv3d_applyStudentToProgressUI(first);
-      _fv3d_setTabsStatus(`Visar: ${_fv3d_labelFromToken(tk, rosterMap)}\nBank: ${bankId}\nHittade ${students.length} elev(er).`);
-    } else {
-      _fv3d_setTabsStatus(`Bank: ${bankId}\nHittade ${students.length} elev(er).`);
-    }
-  } catch (e) {
-    console.error("Fel vid laddning av elever:", e);
-    if (typeof _fv3d_isPermissionDenied === "function" && _fv3d_isPermissionDenied(e)) {
-      _fv3d_setTabsStatus("❌ permission-denied: Firestore Rules stoppar läsning av students.");
-    } else {
-      _fv3d_setTabsStatus("⚠️ Fel vid laddning (se konsol).");
-    }
+      _fv3d_applyStudentToProgressUI(st);
+      _fv3d_setTabsStatus(`Visar: ${st._label}\nBank: ${bankId}`);
+    };
+
+    row.appendChild(btn);
+  });
+
+  // auto-select top student
+  const first = students[0];
+  if (first && first.token) {
+    const tk = String(first.token);
+    _fv3d_setActiveTab(tk);
+    _fv3d_applyStudentToProgressUI(first);
+    _fv3d_setTabsStatus(`Visar: ${first._label}\nBank: ${bankId}\nHittade ${students.length} elev(er).`);
+  } else {
+    _fv3d_setTabsStatus(`Bank: ${bankId}\nHittade ${students.length} elev(er).`);
   }
 }
 
@@ -4491,12 +4563,12 @@ async function _fv3d_loadStudentsAndRenderTabs(){
 
     if (t.id === "fv3dStudentsTabsRefresh") {
       e.preventDefault();
-      await _fv3d_loadStudentsAndRenderTabs();
+      await _fv3d_loadStudentsAndRenderTabs(true);
       return;
     }
 
     if (t.id === "tab-progress" || t.getAttribute("data-tab") === "progress") {
-      setTimeout(()=>{ _fv3d_loadStudentsAndRenderTabs(); }, 80);
+      setTimeout(()=>{ _fv3d_loadStudentsAndRenderTabs(false); }, 60);
       return;
     }
   });
@@ -4508,7 +4580,7 @@ async function _fv3d_loadStudentsAndRenderTabs(){
 
 window.fv3dLoadStudentsForActiveBank = _fv3d_loadStudentsAndRenderTabs;
 </script>
-<!-- slut SEKTION 3Dd: ELEVRESULTAT – elevflikar (tokens->namn via lokal roster), auto-select, stabil ordning -->
+<!-- slut SEKTION 3Dd: ELEVRESULTAT – elevflikar (snabb), filtrerar tomma, klick visar elevinfo -->
 
 
 
