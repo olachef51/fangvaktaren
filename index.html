@@ -4153,8 +4153,8 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 
-<!-- start SEKTION 3Dd: ELEVRESULTAT – elevflikar (snabb), filtrerar tomma, klick visar elevinfo -->
-<!-- ÄNDRING: (1) Tar bort extra vänteloopar för snabb laddning, (2) filtrerar bort “tomma” elever utan namn/klass/poäng (om ej finns i lokal roster), (3) fixar klick så elevinfo alltid renderas i Poäng/Starka/Svaga/Export. Omskrivna/nya rader: ca 235 -->
+<!-- start SEKTION 3Dd: ELEVRESULTAT – elevflikar (snabb) + FIX: läser progression från flera fält + hämtar elevdoc “fresh” vid klick -->
+<!-- ÄNDRING: (1) Vid elevklick hämtas senaste student-doc från Firestore (så progression inte blir tom), (2) progression extraheras robust från progression/lastResult/lastSubmission/top-level correct/wrong, (3) om ingen delbitsdata finns visas tydlig text i listorna. Omskrivna/nya rader: ca 120 -->
 <script>
 "use strict";
 
@@ -4284,7 +4284,36 @@ function _fv3d_setActiveTab(token){
   }catch{}
 }
 
-/* ====== stark/svag (lokalt i 3Dd för att undvika “ingen info”) ====== */
+function _fv3d_extractProgression(studentDoc){
+  const d = studentDoc || {};
+
+  // kandidat: progression i doc
+  let prog = (d.progression && typeof d.progression === "object") ? d.progression : null;
+
+  // kandidat: progression i lastResult/lastSubmission
+  if (!prog) {
+    const lr = d.lastResult || d.lastSubmission || d.last || null;
+    if (lr && lr.progression && typeof lr.progression === "object") prog = lr.progression;
+  }
+
+  // kandidat: top-level maps
+  if (!prog) {
+    const c = (d.correctByGoalId && typeof d.correctByGoalId === "object") ? d.correctByGoalId : null;
+    const w = (d.wrongByGoalId && typeof d.wrongByGoalId === "object") ? d.wrongByGoalId : null;
+    if (c || w) prog = { correctByGoalId: c || {}, wrongByGoalId: w || {}, totalPoints: d.totalPoints || 0 };
+  }
+
+  // normalisera maps
+  const out = { totalPoints: 0, correctByGoalId: {}, wrongByGoalId: {} };
+  if (prog) {
+    out.totalPoints = _fv3d_safeNum(prog.totalPoints != null ? prog.totalPoints : d.totalPoints);
+    out.correctByGoalId = (prog.correctByGoalId && typeof prog.correctByGoalId === "object") ? prog.correctByGoalId : {};
+    out.wrongByGoalId = (prog.wrongByGoalId && typeof prog.wrongByGoalId === "object") ? prog.wrongByGoalId : {};
+  } else {
+    out.totalPoints = _fv3d_safeNum(d.totalPoints);
+  }
+  return out;
+}
 
 function _fv3d_renderStrongWeakFromProgression(prog){
   const strongList = document.getElementById("progressStrongList");
@@ -4297,9 +4326,14 @@ function _fv3d_renderStrongWeakFromProgression(prog){
   const correct = (prog && prog.correctByGoalId) ? prog.correctByGoalId : {};
   const wrong   = (prog && prog.wrongByGoalId) ? prog.wrongByGoalId : {};
 
-  const rows = [];
   const keys = new Set([ ...Object.keys(correct||{}), ...Object.keys(wrong||{}) ]);
+  if (!keys.size) {
+    strongList.innerHTML = `<li>Ingen delbitsprogression hittades ännu för denna elev.</li>`;
+    weakList.innerHTML = `<li>Ingen delbitsprogression hittades ännu för denna elev.</li>`;
+    return;
+  }
 
+  const rows = [];
   keys.forEach((k)=>{
     const c = _fv3d_safeNum(correct[k]);
     const w = _fv3d_safeNum(wrong[k]);
@@ -4350,35 +4384,31 @@ function _fv3d_applyStudentToProgressUI(studentDoc){
   const s = (typeof loadState === "function") ? loadState() : null;
   const thres = (s && s.thres) ? s.thres : {E:0,C:0,A:0};
 
-  const totalPoints = _fv3d_safeNum(
-    studentDoc && studentDoc.totalPoints != null
-      ? studentDoc.totalPoints
-      : (studentDoc && studentDoc.progression && studentDoc.progression.totalPoints)
-  );
+  const d = studentDoc || {};
+  const label = (d && d._label) ? String(d._label) : "";
 
-  const lastSub = studentDoc && (studentDoc.lastSubmission || studentDoc.lastResult || studentDoc.last);
-  const best = studentDoc && (studentDoc.best || {E:0,C:0,A:0});
-  const label = (studentDoc && studentDoc._label) ? String(studentDoc._label) : "";
+  const best = d && (d.best || {E:0,C:0,A:0});
+  const lastSub = d && (d.lastSubmission || d.lastResult || d.last);
+  const prog = _fv3d_extractProgression(d);
 
   const html =
     (label ? `<span class="mini">${label}</span><br>` : ``) +
-    `Totalt: <strong>${totalPoints} p</strong>.<br>` +
+    `Totalt: <strong>${_fv3d_safeNum(prog.totalPoints)} p</strong>.<br>` +
     `${_fv3d_formatLastLineHtml(lastSub)}<br>` +
     `${_fv3d_formatBestLinesHtml(best, thres)}`;
 
   pointsEl.innerHTML = html;
 
-  const prog = studentDoc && (studentDoc.progression || { totalPoints: totalPoints, wrongByGoalId:{}, correctByGoalId:{} });
   _fv3d_renderStrongWeakFromProgression(prog);
 
   const exportEl = document.getElementById("progressExportJson");
   if (exportEl) {
     try {
       const payload = {
-        token: studentDoc && studentDoc.token ? String(studentDoc.token) : "",
-        name: studentDoc && studentDoc.name ? String(studentDoc.name) : "",
-        klass: studentDoc && studentDoc.klass ? String(studentDoc.klass) : "",
-        totalPoints: totalPoints,
+        token: d && d.token ? String(d.token) : "",
+        name: d && d.name ? String(d.name) : "",
+        klass: d && d.klass ? String(d.klass) : "",
+        totalPoints: _fv3d_safeNum(prog.totalPoints),
         best: best,
         last: lastSub || null,
         progression: prog
@@ -4386,6 +4416,11 @@ function _fv3d_applyStudentToProgressUI(studentDoc){
       exportEl.value = JSON.stringify(payload);
     } catch {}
   }
+
+  try{
+    const ev = new CustomEvent("fv-student-selected", { detail: { student: d, progression: prog } });
+    window.dispatchEvent(ev);
+  }catch{}
 }
 
 function _fv3d_getActiveContextForResults(){
@@ -4414,6 +4449,29 @@ async function _fv3d_resolveTeacherBankFromPublic(publicId){
   const bid = String(data.sourceBankId || "").trim();
   if (!uid || !bid) throw new Error("Public bank saknar sourceTeacherUid/sourceBankId");
   return { ownerUid: uid, bankId: bid };
+}
+
+async function _fv3d_fetchStudentDocFresh(ownerUid, bankId, token){
+  try{
+    const ref = firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION)
+      .doc(String(ownerUid))
+      .collection(CLOUD_BANKS_SUBCOLLECTION)
+      .doc(String(bankId))
+      .collection("students")
+      .doc(String(token));
+
+    const snap = await ref.get();
+    if (!snap.exists) return null;
+
+    const data = snap.data() || {};
+    if (!data.token) data.token = snap.id;
+    if (data.totalPoints == null && data.progression && typeof data.progression.totalPoints === "number") data.totalPoints = data.progression.totalPoints;
+    return data;
+  }catch(e){
+    console.warn("fetchStudentDocFresh misslyckades:", e);
+    return null;
+  }
 }
 
 async function _fv3d_loadStudentsAndRenderTabs(force){
@@ -4447,10 +4505,12 @@ async function _fv3d_loadStudentsAndRenderTabs(force){
 
   if (!bankId) { _fv3d_setTabsStatus("⚠️ Ingen aktiv bank. Aktivera en bank i Frågebank-fliken."); return; }
 
+  window.__fv3d_studentsCtx = { ownerUid, bankId };
+
   const now = Date.now();
   window.__fv3d_studentsCache = window.__fv3d_studentsCache || {};
   const cache = window.__fv3d_studentsCache[String(bankId)] || null;
-  const cacheFresh = cache && cache.students && (now - (cache.ts || 0)) < 4000;
+  const cacheFresh = cache && cache.students && (now - (cache.ts || 0)) < 3500;
 
   let students = [];
   if (!force && cacheFresh) {
@@ -4501,7 +4561,6 @@ async function _fv3d_loadStudentsAndRenderTabs(force){
     return st;
   });
 
-  // filtrera bort “tomma” elever: inget namn/klass, inte i roster, och 0 poäng
   students = students.filter(st=>{
     const tk = String(st.token || "").trim();
     const inRoster = !!(rosterMap && rosterMap[tk]);
@@ -4518,7 +4577,6 @@ async function _fv3d_loadStudentsAndRenderTabs(force){
 
   students.sort((a,b)=> _fv3d_safeNum(b.totalPoints) - _fv3d_safeNum(a.totalPoints));
 
-  // render tabs
   students.forEach((st)=>{
     const tk = String(st.token || "").trim();
     const btn = document.createElement("button");
@@ -4527,22 +4585,47 @@ async function _fv3d_loadStudentsAndRenderTabs(force){
     btn.setAttribute("data-token", tk);
     btn.textContent = String(st._label || "");
 
-    btn.onclick = (ev)=>{
+    btn.onclick = async (ev)=>{
       try { ev.preventDefault(); ev.stopPropagation(); } catch {}
       _fv3d_setActiveTab(tk);
-      _fv3d_applyStudentToProgressUI(st);
+
+      // ✅ hämta senaste doc vid klick (så progression alltid följer med)
+      let picked = st;
+      try{
+        const fresh = await _fv3d_fetchStudentDocFresh(ownerUid, bankId, tk);
+        if (fresh) {
+          fresh._label = st._label;
+          // roster-hjälp
+          if (!fresh.name && st.name) fresh.name = st.name;
+          if (!fresh.klass && st.klass) fresh.klass = st.klass;
+          picked = fresh;
+        }
+      }catch{}
+
+      _fv3d_applyStudentToProgressUI(picked);
       _fv3d_setTabsStatus(`Visar: ${st._label}\nBank: ${bankId}`);
     };
 
     row.appendChild(btn);
   });
 
-  // auto-select top student
   const first = students[0];
   if (first && first.token) {
     const tk = String(first.token);
     _fv3d_setActiveTab(tk);
-    _fv3d_applyStudentToProgressUI(first);
+
+    let picked = first;
+    try{
+      const fresh = await _fv3d_fetchStudentDocFresh(ownerUid, bankId, tk);
+      if (fresh) {
+        fresh._label = first._label;
+        if (!fresh.name && first.name) fresh.name = first.name;
+        if (!fresh.klass && first.klass) fresh.klass = first.klass;
+        picked = fresh;
+      }
+    }catch{}
+
+    _fv3d_applyStudentToProgressUI(picked);
     _fv3d_setTabsStatus(`Visar: ${first._label}\nBank: ${bankId}\nHittade ${students.length} elev(er).`);
   } else {
     _fv3d_setTabsStatus(`Bank: ${bankId}\nHittade ${students.length} elev(er).`);
@@ -4580,7 +4663,7 @@ async function _fv3d_loadStudentsAndRenderTabs(force){
 
 window.fv3dLoadStudentsForActiveBank = _fv3d_loadStudentsAndRenderTabs;
 </script>
-<!-- slut SEKTION 3Dd: ELEVRESULTAT – elevflikar (snabb), filtrerar tomma, klick visar elevinfo -->
+<!-- slut SEKTION 3Dd: ELEVRESULTAT – elevflikar (snabb) + FIX: läser progression från flera fält + hämtar elevdoc “fresh” vid klick -->
 
 
 
