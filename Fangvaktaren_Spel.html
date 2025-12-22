@@ -1118,7 +1118,7 @@
 
 
 <!-- start SEKTION 2: BODY (ELEVYTA & LÄRARLÄGE) -->
-<!-- ÄNDRING: Lade in “Elever som spelat (aktiv bank)” som en lista i Elevprogression-rutan (utan att ändra layouten i övrigt). (11 rader) -->
+<!-- ÄNDRING: Bytte ut listvisningen “Elever som spelat (aktiv bank)” mot en flikrad (tabs) för elever i elevlistan/roster. Token-listan döljs tills SEKTION 3 kopplar roster→speldata. (ca 26 rader) -->
 <body>
   <div class="app">
     <header class="app-header">
@@ -1817,8 +1817,13 @@ Gurka
                   </p>
 
                   <div style="margin-top:10px;">
-                    <h4>Elever som spelat (aktiv bank)</h4>
-                    <ul id="playedStudentsList" class="goals-list mini">
+                    <h4>Elever (aktiv bank)</h4>
+                    <div id="playedStudentsTabs" class="tab-nav" style="margin-top:6px;">
+                      <span class="mini">Ingen elev inläst ännu.</span>
+                    </div>
+
+                    <!-- Bakåtkompatibel lista (döljs för att inte visa “Okänd elev [TOKEN]”) -->
+                    <ul id="playedStudentsList" class="goals-list mini hidden">
                       <li>Ingen elev inläst ännu.</li>
                     </ul>
                   </div>
@@ -1909,6 +1914,7 @@ Gurka
   </div>
 </body>
 <!-- slut SEKTION 2: BODY (ELEVYTA & LÄRARLÄGE) -->
+
 
 
 
@@ -2073,7 +2079,7 @@ function genToken(len = 10) {
 
 
 <!-- start SEKTION 3B: STATE – embedded-data, load/save, roster local -->
-<!-- ÄNDRING: (1) Formaterar “Elevens poäng” med en nivå per rad, (2) beräknar & renderar starka/svaga delbitar från progression, (3) hämtar & visar “Elever som spelat” från Firestore för aktiv bank. (~170 rader) -->
+<!-- ÄNDRING: (1) Gör “Elever som spelat” till klickbara elevflikar (endast elever som finns i elevlistan + är aktiva i banken), (2) laddar vald elevs progression från Firestore och visar starka/svaga delbitar korrekt. (~190 rader) -->
 <script>
 "use strict";
 
@@ -2161,16 +2167,54 @@ function _renderUl(ul, items, emptyText) {
   }
   for (let i = 0; i < arr.length; i++) {
     const li = document.createElement("li");
-    li.innerHTML = items[i];
+    li.innerHTML = arr[i];
     ul.appendChild(li);
   }
 }
 
-function _computeStrongWeakLists(state) {
-  const s = state || loadState();
-  const gm = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-  const corr = (s.progression && s.progression.correctByGoalId) ? s.progression.correctByGoalId : {};
-  const wrong = (s.progression && s.progression.wrongByGoalId) ? s.progression.wrongByGoalId : {};
+/* ====== Lärare: vald elev i progressfliken (endast på lärardatorn) ====== */
+
+const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-v17";
+const _fvTeacherStudentCache = Object.create(null);
+let _fvTeacherStudentFetchInFlight = null;
+
+function _getSelectedTeacherToken() {
+  try {
+    const t = localStorage.getItem(_fvTeacherSelectedTokenKey) || "";
+    return String(t || "");
+  } catch {
+    return "";
+  }
+}
+
+function _setSelectedTeacherToken(token) {
+  const t = String(token || "");
+  try { localStorage.setItem(_fvTeacherSelectedTokenKey, t); } catch {}
+}
+
+function _getGoalsMapFromTeacherState() {
+  const s = loadState();
+  return Array.isArray(s.goalsMap) ? s.goalsMap : [];
+}
+
+function _getProgressionFromAny(obj) {
+  const d = obj || {};
+  const prog = d.progression || d.prog || {};
+  const out = {
+    totalPoints: _safeNum(prog.totalPoints != null ? prog.totalPoints : (d.totalPoints != null ? d.totalPoints : d.points), 0),
+    correctByGoalId: (prog.correctByGoalId && typeof prog.correctByGoalId === "object") ? prog.correctByGoalId : (d.correctByGoalId || {}),
+    wrongByGoalId: (prog.wrongByGoalId && typeof prog.wrongByGoalId === "object") ? prog.wrongByGoalId : (d.wrongByGoalId || {})
+  };
+  out.correctByGoalId = out.correctByGoalId || {};
+  out.wrongByGoalId = out.wrongByGoalId || {};
+  return out;
+}
+
+function _computeStrongWeakListsFromData(goalsMap, progressionObj) {
+  const gm = Array.isArray(goalsMap) ? goalsMap : [];
+  const p = _getProgressionFromAny({ progression: progressionObj });
+  const corr = p.correctByGoalId || {};
+  const wrong = p.wrongByGoalId || {};
 
   const rows = [];
   for (let i = 0; i < gm.length; i++) {
@@ -2201,13 +2245,13 @@ function _computeStrongWeakLists(state) {
     .sort((a, b) => (a.acc - b.acc) || (b.attempts - a.attempts));
 
   const strongOut = strong.slice(0, 10).map(r => {
-    const title = `${escapeHtml(r.parts)} – ${escapeHtml(r.goal)}`.trim();
+    const title = `${escapeHtml(r.goal)} — ${escapeHtml(r.parts)}`.trim();
     const meta = `${r.correct}/${r.attempts} rätt`;
     return `${title ? title : "Delbit"} <span class="mini">(${escapeHtml(meta)})</span>`;
   });
 
   const weakOut = weak.slice(0, 10).map(r => {
-    const title = `${escapeHtml(r.parts)} – ${escapeHtml(r.goal)}`.trim();
+    const title = `${escapeHtml(r.goal)} — ${escapeHtml(r.parts)}`.trim();
     const meta = `${r.correct}/${r.attempts} rätt`;
     return `${title ? title : "Delbit"} <span class="mini">(${escapeHtml(meta)})</span>`;
   });
@@ -2215,21 +2259,22 @@ function _computeStrongWeakLists(state) {
   return { strongOut, weakOut };
 }
 
-function _formatPointsHtml(state) {
-  const s = state || loadState();
-  const total = _safeNum(s.progression && s.progression.totalPoints, 0);
+function _formatPointsHtmlFromRemote(remoteData) {
+  const sTeacher = loadState();
+  const prog = _getProgressionFromAny(remoteData);
+  const total = _safeNum(prog.totalPoints, 0);
 
-  const bestE = _formatPercent(s.best && s.best.E);
-  const bestC = _formatPercent(s.best && s.best.C);
-  const bestA = _formatPercent(s.best && s.best.A);
+  const bestObj = remoteData && remoteData.best ? remoteData.best : (remoteData && remoteData.studentBest ? remoteData.studentBest : {});
+  const bestE = _formatPercent(bestObj && bestObj.E);
+  const bestC = _formatPercent(bestObj && bestObj.C);
+  const bestA = _formatPercent(bestObj && bestObj.A);
 
-  const thE = _formatPercent(s.thres && s.thres.E);
-  const thC = _formatPercent(s.thres && s.thres.C);
-  const thA = _formatPercent(s.thres && s.thres.A);
-
-  const ls = (typeof lastSubmission !== "undefined" && lastSubmission) ? lastSubmission : (s.lastSubmission || null);
+  const thE = _formatPercent(sTeacher.thres && sTeacher.thres.E);
+  const thC = _formatPercent(sTeacher.thres && sTeacher.thres.C);
+  const thA = _formatPercent(sTeacher.thres && sTeacher.thres.A);
 
   let lastLine = "Senast: -";
+  const ls = remoteData && (remoteData.lastSubmission || remoteData.last || remoteData.submission || null);
   if (ls && typeof ls === "object") {
     const lvl = (ls.level != null) ? String(ls.level) : "-";
     const pct = (ls.percent != null) ? _formatPercent(ls.percent) : "-";
@@ -2247,31 +2292,6 @@ function _formatPointsHtml(state) {
     `• C ${escapeHtml(bestC)}% (gräns ${escapeHtml(thC)}%)`,
     `• A ${escapeHtml(bestA)}% (gräns ${escapeHtml(thA)}%)`
   ].join("<br>");
-}
-
-function tryUpdateProgressUI() {
-  try {
-    const s = loadState();
-
-    const pEl = document.getElementById("progressPointsText");
-    if (pEl) pEl.innerHTML = _formatPointsHtml(s);
-
-    const { strongOut, weakOut } = _computeStrongWeakLists(s);
-
-    _renderUl(
-      document.getElementById("progressStrongList"),
-      strongOut,
-      "Inga starka delbitar inlästa ännu."
-    );
-
-    _renderUl(
-      document.getElementById("progressWeakList"),
-      weakOut,
-      "Inga svaga delbitar inlästa ännu."
-    );
-  } catch (e) {
-    console.warn("tryUpdateProgressUI misslyckades:", e);
-  }
 }
 
 /* GDPR: roster (namn/e-post/token) lagras ENDAST lokalt på lärardatorn */
@@ -2293,6 +2313,78 @@ function saveTeacherRosterMap(mapObj) {
   } catch (e) {
     console.warn("Kunde inte spara lärarens elevlista lokalt:", e);
   }
+}
+
+function _getActiveBankRosterEntries() {
+  const rosterMap = loadTeacherRosterMap() || {};
+  const s = loadState();
+  const a = s.activeBank || {};
+  const keys = [];
+
+  if (a && a.mode === "teacher" && a.ownerUid && a.bankId) {
+    keys.push(String(a.bankId));
+    keys.push(`${String(a.ownerUid)}:${String(a.bankId)}`);
+    keys.push(`teacher:${String(a.bankId)}`);
+  }
+  if (a && a.mode === "public" && a.publicId) {
+    keys.push(String(a.publicId));
+    keys.push(`public:${String(a.publicId)}`);
+  }
+  keys.push("default");
+
+  let candidate = null;
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (rosterMap && Object.prototype.hasOwnProperty.call(rosterMap, k)) {
+      candidate = rosterMap[k];
+      break;
+    }
+  }
+  if (candidate == null) candidate = rosterMap;
+
+  // candidate kan vara array, {rows:[]}, eller token->entry
+  let entries = [];
+
+  if (Array.isArray(candidate)) {
+    entries = candidate;
+  } else if (candidate && Array.isArray(candidate.rows)) {
+    entries = candidate.rows;
+  } else if (candidate && typeof candidate === "object") {
+    // om det är token->entry
+    const vals = [];
+    for (const [k, v] of Object.entries(candidate)) {
+      if (v && typeof v === "object") {
+        const e = Object.assign({}, v);
+        if (!e.token) e.token = k;
+        vals.push(e);
+      }
+    }
+    entries = vals;
+  }
+
+  const out = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i] || {};
+    const token = String(e.token || e.id || e.code || "").trim();
+    if (!token) continue;
+    out.push({
+      token,
+      name: String(e.name || e.studentName || "").trim(),
+      klass: String(e.klass || e.class || e.studentClass || "").trim(),
+      email: String(e.email || "").trim()
+    });
+  }
+  return out;
+}
+
+function _buildRosterByToken() {
+  const entries = _getActiveBankRosterEntries();
+  const map = Object.create(null);
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    map[String(e.token)] = e;
+  }
+  return map;
 }
 
 /* ====== Elever som spelat (hämtas från Firestore för aktiv bank) ====== */
@@ -2341,22 +2433,115 @@ async function _fetchPlayedStudentsOnce() {
   snap.forEach((doc) => {
     const d = doc.data() || {};
     const token = doc.id || "";
-    const name = d.name || d.studentName || (d.student && d.student.name) || "";
-    const klass = d.klass || d.class || d.studentClass || (d.student && (d.student.klass || d.student.class)) || "";
-    const pts = d.totalPoints || d.points || (d.progression && d.progression.totalPoints) || "";
     const updatedAt = _extractUpdatedAtMillis(d.updatedAt || d.updated || d.lastUpdated || d.ts || d.timestamp);
 
+    // OBS: vi visar namn från roster (GDPR lokalt), så här räcker token + updatedAt
     out.push({
       token: String(token || ""),
-      name: String(name || ""),
-      klass: String(klass || ""),
-      points: pts,
       updatedAt: updatedAt
     });
   });
 
-  out.sort((a, b) => (b.updatedAt - a.updatedAt) || (String(a.name).localeCompare(String(b.name))));
+  out.sort((a, b) => (b.updatedAt - a.updatedAt) || (String(a.token).localeCompare(String(b.token))));
   return out;
+}
+
+function _ensurePlayedStudentsTabsBehavior(containerEl) {
+  if (!containerEl || containerEl._fvTabsBound) return;
+  containerEl._fvTabsBound = true;
+
+  containerEl.addEventListener("click", (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest("button[data-token]") : null;
+    if (!btn) return;
+    const token = btn.getAttribute("data-token") || "";
+    if (!token) return;
+    trySelectTeacherStudentToken(token);
+  });
+}
+
+function _renderPlayedStudentsTabs(ul, activeTokens) {
+  const rosterByToken = _buildRosterByToken();
+  const sel = _getSelectedTeacherToken();
+
+  // endast elever som BOTH: (a) finns i roster, (b) har lämnat in i aktiv bank
+  const filtered = (activeTokens || []).filter(x => x && x.token && rosterByToken[String(x.token)]);
+
+  // gör ul till “flik-rad”
+  ul.classList.add("tab-nav");
+  ul.classList.remove("goals-list");
+
+  ul.innerHTML = "";
+
+  if (!filtered.length) {
+    ul.classList.remove("tab-nav");
+    ul.classList.add("goals-list");
+    const li = document.createElement("li");
+    li.textContent = "Inga aktiva elever matchar elevlistan ännu.";
+    ul.appendChild(li);
+    return;
+  }
+
+  for (let i = 0; i < filtered.length; i++) {
+    const t = String(filtered[i].token);
+    const r = rosterByToken[t];
+    const name = (r && r.name) ? r.name : "";
+    const klass = (r && r.klass) ? r.klass : "";
+
+    const label = `${escapeHtml(name || "Elev")}<span class="mini">${klass ? " (" + escapeHtml(klass) + ")" : ""}</span>`;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tab-btn" + (sel && sel === t ? " active" : "");
+    btn.setAttribute("data-token", t);
+    btn.innerHTML = label;
+    ul.appendChild(btn);
+  }
+
+  _ensurePlayedStudentsTabsBehavior(ul);
+}
+
+async function _fetchTeacherStudentDoc(token) {
+  const ref = _getStudentsCollectionRefFromActiveBank();
+  if (!ref) return null;
+
+  const t = String(token || "");
+  if (!t) return null;
+
+  const docRef = ref.doc(t);
+  const snap = await docRef.get();
+  if (!snap || !snap.exists) return null;
+  const data = snap.data() || {};
+  data._token = t;
+  return data;
+}
+
+async function trySelectTeacherStudentToken(token) {
+  const t = String(token || "");
+  if (!t) return;
+
+  _setSelectedTeacherToken(t);
+
+  // rendera om flikar direkt (så "active" uppdateras)
+  tryRefreshPlayedStudentsList(true);
+
+  if (_fvTeacherStudentCache[t]) {
+    tryUpdateProgressUI();
+    return;
+  }
+
+  if (_fvTeacherStudentFetchInFlight) return;
+
+  _fvTeacherStudentFetchInFlight = _fetchTeacherStudentDoc(t)
+    .then((data) => {
+      if (data) _fvTeacherStudentCache[t] = data;
+    })
+    .catch((e) => {
+      console.warn("Kunde inte läsa vald elev från Firestore:", e);
+    })
+    .finally(() => {
+      _fvTeacherStudentFetchInFlight = null;
+      tryUpdateProgressUI();
+    });
 }
 
 function tryRefreshPlayedStudentsList(force = false) {
@@ -2369,6 +2554,8 @@ function tryRefreshPlayedStudentsList(force = false) {
 
   const ref = _getStudentsCollectionRefFromActiveBank();
   if (!ref) {
+    ul.classList.remove("tab-nav");
+    ul.classList.add("goals-list");
     _renderUl(ul, [], "Ingen aktiv bank vald (eller Firebase ej initierad).");
     return;
   }
@@ -2376,23 +2563,106 @@ function tryRefreshPlayedStudentsList(force = false) {
   _playedStudentsLastFetchAt = now;
   _playedStudentsFetchPromise = _fetchPlayedStudentsOnce()
     .then((arr) => {
-      const items = (arr || []).slice(0, 60).map((x) => {
-        const name = x.name ? escapeHtml(x.name) : "Okänd elev";
-        const klass = x.klass ? ` (${escapeHtml(x.klass)})` : "";
-        const token = x.token ? ` <span class="mini">[${escapeHtml(x.token)}]</span>` : "";
-        const pts = (x.points !== "" && x.points != null) ? ` <span class="mini">– ${escapeHtml(String(x.points))} p</span>` : "";
-        return `${name}${klass}${token}${pts}`;
-      });
+      const tokens = (arr || []).map(x => ({ token: x.token, updatedAt: x.updatedAt }));
+      _renderPlayedStudentsTabs(ul, tokens);
 
-      _renderUl(ul, items, "Ingen elev har lämnat in resultat ännu.");
+      // om det finns en vald token men den inte har cache ännu -> hämta
+      const sel = _getSelectedTeacherToken();
+      if (sel && !_fvTeacherStudentCache[sel]) {
+        trySelectTeacherStudentToken(sel);
+      }
     })
     .catch((e) => {
       console.warn("Kunde inte hämta elever som spelat:", e);
+      ul.classList.remove("tab-nav");
+      ul.classList.add("goals-list");
       _renderUl(ul, [], "Kunde inte läsa elever (kontrollera Firestore-regler / bank).");
     })
     .finally(() => {
       _playedStudentsFetchPromise = null;
     });
+}
+
+/* ====== Progress-UI (lokalt för elev / eller lärarvy för vald elev) ====== */
+
+function _formatPointsHtmlLocal(state) {
+  const s = state || loadState();
+  const total = _safeNum(s.progression && s.progression.totalPoints, 0);
+
+  const bestE = _formatPercent(s.best && s.best.E);
+  const bestC = _formatPercent(s.best && s.best.C);
+  const bestA = _formatPercent(s.best && s.best.A);
+
+  const thE = _formatPercent(s.thres && s.thres.E);
+  const thC = _formatPercent(s.thres && s.thres.C);
+  const thA = _formatPercent(s.thres && s.thres.A);
+
+  const ls = (typeof lastSubmission !== "undefined" && lastSubmission) ? lastSubmission : (s.lastSubmission || null);
+
+  let lastLine = "Senast: -";
+  if (ls && typeof ls === "object") {
+    const lvl = (ls.level != null) ? String(ls.level) : "-";
+    const pct = (ls.percent != null) ? _formatPercent(ls.percent) : "-";
+    const got = (ls.correct != null) ? String(ls.correct) : "-";
+    const tot = (ls.total != null) ? String(ls.total) : "-";
+    const pts = (ls.pointsGained != null) ? String(ls.pointsGained) : "";
+    lastLine = `Senast: nivå ${escapeHtml(lvl)} – ${escapeHtml(pct)}% (${escapeHtml(got)}/${escapeHtml(tot)} rätt)${pts ? " +" + escapeHtml(pts) + "p" : ""}.`;
+  }
+
+  return [
+    `Totalt: <strong>${escapeHtml(total)} p</strong>.`,
+    `${lastLine}`,
+    `Bästa:`,
+    `• E ${escapeHtml(bestE)}% (gräns ${escapeHtml(thE)}%)`,
+    `• C ${escapeHtml(bestC)}% (gräns ${escapeHtml(thC)}%)`,
+    `• A ${escapeHtml(bestA)}% (gräns ${escapeHtml(thA)}%)`
+  ].join("<br>");
+}
+
+function tryUpdateProgressUI() {
+  try {
+    const pEl = document.getElementById("progressPointsText");
+    const strongUl = document.getElementById("progressStrongList");
+    const weakUl = document.getElementById("progressWeakList");
+
+    const selectedToken = _getSelectedTeacherToken();
+    const hasSelected = !!selectedToken;
+    const remote = hasSelected ? (_fvTeacherStudentCache[selectedToken] || null) : null;
+
+    // Om vi har en vald elev med data: visa lärarvy (remote)
+    if (remote) {
+      if (pEl) pEl.innerHTML = _formatPointsHtmlFromRemote(remote);
+
+      const gm = _getGoalsMapFromTeacherState();
+      const prog = _getProgressionFromAny(remote);
+      const { strongOut, weakOut } = _computeStrongWeakListsFromData(gm, prog);
+
+      _renderUl(strongUl, strongOut, "Inga starka delbitar inlästa ännu.");
+      _renderUl(weakUl, weakOut, "Inga svaga delbitar inlästa ännu.");
+      return;
+    }
+
+    // Om vald token finns men cache saknas: visa tydligt vad som händer
+    if (hasSelected && !remote) {
+      if (pEl) pEl.innerHTML = "Välj elevflik igen om den inte laddar. (Läser från Firestore...)";
+      _renderUl(strongUl, [], "Väntar på elevdata...");
+      _renderUl(weakUl, [], "Väntar på elevdata...");
+      return;
+    }
+
+    // Annars: visa lokal elevvy (som tidigare)
+    const s = loadState();
+    if (pEl) pEl.innerHTML = _formatPointsHtmlLocal(s);
+
+    const gm = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+    const progLocal = s.progression || {};
+    const { strongOut, weakOut } = _computeStrongWeakListsFromData(gm, progLocal);
+
+    _renderUl(strongUl, strongOut, "Inga starka delbitar inlästa ännu.");
+    _renderUl(weakUl, weakOut, "Inga svaga delbitar inlästa ännu.");
+  } catch (e) {
+    console.warn("tryUpdateProgressUI misslyckades:", e);
+  }
 }
 
 function loadState() {
