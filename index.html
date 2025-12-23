@@ -4782,138 +4782,352 @@ async function saveCurrentResultToFirestore() {
 
 
 
-<!-- start SEKTION 3M: BANKLISTA – flytta “Uppd:” till titelraden -->
+<!-- start SEKTION 3M: UI-FIX – bankrad (Uppd på rad 1) + korrekt Elever-count + elevflikar i progress -->
 <script>
 "use strict";
 
-/*
-Flyttar “• Uppd: YYYY-MM-DD HH:MM:SS” från meta-raden (ID/Frågor/Elever)
-till titelraden (namn + Public ✅ + ev Aktiv).
-Körs automatiskt efter loadCloudBanksListV4/loadCloudBanksList och som fallback efter DOMContentLoaded.
-*/
+(function FV3M_UIFix(){
+  if (window.__fv3m_ui_fix_ran) return;
+  window.__fv3m_ui_fix_ran = true;
 
-(function FV3M_MoveUpdatedAtToTitle(){
-  if (window.__fv3m_moveUppd_ran) return;
-  window.__fv3m_moveUppd_ran = true;
+  const sleep = (ms)=>new Promise(r=>setTimeout(r, ms||0));
 
-  function $one(sel, root){ try { return (root || document).querySelector(sel); } catch { return null; } }
-  function $all(sel, root){ try { return Array.from((root || document).querySelectorAll(sel)); } catch { return []; } }
+  function qs(sel){ try { return document.querySelector(sel); } catch { return null; } }
+  function qsa(sel){ try { return Array.from(document.querySelectorAll(sel)); } catch { return []; } }
 
-  function _cleanBullets(s){
-    return String(s || "")
-      .replace(/\s*•\s*/g, " • ")
-      .replace(/\s{2,}/g, " ")
-      .replace(/^•\s*/,"")
-      .replace(/\s*•\s*$/,"")
+  function getCloudListEl(){
+    return document.getElementById("cloudBanksListV4")
+        || document.getElementById("cloudBanksList")
+        || qs("ul#cloudBanksListV4")
+        || qs("ul#cloudBanksList");
+  }
+
+  function getTeacherUid(){
+    try { if (window.currentTeacherUser && window.currentTeacherUser.uid) return String(window.currentTeacherUser.uid); } catch {}
+    try { if (typeof currentTeacherUser !== "undefined" && currentTeacherUser && currentTeacherUser.uid) return String(currentTeacherUser.uid); } catch {}
+    return "";
+  }
+
+  function hasFirebaseDb(){
+    try { return !!(window.firebaseDbInstance || (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance)); } catch { return false; }
+  }
+
+  function db(){
+    return window.firebaseDbInstance || (typeof firebaseDbInstance !== "undefined" ? firebaseDbInstance : null);
+  }
+
+  const __fv3m_studentCountCache = Object.create(null);
+
+  async function countStudentsForPublic(publicId){
+    const pid = String(publicId || "").trim();
+    if (!pid || !hasFirebaseDb()) return null;
+    const key = "p:" + pid;
+    if (__fv3m_studentCountCache[key] != null) return __fv3m_studentCountCache[key];
+
+    try{
+      const ref = db().collection(PUBLIC_BANKS_COLLECTION).doc(pid).collection("students");
+      let snap = null;
+      try { snap = await ref.limit(500).get(); }
+      catch { snap = await ref.get(); }
+      const n = snap && typeof snap.size === "number" ? snap.size : 0;
+      __fv3m_studentCountCache[key] = n;
+      return n;
+    }catch(e){
+      __fv3m_studentCountCache[key] = null;
+      return null;
+    }
+  }
+
+  async function countStudentsForTeacherBank(bankId){
+    const uid = getTeacherUid();
+    const bid = String(bankId || "").trim();
+    if (!uid || !bid || !hasFirebaseDb()) return null;
+    const key = "t:" + uid + ":" + bid;
+    if (__fv3m_studentCountCache[key] != null) return __fv3m_studentCountCache[key];
+
+    try{
+      const ref = db()
+        .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid)
+        .collection("students");
+      let snap = null;
+      try { snap = await ref.limit(500).get(); }
+      catch { snap = await ref.get(); }
+      const n = snap && typeof snap.size === "number" ? snap.size : 0;
+      __fv3m_studentCountCache[key] = n;
+      return n;
+    }catch(e){
+      __fv3m_studentCountCache[key] = null;
+      return null;
+    }
+  }
+
+  function extractPartsFromMetaText(metaText){
+    const t = String(metaText || "").replace(/\s+/g, " ").trim();
+
+    const idMatch = t.match(/\bID:\s*([A-Za-z0-9_-]+)/i);
+    const id = idMatch ? idMatch[1] : "";
+
+    const updMatch = t.match(/\bUppd:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})/i);
+    const upd = updMatch ? updMatch[1] : "";
+
+    const frag = [];
+    const frMatch = t.match(/\bFrågor:\s*([^•]+)/i);
+    if (frMatch && frMatch[1]) frag.push("Frågor: " + frMatch[1].trim());
+
+    const rest = t
+      .replace(/\bID:\s*[A-Za-z0-9_-]+/ig, "")
+      .replace(/\bUppd:\s*[0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2}/ig, "")
+      .replace(/\bFrågor:\s*[^•]+/ig, "")
+      .replace(/^\s*•\s*/,"")
       .trim();
-  }
 
-  function _extractUppdChunk(metaText){
-    const txt = String(metaText || "");
-    // matchar både "• Uppd: ..." och "Uppd: ..." och tar fram hela chunk + datumdelen
-    const m = txt.match(/(^|•)\s*(Uppd:\s*[^•]+)\s*/i);
-    if (!m) return null;
-    const chunk = (m[1] ? (m[1] + " " + m[2]) : m[2]).trim(); // kan innehålla "• "
-    const uppd = m[2].trim(); // "Uppd: ...."
-    return { chunk, uppd };
-  }
-
-  function _moveForLi(li){
-    if (!li || (li.dataset && li.dataset.fvUppdMoved === "1")) return false;
-
-    // Titelrad: .q-text (som din mall använder)
-    const qText = $one(".q-text", li) || $one(".list-main .q-text", li);
-    if (!qText) return false;
-
-    // Meta-rad: första .mini som innehåller ID/Frågor/Uppd/Elever (vanligt i listan)
-    const minis = $all(".mini", li);
-    let metaEl = null;
-    for (const m of minis){
-      const t = String(m.textContent || "");
-      if (t.includes("ID:") || t.includes("Frågor:") || t.includes("Uppd:") || t.includes("Elever:")) { metaEl = m; break; }
-    }
-    if (!metaEl) return false;
-
-    const metaText = String(metaEl.textContent || "");
-    const ex = _extractUppdChunk(metaText);
-    if (!ex || !ex.uppd) return false;
-
-    // 1) Ta bort Uppd-chunk från meta
-    let cleaned = metaText;
-
-    // ta bort "• Uppd: ...." eller "Uppd: ...." inklusive närliggande bullets
-    cleaned = cleaned.replace(/\s*•\s*Uppd:\s*[^•]+/i, "");
-    cleaned = cleaned.replace(/(^\s*Uppd:\s*[^•]+)\s*•?/i, "");
-    cleaned = _cleanBullets(cleaned);
-
-    metaEl.textContent = cleaned;
-
-    // 2) Lägg till på titelraden om den inte redan finns där
-    const titleText = String(qText.textContent || "");
-    if (!titleText.includes("Uppd:")) {
-      // behåll befintlig HTML i titelraden (Public ✅ / Aktiv-badge)
-      qText.insertAdjacentHTML("beforeend", ` <span class="mini">• ${ex.uppd}</span>`);
+    if (rest) {
+      rest.split("•").map(s=>s.trim()).filter(Boolean).forEach(p=>frag.push(p));
     }
 
-    if (li.dataset) li.dataset.fvUppdMoved = "1";
+    return { id, upd, frags: frag };
+  }
+
+  function ensureLineLayout(li, titleEl, metaEl, updText){
+    if (!titleEl) return;
+
+    const title = String(titleEl.textContent || "").trim();
+
+    if (updText && !title.includes("Uppd:")) {
+      titleEl.textContent = title + " • Uppd: " + updText;
+    }
+
+    if (metaEl) {
+      metaEl.style.whiteSpace = "pre-wrap";
+    }
+  }
+
+  function findTitleAndMeta(li){
+    const titleEl =
+      li.querySelector(".q-text") ||
+      li.querySelector(".list-main .q-text") ||
+      li.querySelector(".list-main") ||
+      li.querySelector("strong") ||
+      null;
+
+    const metaEl =
+      li.querySelector(".mini") ||
+      li.querySelector(".list-meta") ||
+      li.querySelector(".list-sub") ||
+      null;
+
+    return { titleEl, metaEl };
+  }
+
+  async function enhanceOneBankRow(li){
+    if (!li || li.__fv3m_enhanced) return;
+    li.__fv3m_enhanced = true;
+
+    const { titleEl, metaEl } = findTitleAndMeta(li);
+    const titleText = String((titleEl && titleEl.textContent) || li.textContent || "");
+    const isPublic = /\bpublic\b/i.test(titleText);
+
+    const metaText = String((metaEl && metaEl.textContent) || "");
+    const { id, upd, frags } = extractPartsFromMetaText(metaText);
+
+    ensureLineLayout(li, titleEl, metaEl, upd);
+
+    let count = null;
+    if (id) {
+      if (isPublic) count = await countStudentsForPublic(id);
+      else count = await countStudentsForTeacherBank(id);
+    }
+
+    const partsOut = [];
+    if (id) partsOut.push("ID: " + id);
+
+    if (frags && frags.length) {
+      // rensa ev gamla Elever:-fragment
+      const cleaned = frags.filter(p => !/^\s*elever\s*:/i.test(p));
+      cleaned.forEach(p => partsOut.push(p));
+    }
+
+    if (count != null) partsOut.push("Elever: " + String(count));
+
+    if (metaEl) {
+      metaEl.textContent = partsOut.join(" • ");
+    }
+  }
+
+  async function enhanceBankList(){
+    const ul = getCloudListEl();
+    if (!ul) return;
+
+    const items = Array.from(ul.children || []).filter(n => n && n.nodeType === 1);
+    for (const li of items){
+      await enhanceOneBankRow(li);
+    }
+  }
+
+  function wrapLoader(fnName){
+    const orig = window[fnName];
+    if (typeof orig !== "function") return false;
+    if (orig.__fv3m_wrapped) return true;
+
+    const wrapped = async function(...args){
+      const res = await orig.apply(this, args);
+      try {
+        await enhanceBankList();
+        await sleep(180);
+        await enhanceBankList();
+        await sleep(420);
+        await enhanceBankList();
+      } catch {}
+      return res;
+    };
+    wrapped.__fv3m_wrapped = true;
+    window[fnName] = wrapped;
     return true;
   }
 
-  function fvMoveAll(){
-    const host =
-      document.getElementById("cloudBanksListV4") ||
-      document.getElementById("cloudBanksList") ||
-      document.querySelector("ul#cloudBanksListV4, ul#cloudBanksList");
-    if (!host) return;
+  function ensureProgressTabsHost(){
+    if (document.getElementById("playedStudentsList")) return true;
 
-    const lis = $all("li", host);
-    if (!lis.length) return;
+    const anchor =
+      document.getElementById("progressPointsText") ||
+      document.getElementById("progressStrongList") ||
+      document.getElementById("progressWeakList") ||
+      null;
 
-    let moved = 0;
-    for (const li of lis) {
-      if (_moveForLi(li)) moved++;
+    const progressPanel =
+      qs('.tab-panel[data-panel="progress"]') ||
+      qs('.tab-panel[data-panel="teacher-progress"]') ||
+      (anchor ? anchor.closest(".card") : null) ||
+      (anchor ? anchor.parentElement : null);
+
+    if (!progressPanel) return false;
+
+    const ul = document.createElement("ul");
+    ul.id = "playedStudentsList";
+    ul.className = "tab-nav";
+    ul.style.marginTop = "8px";
+
+    if (anchor && anchor.parentElement) {
+      anchor.parentElement.insertBefore(ul, anchor);
+    } else {
+      progressPanel.insertBefore(ul, progressPanel.firstChild);
     }
-    return moved;
+
+    return true;
   }
 
-  // Hook: efter molnlistning
-  function _wrapLoader(fnName){
-    try{
-      const orig = window[fnName];
-      if (typeof orig !== "function" || orig.__fv3mWrapped) return;
-
-      const wrapped = async function(){
-        const res = await orig.apply(this, arguments);
-        try { fvMoveAll(); } catch {}
-        return res;
-      };
-      wrapped.__fv3mWrapped = true;
-      window[fnName] = wrapped;
-    }catch{}
+  function ensureProgressTabsStyles(){
+    if (document.getElementById("fv3m-progress-tabs-style")) return;
+    const st = document.createElement("style");
+    st.id = "fv3m-progress-tabs-style";
+    st.textContent = `
+      #playedStudentsList.tab-nav{
+        display:flex;
+        flex-wrap:wrap;
+        gap:6px;
+        padding:0;
+        margin:8px 0 10px 0;
+        list-style:none;
+      }
+      #playedStudentsList .tab-btn{
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        padding:6px 10px;
+        border-radius:999px;
+        border:1px solid rgba(31,41,55,1);
+        background:#020617;
+        color:inherit;
+        cursor:pointer;
+        font-size:.86rem;
+      }
+      #playedStudentsList .tab-btn.active{
+        border-color:rgba(74,222,128,.95);
+        box-shadow:0 0 0 1px rgba(22,163,74,1), 0 0 16px rgba(34,197,94,.45);
+      }
+      #playedStudentsList .tab-btn .mini{
+        opacity:.9;
+        margin-left:6px;
+      }
+    `;
+    document.head.appendChild(st);
   }
 
-  _wrapLoader("loadCloudBanksListV4");
-  _wrapLoader("loadCloudBanksList");
+  function hookProgressTabRefresh(){
+    if (window.__fv3m_bound_progress_refresh) return;
+    window.__fv3m_bound_progress_refresh = true;
 
-  // Fallback: kör efter DOM ready + några korta retries (ifall listan renderas sent)
-  function _boot(){
-    try { fvMoveAll(); } catch {}
-    let n = 0;
-    const t = setInterval(()=>{
-      n++;
-      try { fvMoveAll(); } catch {}
-      if (n >= 8) clearInterval(t);
-    }, 220);
+    document.addEventListener("click", (ev)=>{
+      const btn = ev.target && ev.target.closest ? ev.target.closest("#tab-progress,[data-tab='progress']") : null;
+      if (!btn) return;
+      setTimeout(()=>{
+        ensureProgressTabsHost();
+        ensureProgressTabsStyles();
+        try { if (typeof tryRefreshPlayedStudentsList === "function") tryRefreshPlayedStudentsList(true); } catch {}
+        try { if (typeof tryUpdateProgressUI === "function") tryUpdateProgressUI(); } catch {}
+      }, 60);
+    }, true);
+  }
+
+  function observeLateDom(){
+    if (window.__fv3m_dom_observer) return;
+    const obs = new MutationObserver(()=>{
+      ensureProgressTabsHost();
+      ensureProgressTabsStyles();
+      enhanceBankList().catch(()=>{});
+    });
+    obs.observe(document.documentElement, { childList:true, subtree:true });
+    window.__fv3m_dom_observer = obs;
+  }
+
+  async function bootstrap(){
+    // wrap loaders om de finns
+    wrapLoader("loadCloudBanksListV4");
+    wrapLoader("loadCloudBanksList");
+
+    // när Firebase blir redo: försök igen (så count fungerar)
+    window.addEventListener("fv-firebase-ready", async ()=>{
+      try {
+        await enhanceBankList();
+      } catch {}
+    });
+
+    // om listan laddas via knapp: patcha efteråt
+    const btnLoad = document.getElementById("btnLoadCloudBanks");
+    if (btnLoad && !btnLoad.__fv3m_bound){
+      btnLoad.__fv3m_bound = true;
+      btnLoad.addEventListener("click", async ()=>{
+        await sleep(320);
+        try { await enhanceBankList(); } catch {}
+      });
+    }
+
+    ensureProgressTabsHost();
+    ensureProgressTabsStyles();
+    hookProgressTabRefresh();
+    observeLateDom();
+
+    // första körning (om lista redan finns)
+    try { await enhanceBankList(); } catch {}
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", _boot);
+    document.addEventListener("DOMContentLoaded", bootstrap);
   } else {
-    _boot();
+    bootstrap();
   }
+
 })();
 </script>
-<!-- slut SEKTION 3M: BANKLISTA – flytta “Uppd:” till titelraden -->
+<!-- slut SEKTION 3M: UI-FIX – bankrad (Uppd på rad 1) + korrekt Elever-count + elevflikar i progress -->
+
+
+
+
+
+
+
 
 <!-- start SEKTION 3N: ELEVPROGRESSION – elevflikar med namn -->
 <script>
