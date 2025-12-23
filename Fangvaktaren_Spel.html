@@ -4203,446 +4203,296 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 
-<!-- start SEKTION 3Dd: ELEVRESULTAT – lista elever som spelat + välj elev + starka/svaga delbitar + format (E/C/A per rad) -->
-<!-- ÄNDRAT: (1) Gör progression robust oavsett fältnamn (progression/prog/progress/lastResult.*), (2) visar alltid elevens data även om dina gamla UI-id:n saknas (fallback-panel i elevlist-kortet), (3) gör hela elevraden klickbar + “Visa”-knapp. Omskrivna/nya rader: ca 210 -->
+<!-- start SEKTION 3Db: PUBLIC AUTOLOAD + PERMISSION-GUARD + GRÖN “MEJL SKICKAT”-KNAPP -->
+<!-- ÄNDRAT (kort): 1) Autoladdar frågebank när URL har ?public=... (sparar i localStorage och gör 1 engångs-reload). 2) Stoppar roster/elevlista-läsning i public-länk utan lärar-inlogg (ingen permission-denied spam). 3) Återinför grön “mejl skickat”-status på lärarknapp via localStorage per bank. Omskrivna/nya rader: ca 210 -->
 <script>
 "use strict";
 
 /* =========================
-   3Dd – Elevresultat (Firestore -> UI)
+   Helpers
    ========================= */
 
-function _fv3d_getProgressPanel(){
-  return document.querySelector('.tab-panel[data-panel="progress"]') || document.getElementById("progressPointsBox")?.closest(".tab-panel") || null;
+function _fv_pub_hasFirebase(){
+  return !!(window.firebaseDbInstance && typeof window.firebaseDbInstance.collection === "function");
+}
+function _fv_pub_getPublicId(){
+  try { return String(getQueryParam("public") || "").trim(); } catch { return ""; }
+}
+function _fv_pub_getToken(){
+  try { return String(getQueryParam("token") || "").trim(); } catch { return ""; }
+}
+function _fv_pub_ensureBankShape(bank){
+  const b = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
+  if (!Array.isArray(b.mcq)) b.mcq = [];
+  if (!Array.isArray(b.img)) b.img = [];
+  if (!Array.isArray(b.drag)) b.drag = [];
+  return b;
+}
+function _fv_pub_bankSize(bank){
+  const b = _fv_pub_ensureBankShape(bank);
+  return (b.mcq.length + b.img.length + b.drag.length);
+}
+function _fv_pub_readPublicBankObj(data){
+  const d = data || {};
+  return (
+    d.bank ||
+    d.publicBank ||
+    d.bankSnapshot ||
+    d.bankData ||
+    d.questionsBank ||
+    d.questions ||
+    null
+  );
 }
 
-function _fv3d_ensureStudentsUI(){
-  const panel = _fv3d_getProgressPanel();
-  if (!panel) return null;
+async function _fv_pub_fetchPublicBank(publicId){
+  const pid = String(publicId || "").trim();
+  if (!pid) return null;
+  const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(pid);
+  const snap = await ref.get();
+  if (!snap || !snap.exists) return null;
 
-  let wrap = document.getElementById("fv3dStudentsWrap");
-  if (!wrap) {
-    wrap = document.createElement("div");
-    wrap.id = "fv3dStudentsWrap";
-    wrap.className = "card card-full-width";
-    wrap.style.marginTop = "10px";
-    wrap.innerHTML = `
-      <h3>Elever (aktiv bank)</h3>
-      <p class="mini" id="fv3dStudentsHint">Klicka på en elev för att visa poäng + starka/svaga delbitar.</p>
+  const data = snap.data() || {};
+  let bank = _fv_pub_readPublicBankObj(data);
 
-      <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; margin-top:8px;">
-        <button id="fv3dStudentsRefresh" class="btn btn-sm" type="button">🔁 Uppdatera</button>
-      </div>
-
-      <ul id="fv3dStudentsList" class="goals-list" style="margin-top:10px;"></ul>
-
-      <!-- Fallback UI (om dina gamla rutor/ID saknas eller inte uppdateras) -->
-      <div id="fv3dStudentFallback" class="card" style="margin-top:10px;">
-        <h4 style="margin:0 0 6px 0;">Vald elev</h4>
-        <pre id="fv3dStudentFallbackPoints" class="mini" style="white-space:pre-wrap; margin:0;"></pre>
-        <div style="display:grid; grid-template-columns:1fr; gap:10px; margin-top:10px;">
-          <div>
-            <h4 style="margin:0 0 6px 0;">Starka delbitar</h4>
-            <ul id="fv3dStudentFallbackStrong" class="goals-list"></ul>
-          </div>
-          <div>
-            <h4 style="margin:0 0 6px 0;">Delbitar att öva på</h4>
-            <ul id="fv3dStudentFallbackWeak" class="goals-list"></ul>
-          </div>
-        </div>
-      </div>
-
-      <p class="mini" id="fv3dStudentsStatus" style="margin-top:8px; white-space:pre-wrap;"></p>
-    `;
-
-    const hostCard = panel.querySelector(".card") || panel;
-    hostCard.appendChild(wrap);
+  // Fallback: om public-doc bara pekar på teacher-bank (kan vara spärrat i Rules, men vi försöker)
+  if (!bank && data.sourceTeacherUid && data.sourceBankId) {
+    try {
+      const tRef = firebaseDbInstance
+        .collection(CLOUD_ROOT_COLLECTION).doc(String(data.sourceTeacherUid))
+        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(data.sourceBankId));
+      const tSnap = await tRef.get();
+      if (tSnap && tSnap.exists) {
+        const tData = tSnap.data() || {};
+        bank = (tData.bank || tData.bankSnapshot || tData.questionsBank || null);
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
-  return wrap;
+  return _fv_pub_ensureBankShape(bank);
 }
 
-function _fv3d_setStudentsStatus(msg){
-  const el = document.getElementById("fv3dStudentsStatus");
-  if (el) el.textContent = msg || "";
-}
-
-function _fv3d_getActiveContextForResults(){
+function _fv_pub_applyTokenToStateIfAny(){
   try {
-    if (typeof loadState === "function") {
-      const s = loadState();
-      const ab = (s && s.activeBank) ? s.activeBank : {};
-      return {
-        mode: String(ab.mode || ""),
-        ownerUid: String(ab.ownerUid || ""),
-        bankId: String(ab.bankId || ""),
-        publicId: String(ab.publicId || "")
-      };
+    const tk = _fv_pub_getToken();
+    if (!tk) return;
+    const s = (typeof loadState === "function") ? loadState() : null;
+    if (!s) return;
+    if (!s.student) s.student = { name:"", klass:"", token:"" };
+    if (!s.student.token) {
+      s.student.token = String(tk);
+      if (typeof saveState === "function") saveState(s);
     }
   } catch {}
-  return { mode:"", ownerUid:"", bankId:"", publicId:"" };
-}
-
-async function _fv3d_resolveTeacherBankFromPublic(publicId){
-  if (!_fv3d_hasFirebaseReady()) throw new Error("Firebase saknas");
-  const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId));
-  const snap = await ref.get();
-  if (!snap.exists) throw new Error("Public bank finns inte");
-  const data = snap.data() || {};
-  const uid = String(data.sourceTeacherUid || "").trim();
-  const bid = String(data.sourceBankId || "").trim();
-  if (!uid || !bid) throw new Error("Public bank saknar sourceTeacherUid/sourceBankId");
-  return { ownerUid: uid, bankId: bid };
-}
-
-function _fv3d_studentLabel(d){
-  const nm = (d && (d.name || d.studentName || d.displayName)) ? String(d.name || d.studentName || d.displayName) : "";
-  const kl = (d && (d.klass || d.class || d.studentClass)) ? String(d.klass || d.class || d.studentClass) : "";
-  const tk = (d && d.token) ? String(d.token) : "";
-  if (nm || kl) return `${nm || "Okänd"}${kl ? " (" + kl + ")" : ""}${tk ? " – " + tk : ""}`;
-  return tk ? `Token: ${tk}` : "Okänd elev";
-}
-
-function _fv3d_safeNum(x){ return (typeof x === "number" && isFinite(x)) ? x : (isFinite(Number(x)) ? Number(x) : 0); }
-
-function _fv3d_formatBestLines(best, thres){
-  const b = best || { E:0, C:0, A:0 };
-  const t = thres || { E:0, C:0, A:0 };
-  const lineE = `Bästa E: ${_fv3d_safeNum(b.E)}% (gräns ${_fv3d_safeNum(t.E)}%)`;
-  const lineC = `Bästa C: ${_fv3d_safeNum(b.C)}% (gräns ${_fv3d_safeNum(t.C)}%)`;
-  const lineA = `Bästa A: ${_fv3d_safeNum(b.A)}% (gräns ${_fv3d_safeNum(t.A)}%)`;
-  return `${lineE}\n${lineC}\n${lineA}`;
-}
-
-function _fv3d_formatLastLine(lastSubmission){
-  if (!lastSubmission || typeof lastSubmission !== "object") return "Senast: -";
-  const lvl = String(lastSubmission.level || lastSubmission.currentLevel || "-");
-  const pct = (typeof lastSubmission.percent === "number") ? `${Math.round(lastSubmission.percent)}%` : (lastSubmission.scorePct != null ? `${lastSubmission.scorePct}%` : "-");
-  const corr = (typeof lastSubmission.correct === "number") ? lastSubmission.correct : (typeof lastSubmission.correctCount === "number" ? lastSubmission.correctCount : null);
-  const tot  = (typeof lastSubmission.total === "number") ? lastSubmission.total : (typeof lastSubmission.totalCount === "number" ? lastSubmission.totalCount : null);
-  const pts  = (typeof lastSubmission.points === "number") ? lastSubmission.points : (typeof lastSubmission.earnedPoints === "number" ? lastSubmission.earnedPoints : (typeof lastSubmission.pointsGained === "number" ? lastSubmission.pointsGained : null));
-
-  const ratio = (corr != null && tot != null) ? ` (${corr}/${tot} rätt)` : "";
-  const add   = (pts != null) ? ` +${pts}p` : "";
-  return `Senast: nivå ${lvl} – ${pct}${ratio}${add}`;
-}
-
-function _fv3d_pickProgression(studentDoc){
-  const d = studentDoc || {};
-  const cand = [
-    d.progression,
-    d.prog,
-    d.progress,
-    d.stats,
-    (d.lastResult && d.lastResult.progression) ? d.lastResult.progression : null,
-    (d.lastResult && d.lastResult.prog) ? d.lastResult.prog : null,
-    (d.lastResult && d.lastResult.progress) ? d.lastResult.progress : null,
-    (d.lastSubmission && d.lastSubmission.progression) ? d.lastSubmission.progression : null,
-    (d.last && d.last.progression) ? d.last.progression : null
-  ].filter(x => x && typeof x === "object");
-
-  const p = cand[0] || {};
-  const correct = p.correctByGoalId || p.correctByPartId || p.correctByGoalPartId || d.correctByGoalId || d.correctByPartId || {};
-  const wrong   = p.wrongByGoalId   || p.wrongByPartId   || p.wrongByGoalPartId   || d.wrongByGoalId   || d.wrongByPartId   || {};
-
-  const totalPoints =
-    (d.totalPoints != null) ? d.totalPoints :
-    (p.totalPoints != null) ? p.totalPoints :
-    (d.points != null) ? d.points :
-    (d.score != null) ? d.score :
-    0;
-
-  return {
-    totalPoints: _fv3d_safeNum(totalPoints),
-    correctByGoalId: (correct && typeof correct === "object") ? correct : {},
-    wrongByGoalId: (wrong && typeof wrong === "object") ? wrong : {}
-  };
-}
-
-function _fv3d_renderStrongWeakFromProgression(prog){
-  const strongList = document.getElementById("progressStrongList");
-  const weakList = document.getElementById("progressWeakList");
-
-  const fbStrong = document.getElementById("fv3dStudentFallbackStrong");
-  const fbWeak = document.getElementById("fv3dStudentFallbackWeak");
-
-  const useStrong = strongList || fbStrong;
-  const useWeak = weakList || fbWeak;
-
-  if (!useStrong || !useWeak) return;
-
-  const s = (typeof loadState === "function") ? loadState() : null;
-  const goalsMap = (s && Array.isArray(s.goalsMap)) ? s.goalsMap : [];
-
-  const correct = (prog && prog.correctByGoalId) ? prog.correctByGoalId : {};
-  const wrong   = (prog && prog.wrongByGoalId) ? prog.wrongByGoalId : {};
-
-  const rows = [];
-  const keys = new Set([ ...Object.keys(correct||{}), ...Object.keys(wrong||{}) ]);
-
-  keys.forEach((k)=>{
-    const c = _fv3d_safeNum(correct[k]);
-    const w = _fv3d_safeNum(wrong[k]);
-    const a = c + w;
-    if (!a) return;
-    const acc = a ? (c / a) : 0;
-    const gm = goalsMap.find(g => String(g.id) === String(k));
-    const label = gm ? `${gm.goal || "Delmål"} – ${gm.parts || ""}`.trim() : `Delbit-id: ${k}`;
-    rows.push({ key:String(k), c, w, a, acc, label });
-  });
-
-  const strong = rows
-    .filter(r => r.a >= 2 && r.acc >= 0.75)
-    .sort((a,b)=> (b.acc - a.acc) || (b.a - a.a))
-    .slice(0, 10);
-
-  const weak = rows
-    .filter(r => (r.a >= 2 && r.acc <= 0.60) || (r.w >= 2 && r.acc < 0.80))
-    .sort((a,b)=> (b.w - a.w) || (a.acc - b.acc) || (b.a - a.a))
-    .slice(0, 10);
-
-  useStrong.innerHTML = "";
-  useWeak.innerHTML = "";
-
-  if (!strong.length) useStrong.innerHTML = `<li>Inga starka delbitar hittades ännu.</li>`;
-  else {
-    strong.forEach(r=>{
-      const li = document.createElement("li");
-      li.textContent = `${r.label} • ${Math.round(r.acc*100)}% (${r.c} rätt, ${r.w} fel)`;
-      useStrong.appendChild(li);
-    });
-  }
-
-  if (!weak.length) useWeak.innerHTML = `<li>Inga delbitar att öva på hittades ännu.</li>`;
-  else {
-    weak.forEach(r=>{
-      const li = document.createElement("li");
-      li.textContent = `${r.label} • ${Math.round(r.acc*100)}% (${r.c} rätt, ${r.w} fel)`;
-      useWeak.appendChild(li);
-    });
-  }
-}
-
-function _fv3d_applyStudentToProgressUI(studentDoc){
-  const s = (typeof loadState === "function") ? loadState() : null;
-  const thres = (s && s.thres) ? s.thres : {E:0,C:0,A:0};
-
-  const best = (studentDoc && studentDoc.best) ? studentDoc.best :
-               (studentDoc && studentDoc.studentBest) ? studentDoc.studentBest :
-               (studentDoc && studentDoc.lastResult && studentDoc.lastResult.best) ? studentDoc.lastResult.best :
-               {E:0,C:0,A:0};
-
-  const lastSub = (studentDoc && (studentDoc.lastSubmission || studentDoc.lastResult || studentDoc.last || studentDoc.submission)) || null;
-
-  const prog = _fv3d_pickProgression(studentDoc);
-  const totalPoints = _fv3d_safeNum(prog.totalPoints);
-
-  const lines =
-    `Totalt: ${totalPoints} p.` + "\n" +
-    _fv3d_formatLastLine(lastSub) + "\n" +
-    _fv3d_formatBestLines(best, thres);
-
-  // Primära rutor (om de finns)
-  const pointsEl = document.getElementById("progressPointsText");
-  if (pointsEl) pointsEl.textContent = lines;
-
-  // Fallback-panel i elevkortet (alltid)
-  const fb = document.getElementById("fv3dStudentFallbackPoints");
-  if (fb) fb.textContent = lines;
-
-  _fv3d_renderStrongWeakFromProgression(prog);
-
-  // Exportbox: fyll JSON (om rutan finns i din UI)
-  const exportEl = document.getElementById("progressExportJson");
-  if (exportEl) {
-    try {
-      const payload = {
-        token: studentDoc && studentDoc.token ? String(studentDoc.token) : "",
-        name: studentDoc && studentDoc.name ? String(studentDoc.name) : "",
-        klass: studentDoc && studentDoc.klass ? String(studentDoc.klass) : "",
-        totalPoints: totalPoints,
-        best: best,
-        last: lastSub || null,
-        progression: {
-          totalPoints: totalPoints,
-          correctByGoalId: prog.correctByGoalId || {},
-          wrongByGoalId: prog.wrongByGoalId || {}
-        }
-      };
-      exportEl.value = JSON.stringify(payload);
-    } catch {}
-  }
-}
-
-function _fv3d_makeStudentRow(studentDoc){
-  const li = document.createElement("li");
-  li.className = "list-item";
-  li.style.cursor = "pointer";
-
-  const label = _fv3d_studentLabel(studentDoc);
-  const prog = _fv3d_pickProgression(studentDoc);
-  const totalPoints = _fv3d_safeNum(prog.totalPoints);
-
-  const best = studentDoc && studentDoc.best ? studentDoc.best : {E:0,C:0,A:0};
-
-  li.innerHTML = `
-    <div class="list-main">
-      <div class="q-text">${_fv3d_escape(label)}</div>
-      <div class="q-meta">Poäng: ${totalPoints} • Bästa: E ${_fv3d_safeNum(best.E)}% • C ${_fv3d_safeNum(best.C)}% • A ${_fv3d_safeNum(best.A)}%</div>
-    </div>
-    <div class="fv3d-actions">
-      <button class="btn btn-sm btn-primary" type="button" data-fv3d-pick-student="1">Visa</button>
-    </div>
-  `;
-
-  const pick = ()=>{
-    _fv3d_applyStudentToProgressUI(studentDoc);
-    _fv3d_setStudentsStatus(`Visar: ${label}`);
-  };
-
-  const btn = li.querySelector("button[data-fv3d-pick-student]");
-  if (btn) {
-    btn.addEventListener("click", (e)=>{
-      e.preventDefault();
-      e.stopPropagation();
-      pick();
-    });
-  }
-
-  li.addEventListener("click", pick);
-
-  return li;
-}
-
-async function _fv3d_loadStudentsFromFirestoreForActive(){
-  _fv3d_ensureStudentsUI();
-  const list = document.getElementById("fv3dStudentsList");
-  if (!list) return;
-
-  list.innerHTML = `<li class="mini">Laddar elevresultat…</li>`;
-  _fv3d_setStudentsStatus("");
-
-  if (!_fv3d_hasFirebaseReady()) {
-    list.innerHTML = `<li class="mini">⚠️ Firebase saknas (initFirebase körs inte).</li>`;
-    _fv3d_setStudentsStatus("⚠️ Firebase saknas.");
-    return;
-  }
-  if (!_fv3d_hasTeacher()) {
-    list.innerHTML = `<li class="mini">☁️ Logga in med Google för att läsa elevresultat.</li>`;
-    _fv3d_setStudentsStatus("☁️ Inte inloggad.");
-    return;
-  }
-
-  const ctx = _fv3d_getActiveContextForResults();
-  let ownerUid = String(currentTeacherUser.uid || "");
-  let bankId = (ctx && ctx.bankId) ? String(ctx.bankId) : "";
-  const publicId = (ctx && ctx.publicId) ? String(ctx.publicId) : "";
-
-  if (!bankId && publicId) {
-    try {
-      const resolved = await _fv3d_resolveTeacherBankFromPublic(publicId);
-      ownerUid = resolved.ownerUid;
-      bankId = resolved.bankId;
-    } catch (e) {
-      console.error("Kunde inte resolve public -> teacher bank:", e);
-      list.innerHTML = `<li class="mini">⚠️ Kan inte hitta bank via publicId. Se konsolen.</li>`;
-      _fv3d_setStudentsStatus("⚠️ Kan inte resolve publicId till bank.");
-      return;
-    }
-  }
-
-  if (!bankId) {
-    list.innerHTML = `<li class="mini">⚠️ Ingen aktiv bank. Aktivera en bank i Frågebank-fliken.</li>`;
-    _fv3d_setStudentsStatus("⚠️ Ingen aktiv bankId.");
-    return;
-  }
-
-  try {
-    const studentsCol = firebaseDbInstance
-      .collection(CLOUD_ROOT_COLLECTION)
-      .doc(String(ownerUid))
-      .collection(CLOUD_BANKS_SUBCOLLECTION)
-      .doc(String(bankId))
-      .collection("students");
-
-    let snap = null;
-    try {
-      // snabbast om du har updatedAt
-      snap = await studentsCol.orderBy("updatedAt", "desc").limit(200).get();
-    } catch {
-      snap = await studentsCol.limit(200).get();
-    }
-
-    const docs = (snap && snap.docs) ? snap.docs : [];
-
-    if (!docs.length) {
-      list.innerHTML = `<li class="mini">Inga elevresultat hittades ännu för denna bank.</li>`;
-      _fv3d_setStudentsStatus(`Bank: ${bankId}\nTips: låt en elev spela och lämna in nivå – då skapas students/{token}.`);
-      return;
-    }
-
-    const students = docs.map(d=>{
-      const data = d.data() || {};
-      if (!data.token) data.token = d.id;
-
-      // normalisera totalPoints om det ligger djupt
-      const p = _fv3d_pickProgression(data);
-      if (data.totalPoints == null) data.totalPoints = p.totalPoints;
-
-      return data;
-    });
-
-    // sort: mest poäng först
-    students.sort((a,b)=> _fv3d_safeNum(_fv3d_pickProgression(b).totalPoints) - _fv3d_safeNum(_fv3d_pickProgression(a).totalPoints));
-
-    list.innerHTML = "";
-    students.forEach(st=> list.appendChild(_fv3d_makeStudentRow(st)));
-
-    _fv3d_setStudentsStatus(`Bank: ${bankId}\nHittade ${students.length} elev(er).`);
-  } catch (e) {
-    console.error("Fel vid laddning av elever:", e);
-    if (_fv3d_isPermissionDenied(e)) {
-      list.innerHTML = `<li class="mini">❌ Saknar rättigheter att läsa students (permission-denied).</li>`;
-      _fv3d_setStudentsStatus("❌ permission-denied: Firestore Rules stoppar läsning av students.");
-    } else {
-      list.innerHTML = `<li class="mini">⚠️ Fel vid laddning. Se konsolen.</li>`;
-      _fv3d_setStudentsStatus("⚠️ Fel vid laddning (se konsol).");
-    }
-  }
 }
 
 /* =========================
-   Bind: refresh + auto-load när progress-tabben öppnas
+   1) Public autoload: ?public=... -> hämta bank -> spara -> 1 reload
    ========================= */
 
-(function FV3D_StudentsBindOnce(){
-  if (window.__fv3d_studentsBind) return;
-  window.__fv3d_studentsBind = true;
+async function _fv_pub_autoloadPublicBankOnce(){
+  const pid = _fv_pub_getPublicId();
+  if (!pid) return;
 
-  document.addEventListener("click", async (e)=>{
-    const t = e.target && e.target.closest ? e.target.closest("button") : null;
-    if (!t) return;
+  // Markera aktiv bank som public i state (för att resten av appen ska veta)
+  try {
+    if (typeof setActiveBankMeta === "function") setActiveBankMeta({ mode: "public", publicId: pid });
+  } catch {}
 
-    if (t.id === "fv3dStudentsRefresh") {
-      e.preventDefault();
-      await _fv3d_loadStudentsFromFirestoreForActive();
+  // Se till att token hamnar i state.student.token (för submit)
+  _fv_pub_applyTokenToStateIfAny();
+
+  // Om vi redan har frågor i localStorage: gör inget
+  try {
+    const s0 = (typeof loadState === "function") ? loadState() : null;
+    const b0 = s0 ? _fv_pub_ensureBankShape(s0.bank) : _fv_pub_ensureBankShape(null);
+    if (_fv_pub_bankSize(b0) > 0) return;
+  } catch {}
+
+  // Undvik reload-loop: engångsflagga per publicId
+  const reloadKey = STORAGE_KEY + "::public_autoload_reloaded::" + pid;
+  try {
+    if (sessionStorage.getItem(reloadKey) === "1") return;
+  } catch {}
+
+  const bank = await _fv_pub_fetchPublicBank(pid);
+  if (!bank || _fv_pub_bankSize(bank) <= 0) return;
+
+  // Spara bank i local state och reload en gång så initApp/start laddar frågor som vanligt
+  try {
+    const s = (typeof loadState === "function") ? loadState() : null;
+    if (s) {
+      s.bank = _fv_pub_ensureBankShape(bank);
+      if (typeof saveState === "function") saveState(s);
+    }
+  } catch {}
+
+  try { sessionStorage.setItem(reloadKey, "1"); } catch {}
+  try { location.reload(); } catch {}
+}
+
+/* Retry tills Firebase init är klar (bounded, ingen oändlig loop) */
+(function _fv_pub_boot(){
+  if (window.__fv_pub_booted__) return;
+  window.__fv_pub_booted__ = true;
+
+  let tries = 0;
+  const maxTries = 30; // ~3 sek
+
+  function tick(){
+    tries++;
+    const pid = _fv_pub_getPublicId();
+    if (!pid) return;
+
+    if (!_fv_pub_hasFirebase()) {
+      if (tries < maxTries) return setTimeout(tick, 100);
       return;
     }
 
-    if (t.id === "tab-progress" || t.getAttribute("data-tab") === "progress") {
-      setTimeout(()=>{ _fv3d_loadStudentsFromFirestoreForActive(); }, 80);
-      return;
-    }
-  });
+    _fv_pub_autoloadPublicBankOnce().catch(()=>{});
+  }
 
-  document.addEventListener("DOMContentLoaded", ()=>{
-    try { _fv3d_ensureStudentsUI(); } catch {}
-  });
+  // Kör ASAP + efter DOM
+  try { tick(); } catch {}
+  document.addEventListener("DOMContentLoaded", ()=>{ try { tick(); } catch {} });
 })();
 
-window.fv3dLoadStudentsForActiveBank = _fv3d_loadStudentsFromFirestoreForActive;
+/* =========================
+   2) Permission-guard: i public-länk utan lärarinloggning ska vi INTE läsa roster/elevlista
+   ========================= */
+
+(function _fv_pub_guardTeacherReads(){
+  if (window.__fv_pub_guarded__) return;
+  window.__fv_pub_guarded__ = true;
+
+  function isPublicContext(){
+    try {
+      const pid = _fv_pub_getPublicId();
+      if (pid) return true;
+    } catch {}
+    try {
+      const s = (typeof loadState === "function") ? loadState() : null;
+      const a = s && s.activeBank ? s.activeBank : {};
+      return String(a.mode || "") === "public";
+    } catch {}
+    return false;
+  }
+  function hasTeacherAuth(){
+    try { return !!(window.currentTeacherUser && window.currentTeacherUser.uid); } catch { return false; }
+  }
+
+  // Guarda tryRefreshPlayedStudentsList om den finns
+  try {
+    if (typeof window.tryRefreshPlayedStudentsList === "function") {
+      const _orig = window.tryRefreshPlayedStudentsList;
+      window.tryRefreshPlayedStudentsList = function(force){
+        try {
+          if (isPublicContext() && !hasTeacherAuth()) return;
+        } catch {}
+        return _orig(force);
+      };
+    }
+  } catch {}
+
+  // Guarda tryUpdateProgressUI om den finns (så studentlänk inte triggar teacher-UI)
+  try {
+    if (typeof window.tryUpdateProgressUI === "function") {
+      const _orig2 = window.tryUpdateProgressUI;
+      window.tryUpdateProgressUI = function(){
+        try {
+          if (isPublicContext() && !hasTeacherAuth()) return;
+        } catch {}
+        return _orig2();
+      };
+    }
+  } catch {}
+})();
+
+/* =========================
+   3) Grön “mejl skickat”-knapp (lokalt per bank)
+   ========================= */
+
+(function _fv_emailSentBadge(){
+  if (window.__fv_emailSentBadge__) return;
+  window.__fv_emailSentBadge__ = true;
+
+  function _getActiveBankKey(){
+    try {
+      const s = (typeof loadState === "function") ? loadState() : null;
+      const a = s && s.activeBank ? s.activeBank : {};
+      const bankId = String(a.bankId || "");
+      const publicId = String(a.publicId || "");
+      return bankId || publicId || "no-bank";
+    } catch {
+      return "no-bank";
+    }
+  }
+
+  function _sentKey(){
+    return STORAGE_KEY + "::email_sent::" + _getActiveBankKey();
+  }
+
+  function _applyGreen(btn){
+    if (!btn) return;
+    btn.classList.add("fv-email-sent");
+    btn.setAttribute("data-email-sent","1");
+  }
+
+  function _restore(){
+    try {
+      const raw = localStorage.getItem(_sentKey());
+      if (raw !== "1") return;
+    } catch { return; }
+
+    const ids = ["btnSendEmails","btnSendStudentEmails","btnEmailStudents","btnMailStudents"];
+    for (let i = 0; i < ids.length; i++) {
+      const b = document.getElementById(ids[i]);
+      if (b) _applyGreen(b);
+    }
+  }
+
+  function _bind(){
+    const ids = ["btnSendEmails","btnSendStudentEmails","btnEmailStudents","btnMailStudents"];
+    for (let i = 0; i < ids.length; i++) {
+      const b = document.getElementById(ids[i]);
+      if (!b || b.__fvEmailBound) continue;
+      b.__fvEmailBound = true;
+
+      b.addEventListener("click", ()=>{
+        try { localStorage.setItem(_sentKey(), "1"); } catch {}
+        _applyGreen(b);
+      });
+    }
+  }
+
+  // Minimal CSS (utan att röra SEKTION 1)
+  function _injectCssOnce(){
+    if (document.getElementById("fvEmailSentStyle")) return;
+    const st = document.createElement("style");
+    st.id = "fvEmailSentStyle";
+    st.textContent = `
+      .btn.fv-email-sent, .fv-email-sent{
+        border-color: rgba(34,197,94,.55) !important;
+        box-shadow: 0 0 0 2px rgba(34,197,94,.18) inset !important;
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
+  document.addEventListener("DOMContentLoaded", ()=>{
+    _injectCssOnce();
+    _restore();
+    _bind();
+  });
+
+  // failsafe om knappar renderas senare
+  setTimeout(()=>{ try { _restore(); _bind(); } catch {} }, 250);
+  setTimeout(()=>{ try { _restore(); _bind(); } catch {} }, 1200);
+})();
 </script>
-<!-- slut SEKTION 3Dd: ELEVRESULTAT – lista elever som spelat + välj elev + starka/svaga delbitar + format (E/C/A per rad) -->
+<!-- slut SEKTION 3Db: PUBLIC AUTOLOAD + PERMISSION-GUARD + GRÖN “MEJL SKICKAT”-KNAPP -->
 
 
 
