@@ -4203,80 +4203,187 @@ document.addEventListener("DOMContentLoaded", _fv3d_bind);
 
 
 
-<!-- start SEKTION 3Db: PUBLIC AUTOLOAD + PERMISSION-GUARD + GRÖN “MEJL SKICKAT”-KNAPP -->
-<!-- ÄNDRAT (kort): 1) Autoladdar frågebank när URL har ?public=... (sparar i localStorage och gör 1 engångs-reload). 2) Stoppar roster/elevlista-läsning i public-länk utan lärar-inlogg (ingen permission-denied spam). 3) Återinför grön “mejl skickat”-status på lärarknapp via localStorage per bank. Omskrivna/nya rader: ca 210 -->
+<!-- start SEKTION 3Dc: PATCH – stoppa permission-loop i elevläge + tvinga teacher-path i lärarläge + public autoload -->
+<!-- ÄNDRAT: 1) Elevlänk (public) försöker inte läsa roster/students (ingen permission-denied-loop). 2) Lärarläge: om bankId finns + Google-inlogg, läs alltid teachers/{uid}/banks/{bankId}/students (även om mode råkat bli "public"). 3) Public-länk autoladdar bank till localStorage (1 engångs-reload). Omskrivna/nya rader: ca 190 -->
 <script>
 "use strict";
 
-/* =========================
-   Helpers
-   ========================= */
-
-function _fv_pub_hasFirebase(){
-  return !!(window.firebaseDbInstance && typeof window.firebaseDbInstance.collection === "function");
+/* =========
+   Små helpers
+   ========= */
+function _fv_patch_qp(name){
+  try { return String(getQueryParam(name) || "").trim(); } catch { return ""; }
 }
-function _fv_pub_getPublicId(){
-  try { return String(getQueryParam("public") || "").trim(); } catch { return ""; }
+function _fv_patch_isPublicLink(){
+  const pid = _fv_patch_qp("public");
+  if (pid) return true;
+  try {
+    const s = (typeof loadState === "function") ? loadState() : null;
+    const a = s && s.activeBank ? s.activeBank : {};
+    return String(a.mode || "") === "public";
+  } catch { return false; }
 }
-function _fv_pub_getToken(){
-  try { return String(getQueryParam("token") || "").trim(); } catch { return ""; }
+function _fv_patch_hasTeacher(){
+  try { return !!(window.currentTeacherUser && currentTeacherUser.uid); } catch { return false; }
 }
-function _fv_pub_ensureBankShape(bank){
+function _fv_patch_bankShape(bank){
   const b = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
   if (!Array.isArray(b.mcq)) b.mcq = [];
   if (!Array.isArray(b.img)) b.img = [];
   if (!Array.isArray(b.drag)) b.drag = [];
   return b;
 }
-function _fv_pub_bankSize(bank){
-  const b = _fv_pub_ensureBankShape(bank);
+function _fv_patch_bankCount(bank){
+  const b = _fv_patch_bankShape(bank);
   return (b.mcq.length + b.img.length + b.drag.length);
 }
-function _fv_pub_readPublicBankObj(data){
-  const d = data || {};
-  return (
-    d.bank ||
-    d.publicBank ||
-    d.bankSnapshot ||
-    d.bankData ||
-    d.questionsBank ||
-    d.questions ||
-    null
-  );
+function _fv_patch_isPermDenied(e){
+  try { return (typeof isPermissionDenied === "function") ? isPermissionDenied(e) : false; } catch { return false; }
 }
 
-async function _fv_pub_fetchPublicBank(publicId){
+/* =========================================================
+   1) Override refs: alltid teacher-path i lärarläge (bankId + inlogg)
+   ========================================================= */
+function _getStudentsCollectionRefFromActiveBank(){
+  if (!window.firebaseDbInstance) return null;
+
+  const s = (typeof loadState === "function") ? loadState() : null;
+  const a = s && s.activeBank ? s.activeBank : {};
+
+  const bankId  = String(a.bankId || "").trim();
+  const ownerUidState = String(a.ownerUid || "").trim();
+  const publicId = String(a.publicId || _fv_patch_qp("public") || "").trim();
+  const uidAuth = (window.currentTeacherUser && currentTeacherUser.uid) ? String(currentTeacherUser.uid) : "";
+
+  // ✅ Prioritet: lärarläge = teachers/{uid}/banks/{bankId}/students
+  if (uidAuth && bankId) {
+    const ownerUid = ownerUidState || uidAuth;
+    return firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION).doc(ownerUid)
+      .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bankId)
+      .collection("students");
+  }
+
+  // Elevlänk (public): public_banks/{publicId}/students (kan vara spärrat i Rules -> vi guardar nedan)
+  if (publicId) {
+    return firebaseDbInstance
+      .collection(PUBLIC_BANKS_COLLECTION).doc(publicId)
+      .collection("students");
+  }
+
+  return null;
+}
+
+function _getBankDocRefFromActiveBank(){
+  if (!window.firebaseDbInstance) return null;
+
+  const s = (typeof loadState === "function") ? loadState() : null;
+  const a = s && s.activeBank ? s.activeBank : {};
+
+  const bankId  = String(a.bankId || "").trim();
+  const ownerUidState = String(a.ownerUid || "").trim();
+  const publicId = String(a.publicId || _fv_patch_qp("public") || "").trim();
+  const uidAuth = (window.currentTeacherUser && currentTeacherUser.uid) ? String(currentTeacherUser.uid) : "";
+
+  if (uidAuth && bankId) {
+    const ownerUid = ownerUidState || uidAuth;
+    return firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION).doc(ownerUid)
+      .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bankId);
+  }
+
+  if (publicId) {
+    return firebaseDbInstance
+      .collection(PUBLIC_BANKS_COLLECTION).doc(publicId);
+  }
+
+  return null;
+}
+
+/* =========================================================
+   2) Guard: i elevlänk/public utan lärarinlogg -> ingen roster/students-läsning (stoppar permission-loop)
+   ========================================================= */
+(function _fv_patch_guardPublicReads(){
+  if (window.__fv_patch_guardPublicReads__) return;
+  window.__fv_patch_guardPublicReads__ = true;
+
+  // patcha _fetchPlayedStudentsOnce om den finns (SEKTION 3B)
+  if (typeof window._fetchPlayedStudentsOnce === "function") {
+    const _origFetch = window._fetchPlayedStudentsOnce;
+    window._fetchPlayedStudentsOnce = async function(){
+      try {
+        if (_fv_patch_isPublicLink() && !_fv_patch_hasTeacher()) return [];
+        return await _origFetch();
+      } catch (e) {
+        if (_fv_patch_isPermDenied(e)) return [];
+        throw e;
+      }
+    };
+  }
+
+  // patcha _fetchRosterListFlexible om den finns (SEKTION 3B)
+  if (typeof window._fetchRosterListFlexible === "function") {
+    const _origRoster = window._fetchRosterListFlexible;
+    window._fetchRosterListFlexible = async function(){
+      try {
+        if (_fv_patch_isPublicLink() && !_fv_patch_hasTeacher()) return [];
+        return await _origRoster();
+      } catch (e) {
+        if (_fv_patch_isPermDenied(e)) return [];
+        throw e;
+      }
+    };
+  }
+
+  // patcha tryRefreshPlayedStudentsList: fånga permission-denied utan console-spam + skriv tydligt i UI
+  if (typeof window.tryRefreshPlayedStudentsList === "function") {
+    const _origRefresh = window.tryRefreshPlayedStudentsList;
+    window.tryRefreshPlayedStudentsList = function(force){
+      try {
+        if (_fv_patch_isPublicLink() && !_fv_patch_hasTeacher()) return;
+        return _origRefresh(force);
+      } catch (e) {
+        const ul = document.getElementById("playedStudentsList");
+        if (ul) {
+          ul.classList.remove("tab-nav");
+          ul.classList.add("goals-list");
+          ul.innerHTML = `<li>☁️ Logga in i lärarläge för att se elevresultat.</li>`;
+        }
+      }
+    };
+  }
+
+  // patcha tryUpdateProgressUI: gör inget i elevlänk/public utan lärare
+  if (typeof window.tryUpdateProgressUI === "function") {
+    const _origUp = window.tryUpdateProgressUI;
+    window.tryUpdateProgressUI = function(){
+      try {
+        if (_fv_patch_isPublicLink() && !_fv_patch_hasTeacher()) return;
+      } catch {}
+      return _origUp();
+    };
+  }
+})();
+
+/* =========================================================
+   3) Public autoload: ?public=... -> hämta bank -> spara -> 1 reload
+   ========================================================= */
+async function _fv_patch_fetchPublicBank(publicId){
   const pid = String(publicId || "").trim();
-  if (!pid) return null;
+  if (!pid || !window.firebaseDbInstance) return null;
+
   const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(pid);
   const snap = await ref.get();
   if (!snap || !snap.exists) return null;
 
   const data = snap.data() || {};
-  let bank = _fv_pub_readPublicBankObj(data);
-
-  // Fallback: om public-doc bara pekar på teacher-bank (kan vara spärrat i Rules, men vi försöker)
-  if (!bank && data.sourceTeacherUid && data.sourceBankId) {
-    try {
-      const tRef = firebaseDbInstance
-        .collection(CLOUD_ROOT_COLLECTION).doc(String(data.sourceTeacherUid))
-        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(data.sourceBankId));
-      const tSnap = await tRef.get();
-      if (tSnap && tSnap.exists) {
-        const tData = tSnap.data() || {};
-        bank = (tData.bank || tData.bankSnapshot || tData.questionsBank || null);
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
-  return _fv_pub_ensureBankShape(bank);
+  const bank = (data.bank || data.publicBank || data.bankSnapshot || data.bankData || null);
+  return _fv_patch_bankShape(bank);
 }
 
-function _fv_pub_applyTokenToStateIfAny(){
+function _fv_patch_applyTokenToState(){
   try {
-    const tk = _fv_pub_getToken();
+    const tk = _fv_patch_qp("token");
     if (!tk) return;
     const s = (typeof loadState === "function") ? loadState() : null;
     if (!s) return;
@@ -4288,211 +4395,65 @@ function _fv_pub_applyTokenToStateIfAny(){
   } catch {}
 }
 
-/* =========================
-   1) Public autoload: ?public=... -> hämta bank -> spara -> 1 reload
-   ========================= */
-
-async function _fv_pub_autoloadPublicBankOnce(){
-  const pid = _fv_pub_getPublicId();
+async function _fv_patch_autoloadPublicOnce(){
+  const pid = _fv_patch_qp("public");
   if (!pid) return;
+  if (!window.firebaseDbInstance) return;
 
-  // Markera aktiv bank som public i state (för att resten av appen ska veta)
+  // Sätt aktiv bank som public i state (för submit-flöde)
   try {
-    if (typeof setActiveBankMeta === "function") setActiveBankMeta({ mode: "public", publicId: pid });
+    if (typeof setActiveBankMeta === "function") setActiveBankMeta({ mode:"public", publicId: pid });
   } catch {}
 
-  // Se till att token hamnar i state.student.token (för submit)
-  _fv_pub_applyTokenToStateIfAny();
+  _fv_patch_applyTokenToState();
 
-  // Om vi redan har frågor i localStorage: gör inget
+  // Har vi redan frågor lokalt? Då inget mer.
   try {
     const s0 = (typeof loadState === "function") ? loadState() : null;
-    const b0 = s0 ? _fv_pub_ensureBankShape(s0.bank) : _fv_pub_ensureBankShape(null);
-    if (_fv_pub_bankSize(b0) > 0) return;
+    const b0 = s0 ? _fv_patch_bankShape(s0.bank) : _fv_patch_bankShape(null);
+    if (_fv_patch_bankCount(b0) > 0) return;
   } catch {}
 
-  // Undvik reload-loop: engångsflagga per publicId
-  const reloadKey = STORAGE_KEY + "::public_autoload_reloaded::" + pid;
-  try {
-    if (sessionStorage.getItem(reloadKey) === "1") return;
-  } catch {}
+  const onceKey = STORAGE_KEY + "::public_autoload_once::" + pid;
+  try { if (sessionStorage.getItem(onceKey) === "1") return; } catch {}
 
-  const bank = await _fv_pub_fetchPublicBank(pid);
-  if (!bank || _fv_pub_bankSize(bank) <= 0) return;
+  const bank = await _fv_patch_fetchPublicBank(pid);
+  if (!bank || _fv_patch_bankCount(bank) <= 0) return;
 
-  // Spara bank i local state och reload en gång så initApp/start laddar frågor som vanligt
   try {
     const s = (typeof loadState === "function") ? loadState() : null;
     if (s) {
-      s.bank = _fv_pub_ensureBankShape(bank);
+      s.bank = _fv_patch_bankShape(bank);
       if (typeof saveState === "function") saveState(s);
     }
   } catch {}
 
-  try { sessionStorage.setItem(reloadKey, "1"); } catch {}
+  try { sessionStorage.setItem(onceKey, "1"); } catch {}
   try { location.reload(); } catch {}
 }
 
-/* Retry tills Firebase init är klar (bounded, ingen oändlig loop) */
-(function _fv_pub_boot(){
-  if (window.__fv_pub_booted__) return;
-  window.__fv_pub_booted__ = true;
+(function _fv_patch_boot(){
+  if (window.__fv_patch_boot__) return;
+  window.__fv_patch_boot__ = true;
 
   let tries = 0;
-  const maxTries = 30; // ~3 sek
+  const maxTries = 40; // ~4 sek
 
   function tick(){
     tries++;
-    const pid = _fv_pub_getPublicId();
-    if (!pid) return;
-
-    if (!_fv_pub_hasFirebase()) {
+    if (!_fv_patch_qp("public")) return;
+    if (!window.firebaseDbInstance) {
       if (tries < maxTries) return setTimeout(tick, 100);
       return;
     }
-
-    _fv_pub_autoloadPublicBankOnce().catch(()=>{});
+    _fv_patch_autoloadPublicOnce().catch(()=>{});
   }
 
-  // Kör ASAP + efter DOM
   try { tick(); } catch {}
   document.addEventListener("DOMContentLoaded", ()=>{ try { tick(); } catch {} });
 })();
-
-/* =========================
-   2) Permission-guard: i public-länk utan lärarinloggning ska vi INTE läsa roster/elevlista
-   ========================= */
-
-(function _fv_pub_guardTeacherReads(){
-  if (window.__fv_pub_guarded__) return;
-  window.__fv_pub_guarded__ = true;
-
-  function isPublicContext(){
-    try {
-      const pid = _fv_pub_getPublicId();
-      if (pid) return true;
-    } catch {}
-    try {
-      const s = (typeof loadState === "function") ? loadState() : null;
-      const a = s && s.activeBank ? s.activeBank : {};
-      return String(a.mode || "") === "public";
-    } catch {}
-    return false;
-  }
-  function hasTeacherAuth(){
-    try { return !!(window.currentTeacherUser && window.currentTeacherUser.uid); } catch { return false; }
-  }
-
-  // Guarda tryRefreshPlayedStudentsList om den finns
-  try {
-    if (typeof window.tryRefreshPlayedStudentsList === "function") {
-      const _orig = window.tryRefreshPlayedStudentsList;
-      window.tryRefreshPlayedStudentsList = function(force){
-        try {
-          if (isPublicContext() && !hasTeacherAuth()) return;
-        } catch {}
-        return _orig(force);
-      };
-    }
-  } catch {}
-
-  // Guarda tryUpdateProgressUI om den finns (så studentlänk inte triggar teacher-UI)
-  try {
-    if (typeof window.tryUpdateProgressUI === "function") {
-      const _orig2 = window.tryUpdateProgressUI;
-      window.tryUpdateProgressUI = function(){
-        try {
-          if (isPublicContext() && !hasTeacherAuth()) return;
-        } catch {}
-        return _orig2();
-      };
-    }
-  } catch {}
-})();
-
-/* =========================
-   3) Grön “mejl skickat”-knapp (lokalt per bank)
-   ========================= */
-
-(function _fv_emailSentBadge(){
-  if (window.__fv_emailSentBadge__) return;
-  window.__fv_emailSentBadge__ = true;
-
-  function _getActiveBankKey(){
-    try {
-      const s = (typeof loadState === "function") ? loadState() : null;
-      const a = s && s.activeBank ? s.activeBank : {};
-      const bankId = String(a.bankId || "");
-      const publicId = String(a.publicId || "");
-      return bankId || publicId || "no-bank";
-    } catch {
-      return "no-bank";
-    }
-  }
-
-  function _sentKey(){
-    return STORAGE_KEY + "::email_sent::" + _getActiveBankKey();
-  }
-
-  function _applyGreen(btn){
-    if (!btn) return;
-    btn.classList.add("fv-email-sent");
-    btn.setAttribute("data-email-sent","1");
-  }
-
-  function _restore(){
-    try {
-      const raw = localStorage.getItem(_sentKey());
-      if (raw !== "1") return;
-    } catch { return; }
-
-    const ids = ["btnSendEmails","btnSendStudentEmails","btnEmailStudents","btnMailStudents"];
-    for (let i = 0; i < ids.length; i++) {
-      const b = document.getElementById(ids[i]);
-      if (b) _applyGreen(b);
-    }
-  }
-
-  function _bind(){
-    const ids = ["btnSendEmails","btnSendStudentEmails","btnEmailStudents","btnMailStudents"];
-    for (let i = 0; i < ids.length; i++) {
-      const b = document.getElementById(ids[i]);
-      if (!b || b.__fvEmailBound) continue;
-      b.__fvEmailBound = true;
-
-      b.addEventListener("click", ()=>{
-        try { localStorage.setItem(_sentKey(), "1"); } catch {}
-        _applyGreen(b);
-      });
-    }
-  }
-
-  // Minimal CSS (utan att röra SEKTION 1)
-  function _injectCssOnce(){
-    if (document.getElementById("fvEmailSentStyle")) return;
-    const st = document.createElement("style");
-    st.id = "fvEmailSentStyle";
-    st.textContent = `
-      .btn.fv-email-sent, .fv-email-sent{
-        border-color: rgba(34,197,94,.55) !important;
-        box-shadow: 0 0 0 2px rgba(34,197,94,.18) inset !important;
-      }
-    `;
-    document.head.appendChild(st);
-  }
-
-  document.addEventListener("DOMContentLoaded", ()=>{
-    _injectCssOnce();
-    _restore();
-    _bind();
-  });
-
-  // failsafe om knappar renderas senare
-  setTimeout(()=>{ try { _restore(); _bind(); } catch {} }, 250);
-  setTimeout(()=>{ try { _restore(); _bind(); } catch {} }, 1200);
-})();
 </script>
-<!-- slut SEKTION 3Db: PUBLIC AUTOLOAD + PERMISSION-GUARD + GRÖN “MEJL SKICKAT”-KNAPP -->
+<!-- slut SEKTION 3Dc: PATCH – stoppa permission-loop i elevläge + tvinga teacher-path i lärarläge + public autoload -->
 
 
 
