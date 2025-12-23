@@ -4188,47 +4188,20 @@ function finishLevel() {
 "use strict";
 
 /* =========================================================
-   5A – Hjälpare, globala variabler, lärarläge, flikar, bankstatus, UI-refresh
+   5A – Hjälpare, lärarläge, flikar, bankstatus
    ========================================================= */
 
-// Säkerställ getEl utan att riskera "already declared"
+// Undvik dubbeldefinition om fler script råkar ha samma helper
 if (typeof window.getEl !== "function") {
-  window.getEl = function (id) { return document.getElementById(id); };
+  window.getEl = function getEl(id) { return document.getElementById(id); };
 }
-
-// Säkerställ spel-globala variabler (fixar: "currentLevel is not defined")
-if (typeof window.currentLevel === "undefined") window.currentLevel = null;
-if (!Array.isArray(window.currentQuestions)) window.currentQuestions = [];
-if (!Array.isArray(window.currentAnswers)) window.currentAnswers = [];
-if (typeof window.lastSubmission === "undefined") window.lastSubmission = null;
-
-// Samlad refresh som gör att lärarvyn inte blir "tom" trots aktiv bank
-function refreshTeacherUIFromState() {
-  try { if (typeof updateBankStatusUI === "function") updateBankStatusUI(); } catch (e) {}
-  try { if (typeof initQuestionForms === "function") initQuestionForms(); } catch (e) {}
-  try { if (typeof initImageQuestionsEditor === "function") initImageQuestionsEditor(); } catch (e) {}
-  try { if (typeof initDragDropQuestionsEditor === "function") initDragDropQuestionsEditor(); } catch (e) {}
-  try { if (typeof renderGoalsListAndSelects === "function") renderGoalsListAndSelects(); } catch (e) {}
-  try { if (typeof updateAllProgressionUI === "function") updateAllProgressionUI(); } catch (e) {}
-}
-
-/* =========================
-   Lärarlösenord & status
-   ========================= */
 
 function showTeacherPasswordInStatus() {
   const s = loadState();
   const statusEl = getEl("passwordStatus");
-  if (statusEl && s.teacherPassword) {
-    statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
-  } else if (statusEl) {
-    statusEl.textContent = "";
-  }
+  if (statusEl && s.teacherPassword) statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
+  else if (statusEl) statusEl.textContent = "";
 }
-
-/* =========================
-   Lärarläge: gate + modal
-   ========================= */
 
 function openTeacherGate() {
   const gate = getEl("teacherGate");
@@ -4258,9 +4231,6 @@ function closeTeacherGate() {
 function openTeacherModal() {
   const modal = getEl("teacherModal");
   if (modal) modal.classList.remove("hidden");
-
-  // Viktigt: refresha lärar-UI när modalen öppnas (fixar: "0 frågor" i lärarläget)
-  refreshTeacherUIFromState();
 }
 
 function closeTeacherModal() {
@@ -4304,10 +4274,6 @@ function handleTeacherConfirm() {
   }
 }
 
-/* =========================
-   Fliknavigering i lärarmodal
-   ========================= */
-
 function setupTabNavigation() {
   const tabButtons = document.querySelectorAll(".tab-btn");
   const panels = document.querySelectorAll(".tab-panel");
@@ -4316,17 +4282,13 @@ function setupTabNavigation() {
   function activateTab(tabId) {
     tabButtons.forEach((btn) => {
       const isActive = btn.getAttribute("data-tab") === tabId;
-      if (isActive) btn.classList.add("active");
-      else btn.classList.remove("active");
+      btn.classList.toggle("active", isActive);
     });
 
     panels.forEach((panel) => {
       const panelId = panel.getAttribute("data-panel");
       panel.classList.toggle("hidden", panelId !== tabId);
     });
-
-    // När flik byts: refresha så att editorer/listor alltid speglar aktuell bank
-    refreshTeacherUIFromState();
   }
 
   tabButtons.forEach((btn) => {
@@ -4340,10 +4302,6 @@ function setupTabNavigation() {
   const defaultTab = document.querySelector('.tab-btn[data-tab="settings"]');
   if (defaultTab) activateTab("settings");
 }
-
-/* =========================
-   Bankstatus (UI)
-   ========================= */
 
 function updateBankStatusUI() {
   const listEl = getEl("cloudBankList");
@@ -4360,6 +4318,7 @@ function updateBankStatusUI() {
     statusEl.style.marginTop = "6px";
   }
 
+  // Säkerställ att status ligger precis före listan
   if (statusEl.parentNode !== hostCard) {
     if (statusEl.parentNode) statusEl.parentNode.removeChild(statusEl);
     hostCard.insertBefore(statusEl, listEl);
@@ -4374,9 +4333,8 @@ function updateBankStatusUI() {
   const dragCount = Array.isArray(bank.drag) ? bank.drag.length : 0;
   const total = mcqCount + imgCount + dragCount;
 
-  if (!total) {
-    statusEl.textContent = "Status: Ingen frågebank laddad.";
-  } else {
+  if (!total) statusEl.textContent = "Status: Ingen frågebank laddad.";
+  else {
     statusEl.textContent =
       `Status: Aktiv bank med ${total} frågor ` +
       `(MCQ: ${mcqCount}, bild: ${imgCount}, drag & drop: ${dragCount}).`;
@@ -4384,29 +4342,58 @@ function updateBankStatusUI() {
 }
 
 /* =========================================================
-   5B – Initiering & knappar
+   5B – Initiering + knappar (med skydd mot dubbel-init)
    ========================================================= */
 
-function initApp() {
-  console.log("initApp start");
-
-  // 1) Säkerställ frågebank (merga embedded-data om tom)
-  let s = loadState();
-  const hasBank =
+function _fv_hasAnyLocalBank(s) {
+  return !!(
+    s &&
     s.bank &&
     (
       (Array.isArray(s.bank.mcq) && s.bank.mcq.length) ||
       (Array.isArray(s.bank.img) && s.bank.img.length) ||
       (Array.isArray(s.bank.drag) && s.bank.drag.length)
-    );
+    )
+  );
+}
 
-  if (!hasBank && typeof mergeEmbeddedBank === "function") {
-    console.log("Ingen lokal bank – mergar embedded-data");
-    s = mergeEmbeddedBank(s);
+function _fv_mergeEmbeddedOnce() {
+  let s = loadState();
+  if (!s.meta || typeof s.meta !== "object") s.meta = {};
+
+  // Om vi redan mergat embedded en gång: gör inget
+  if (s.meta.embeddedMerged === true) return;
+
+  // Om det redan finns en bank: markera ändå för att undvika framtida dubbelmerge
+  if (_fv_hasAnyLocalBank(s)) {
+    s.meta.embeddedMerged = true;
     saveState(s);
+    return;
   }
 
-  // 2) Initiera inställningar/editorer om de finns
+  if (typeof mergeEmbeddedBank === "function") {
+    console.log("Ingen lokal bank – mergar embedded-data");
+    s = mergeEmbeddedBank(s);
+    if (!s.meta || typeof s.meta !== "object") s.meta = {};
+    s.meta.embeddedMerged = true;
+    saveState(s);
+  }
+}
+
+function initApp() {
+  // Skydd mot dubbelkörning (t.ex. om DOMContentLoaded råkar finnas i flera script)
+  if (window.__FANGVAKTAREN_INITAPP_DONE) {
+    console.log("initApp: hoppar över (redan initierad)");
+    return;
+  }
+  window.__FANGVAKTAREN_INITAPP_DONE = true;
+
+  console.log("initApp start");
+
+  // 1) Säkerställ att embedded-bank endast mergas en gång
+  _fv_mergeEmbeddedOnce();
+
+  // 2) Initiera inställningsdelar om de finns
   if (typeof initTeacherEmailSettings === "function") initTeacherEmailSettings();
   if (typeof initThresholdSettings === "function") initThresholdSettings();
   if (typeof initTeacherPasswordSettings === "function") initTeacherPasswordSettings();
@@ -4420,32 +4407,31 @@ function initApp() {
   // Fliknavigering
   setupTabNavigation();
 
+  // Moln-bank UI
   if (typeof setupCloudBankUI === "function") setupCloudBankUI();
+
+  // UI-sync (elevkort, nivåknappar, m.m.)
   if (typeof syncUI === "function") syncUI();
 
-  // Uppdatera visuell bankstatus + refresha lärar-UI
+  // Bankstatus
   updateBankStatusUI();
-  refreshTeacherUIFromState();
 
   /* ---------- Elevyta: knappar ---------- */
 
   const btnSaveStudent = getEl("btnSaveStudent");
   if (btnSaveStudent && typeof handleSaveStudent === "function") {
-    btnSaveStudent.addEventListener("click", () => {
-      handleSaveStudent();
-      refreshTeacherUIFromState();
-    });
+    btnSaveStudent.addEventListener("click", handleSaveStudent);
   }
 
   const btnStartE = getEl("start-levelE");
   const btnStartC = getEl("start-levelC");
   const btnStartA = getEl("start-levelA");
-  if (btnStartE) btnStartE.addEventListener("click", () => startLevel("E"));
-  if (btnStartC) btnStartC.addEventListener("click", () => startLevel("C"));
-  if (btnStartA) btnStartA.addEventListener("click", () => startLevel("A"));
+  if (btnStartE && typeof startLevel === "function") btnStartE.addEventListener("click", () => startLevel("E"));
+  if (btnStartC && typeof startLevel === "function") btnStartC.addEventListener("click", () => startLevel("C"));
+  if (btnStartA && typeof startLevel === "function") btnStartA.addEventListener("click", () => startLevel("A"));
 
   const btnFinish = getEl("btnFinish");
-  if (btnFinish) btnFinish.addEventListener("click", finishLevel);
+  if (btnFinish && typeof finishLevel === "function") btnFinish.addEventListener("click", finishLevel);
 
   const btnBack = getEl("btnBack");
   if (btnBack) {
@@ -4463,9 +4449,11 @@ function initApp() {
   const btnCancel = getEl("btnCancel");
   if (btnCancel) {
     btnCancel.addEventListener("click", () => {
-      window.currentLevel = null;
-      window.currentQuestions = [];
-      window.currentAnswers = [];
+      // Reset spelstate om variablerna finns (definieras i andra sektioner)
+      if (typeof window.currentLevel !== "undefined") window.currentLevel = null;
+      if (typeof window.currentQuestions !== "undefined") window.currentQuestions = [];
+      if (typeof window.currentAnswers !== "undefined") window.currentAnswers = [];
+
       const play = getEl("play");
       const result = getEl("result");
       if (play) play.classList.add("hidden");
@@ -4480,10 +4468,7 @@ function initApp() {
   if (btnSubmitGame) {
     btnSubmitGame.addEventListener("click", async () => {
       try {
-        if (typeof saveCurrentResultToFirestore !== "function") {
-          alert("Inlämning är inte aktiverad i denna version.");
-          return;
-        }
+        if (typeof saveCurrentResultToFirestore !== "function") throw new Error("saveCurrentResultToFirestore saknas");
         await saveCurrentResultToFirestore();
         alert("Ditt resultat är inlämnat till läraren.");
       } catch (err) {
@@ -4513,16 +4498,13 @@ function initApp() {
   if (btnSaveThresholds && typeof handleSaveThresholds === "function") {
     btnSaveThresholds.addEventListener("click", () => {
       handleSaveThresholds();
-      refreshTeacherUIFromState();
+      updateBankStatusUI();
     });
   }
 
   const btnSaveTeacherEmail = getEl("btnSaveTeacherEmail");
   if (btnSaveTeacherEmail && typeof handleSaveTeacherEmail === "function") {
-    btnSaveTeacherEmail.addEventListener("click", () => {
-      handleSaveTeacherEmail();
-      refreshTeacherUIFromState();
-    });
+    btnSaveTeacherEmail.addEventListener("click", handleSaveTeacherEmail);
   }
 
   const btnChangeTeacherPassword = getEl("btnChangeTeacherPassword");
@@ -4530,75 +4512,47 @@ function initApp() {
     btnChangeTeacherPassword.addEventListener("click", () => {
       handleChangeTeacherPassword();
       showTeacherPasswordInStatus();
-      refreshTeacherUIFromState();
     });
   }
 
   /* ---------- Delmål/delbitar ---------- */
 
   const btnAddGoalPart = getEl("btnAddGoalPart");
-  if (btnAddGoalPart && typeof handleAddGoalPart === "function") {
-    btnAddGoalPart.addEventListener("click", () => {
-      handleAddGoalPart();
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnAddGoalPart && typeof handleAddGoalPart === "function") btnAddGoalPart.addEventListener("click", handleAddGoalPart);
 
   const btnSaveGoalsMap = getEl("btnSaveGoalsMap");
-  if (btnSaveGoalsMap && typeof handleSaveGoalsMap === "function") {
-    btnSaveGoalsMap.addEventListener("click", () => {
-      handleSaveGoalsMap();
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnSaveGoalsMap && typeof handleSaveGoalsMap === "function") btnSaveGoalsMap.addEventListener("click", handleSaveGoalsMap);
 
   const btnClearGoalsMap = getEl("btnClearGoalsMap");
-  if (btnClearGoalsMap && typeof handleClearGoalsMap === "function") {
-    btnClearGoalsMap.addEventListener("click", () => {
-      handleClearGoalsMap();
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnClearGoalsMap && typeof handleClearGoalsMap === "function") btnClearGoalsMap.addEventListener("click", handleClearGoalsMap);
 
   /* ---------- Rensa / nollställ elevdata ---------- */
 
   const btnClearStudentData = getEl("btnClearStudentData");
-  if (btnClearStudentData && typeof handleClearStudentData === "function") {
-    btnClearStudentData.addEventListener("click", () => {
-      handleClearStudentData();
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnClearStudentData && typeof handleClearStudentData === "function") btnClearStudentData.addEventListener("click", handleClearStudentData);
 
   const btnResetGameData = getEl("btnResetGameData");
-  if (btnResetGameData && typeof handleResetGameData === "function") {
-    btnResetGameData.addEventListener("click", () => {
-      handleResetGameData();
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnResetGameData && typeof handleResetGameData === "function") btnResetGameData.addEventListener("click", handleResetGameData);
 
   /* ---------- Frågebank & Firebase ---------- */
 
   const btnLoadCloudBanks = getEl("btnLoadCloudBanks");
   if (btnLoadCloudBanks && typeof handleLoadCloudBanks === "function") {
-    btnLoadCloudBanks.addEventListener("click", async () => {
+    btnLoadCloudBanks.addEventListener("click", () => {
       if (typeof currentTeacherUser !== "undefined" && !currentTeacherUser) {
         alert("Logga in med Google först för att ladda moln-bankar.");
         return;
       }
-      await Promise.resolve(handleLoadCloudBanks());
+      handleLoadCloudBanks();
       updateBankStatusUI();
-      refreshTeacherUIFromState();
     });
   }
 
   const btnSaveToCloud = getEl("btnSaveToCloud");
   if (btnSaveToCloud && typeof handleSaveToCloud === "function") {
-    btnSaveToCloud.addEventListener("click", async () => {
-      await Promise.resolve(handleSaveToCloud());
+    btnSaveToCloud.addEventListener("click", () => {
+      handleSaveToCloud();
       updateBankStatusUI();
-      refreshTeacherUIFromState();
     });
   }
 
@@ -4607,55 +4561,44 @@ function initApp() {
     btnExportBank.addEventListener("click", () => {
       handleExportBank();
       updateBankStatusUI();
-      refreshTeacherUIFromState();
     });
   }
 
   const fileImport = getEl("fileImport");
   if (fileImport && typeof handleImportBank === "function") {
-    fileImport.addEventListener("change", async (evt) => {
-      await Promise.resolve(handleImportBank(evt));
+    fileImport.addEventListener("change", (evt) => {
+      handleImportBank(evt);
       updateBankStatusUI();
-      refreshTeacherUIFromState();
     });
   }
 
   const btnGoogleLogin = getEl("btnGooglePlaceholder");
-  if (btnGoogleLogin && typeof handleGoogleLogin === "function") {
-    btnGoogleLogin.addEventListener("click", async () => {
-      await Promise.resolve(handleGoogleLogin());
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnGoogleLogin && typeof handleGoogleLogin === "function") btnGoogleLogin.addEventListener("click", handleGoogleLogin);
 
   const btnGoogleLogout = getEl("btnGoogleLogout");
-  if (btnGoogleLogout && typeof handleGoogleLogout === "function") {
-    btnGoogleLogout.addEventListener("click", async () => {
-      await Promise.resolve(handleGoogleLogout());
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnGoogleLogout && typeof handleGoogleLogout === "function") btnGoogleLogout.addEventListener("click", handleGoogleLogout);
 
+  // Publik bank/elevlänk (om UI finns)
   const btnPublishSharedBank = getEl("btnPublishSharedBank");
-  if (btnPublishSharedBank && typeof handlePublishSharedBank === "function") {
-    btnPublishSharedBank.addEventListener("click", async () => {
-      await Promise.resolve(handlePublishSharedBank());
-      refreshTeacherUIFromState();
-    });
-  }
+  if (btnPublishSharedBank && typeof handlePublishSharedBank === "function") btnPublishSharedBank.addEventListener("click", handlePublishSharedBank);
 
   console.log("initApp klar – knappar kopplade");
 }
 
-/* =========================
-   DOMContentLoaded
-   ========================= */
-
+/* DOMContentLoaded – med skydd mot dubbelkörning */
 document.addEventListener("DOMContentLoaded", function () {
+  if (window.__FANGVAKTAREN_DOMREADY_DONE) return;
+  window.__FANGVAKTAREN_DOMREADY_DONE = true;
+
+  // Firebase init (om funktionen finns)
   if (typeof initFirebase === "function") {
     try {
-      initFirebase();
-      console.log("Firebase init OK");
+      // Skydd även här om initFirebase råkar finnas i fler sektioner
+      if (!window.__FANGVAKTAREN_FIREBASE_INIT_DONE) {
+        window.__FANGVAKTAREN_FIREBASE_INIT_DONE = true;
+        initFirebase();
+        console.log("Firebase init OK");
+      }
     } catch (e) {
       console.error("Fel vid initFirebase:", e);
     }
