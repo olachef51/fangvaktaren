@@ -3793,6 +3793,205 @@ function _fv3d_bindRosterBoxOnce(){
 
 
 
+<!-- start SEKTION 3DBX: MOLN-BANK – visa “Elever: X” i banklistan -->
+<!-- ÄNDRING: Lägger på en wrapper runt loadCloudBanksList(V4) som efter laddning räknar student-docs per bank (public_banks om publicId finns, annars teacher-path) och skriver ut “• Elever: X” i listans meta-rad. Omskrivna rader: ca 140 -->
+<script>
+"use strict";
+
+(function FV3D_StudentCountPatch(){
+  if (window.__fv3d_student_count_patch_ran) return;
+  window.__fv3d_student_count_patch_ran = true;
+
+  const _COUNT_CACHE = Object.create(null); // bankId -> { n, ts }
+  function _now(){ return Date.now(); }
+
+  function _sleep(ms){ return new Promise(r=>setTimeout(r, ms||0)); }
+
+  function _hasFirebaseDb(){ return !!(typeof firebaseDbInstance !== "undefined" && firebaseDbInstance); }
+  function _hasTeacher(){ return !!(typeof currentTeacherUser !== "undefined" && currentTeacherUser && currentTeacherUser.uid); }
+
+  function _findBankListHost(){
+    return document.getElementById("cloudBanksListV4") || document.getElementById("cloudBanksList");
+  }
+
+  function _extractBankIdFromLi(li){
+    if (!li) return "";
+    try{
+      const ds = li.dataset || {};
+      const direct =
+        li.getAttribute("data-bank-id") ||
+        li.getAttribute("data-id") ||
+        ds.bankId || ds.bankid || ds.id || ds.bank || "";
+      if (direct) return String(direct).trim();
+    }catch{}
+
+    const txt = String(li.textContent || "");
+    const m = txt.match(/ID:\s*([A-Za-z0-9_-]{10,})/);
+    if (m && m[1]) return String(m[1]).trim();
+    return "";
+  }
+
+  function _findMetaEl(li){
+    if (!li) return null;
+    const minis = Array.from(li.querySelectorAll(".mini"));
+    // välj den som verkar vara “meta-raden” (ID/Frågor/Uppd)
+    for (let i = minis.length - 1; i >= 0; i--){
+      const t = String(minis[i].textContent || "");
+      if (/ID:|Frågor:|Uppd:|Public/i.test(t)) return minis[i];
+    }
+    // fallback: sista mini
+    return minis.length ? minis[minis.length - 1] : null;
+  }
+
+  function _stripExistingElever(html){
+    let out = String(html || "");
+    out = out.replace(/\s*•\s*Elever:\s*\d+\s*/g, " ");
+    out = out.replace(/\s*Elever:\s*\d+\s*/g, " ");
+    return out.trim();
+  }
+
+  function _setEleverCountOnLi(li, n){
+    if (!li) return;
+
+    const metaEl = _findMetaEl(li);
+    const label = ` • Elever: ${String(n)}`;
+
+    if (metaEl) {
+      const cur = _stripExistingElever(metaEl.innerHTML);
+      metaEl.innerHTML = cur + label;
+      return;
+    }
+
+    // fallback: lägg till i li-html (sista utväg)
+    const curLi = _stripExistingElever(li.innerHTML);
+    li.innerHTML = curLi + `<div class="mini">Elever: ${String(n)}</div>`;
+  }
+
+  async function _getPublicIdForTeacherBank(bankId){
+    if (!_hasFirebaseDb() || !_hasTeacher()) return "";
+    const uid = String(currentTeacherUser.uid || "");
+    const bid = String(bankId || "");
+    if (!uid || !bid) return "";
+    try{
+      const snap = await firebaseDbInstance
+        .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid)
+        .get();
+      if (!snap || !snap.exists) return "";
+      const d = snap.data() || {};
+      return d.publicId ? String(d.publicId).trim() : "";
+    }catch{
+      return "";
+    }
+  }
+
+  async function _countStudentsInCollection(colRef){
+    if (!colRef) return null;
+    try{
+      // “size” funkar på QuerySnapshot
+      const snap = await colRef.limit(1000).get();
+      return (snap && typeof snap.size === "number") ? snap.size : 0;
+    }catch(e){
+      try{
+        if (typeof _fv3d_isPermissionDenied === "function" && _fv3d_isPermissionDenied(e)) return null;
+      }catch{}
+      return null;
+    }
+  }
+
+  async function _countStudentsForBank(bankId){
+    const bid = String(bankId || "").trim();
+    if (!bid) return null;
+
+    const cached = _COUNT_CACHE[bid];
+    if (cached && (_now() - cached.ts) < 5000) return cached.n;
+
+    if (!_hasFirebaseDb() || !_hasTeacher()) return null;
+
+    const uid = String(currentTeacherUser.uid || "");
+    if (!uid) return null;
+
+    // 1) försök publicId (för “Public ✅” banker) => public_banks/{publicId}/students
+    let publicId = "";
+    try { publicId = await _getPublicIdForTeacherBank(bid); } catch {}
+
+    let n = null;
+
+    if (publicId && typeof PUBLIC_BANKS_COLLECTION !== "undefined") {
+      const ref = firebaseDbInstance
+        .collection(PUBLIC_BANKS_COLLECTION).doc(String(publicId))
+        .collection("students");
+      n = await _countStudentsInCollection(ref);
+    }
+
+    // 2) annars teacher-path => teachers/{uid}/banks/{bankId}/students
+    if (n == null) {
+      const ref2 = firebaseDbInstance
+        .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid)
+        .collection("students");
+      n = await _countStudentsInCollection(ref2);
+    }
+
+    if (n == null) return null;
+
+    _COUNT_CACHE[bid] = { n, ts: _now() };
+    return n;
+  }
+
+  async function _injectCountsIntoBankList(){
+    const host = _findBankListHost();
+    if (!host) return;
+
+    const lis = Array.from(host.querySelectorAll("li"));
+    if (!lis.length) return;
+
+    // Kör sekventiellt (snällare mot Firestore)
+    for (let i = 0; i < lis.length; i++){
+      const li = lis[i];
+      const bankId = _extractBankIdFromLi(li);
+      if (!bankId) continue;
+
+      const n = await _countStudentsForBank(bankId);
+      if (typeof n === "number") _setEleverCountOnLi(li, n);
+    }
+  }
+
+  function _wrapLoader(fnName){
+    const orig = window[fnName];
+    if (typeof orig !== "function") return;
+    if (orig.__fv3d_wrapped_counts) return;
+
+    const wrapped = async function(...args){
+      const res = await orig.apply(this, args);
+      try { await _sleep(50); } catch {}
+      try { await _injectCountsIntoBankList(); } catch {}
+      return res;
+    };
+
+    wrapped.__fv3d_wrapped_counts = true;
+    window[fnName] = wrapped;
+  }
+
+  function _tryHook(){
+    _wrapLoader("loadCloudBanksListV4");
+    _wrapLoader("loadCloudBanksList");
+  }
+
+  // Hook direkt + när Firebase blir redo
+  _tryHook();
+  window.addEventListener("fv-firebase-ready", ()=>{ _tryHook(); }, { passive:true });
+
+  // Extra: när man klickar “Ladda moln-banker”
+  document.addEventListener("click", async (ev)=>{
+    const btn = ev.target && ev.target.closest ? ev.target.closest("#btnLoadCloudBanks") : null;
+    if (!btn) return;
+    setTimeout(()=>{ try { _injectCountsIntoBankList(); } catch {} }, 250);
+  }, true);
+
+})();
+</script>
+<!-- slut SEKTION 3DBX: MOLN-BANK – visa “Elever: X” i banklistan -->
 
 
 
