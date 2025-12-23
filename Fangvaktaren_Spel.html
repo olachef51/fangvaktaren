@@ -2079,7 +2079,7 @@ function genToken(len = 10) {
 
 
 <!-- start SEKTION 3B: STATE – embedded-data, load/save, roster local -->
-<!-- ÄNDRING: Fixar elevflikar genom att (1) läsa roster flexibelt från bank-doc + ev roster-subcollection, (2) matcha aktiva inlämningar mot roster via token/email/namn+klass, (3) auto-välja första elevfliken och ladda elevdoc, (4) visa tydlig text om roster inte matchar aktiva elever. (~260 rader) -->
+<!-- ÄNDRAT: (1) Tar bort UI-refresh-loop från loadState/saveState (snabbar upp, stoppar “lång laddning”), (2) gör strong/weak robust även om goalsMap-id inte matchar (fallback på delbit-id), (3) fallback-läsning av elevdata från public_banks/{publicId}/students om teacher-path saknar data. Omskrivna rader: ca 120 -->
 <script>
 "use strict";
 
@@ -2179,6 +2179,18 @@ function _renderUl(ul, items, emptyText) {
   }
 }
 
+/* ====== UI refresh (debounce) ====== */
+let __fv_ui_refresh_scheduled = false;
+function _requestUIRefresh(forceTabs = false) {
+  if (__fv_ui_refresh_scheduled) return;
+  __fv_ui_refresh_scheduled = true;
+  setTimeout(() => {
+    __fv_ui_refresh_scheduled = false;
+    try { tryUpdateProgressUI(); } catch {}
+    try { tryRefreshPlayedStudentsList(!!forceTabs); } catch {}
+  }, 0);
+}
+
 /* ====== Lärare: vald elev i progressfliken ====== */
 
 const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-v17";
@@ -2223,44 +2235,61 @@ function _computeStrongWeakListsFromData(goalsMap, progressionObj) {
   const corr = p.correctByGoalId || {};
   const wrong = p.wrongByGoalId || {};
 
-  const rows = [];
+  const gmIndex = Object.create(null);
   for (let i = 0; i < gm.length; i++) {
-    const g = gm[i];
-    const key = String(g.id);
+    const g = gm[i] || {};
+    gmIndex[String(g.id)] = g;
+  }
+
+  const keysSet = new Set();
+  Object.keys(corr || {}).forEach(k => keysSet.add(String(k)));
+  Object.keys(wrong || {}).forEach(k => keysSet.add(String(k)));
+
+  const rows = [];
+  keysSet.forEach((key) => {
     const c = _safeNum(corr[key], 0);
     const w = _safeNum(wrong[key], 0);
     const a = c + w;
-    if (a <= 0) continue;
-    const acc = a ? (c / a) : 0;
+    if (a <= 0) return;
+
+    const g = gmIndex[key] || null;
+    const goal = g ? (g.goal || "") : "";
+    const parts = g ? (g.parts || "") : "";
+
     rows.push({
-      id: g.id,
-      goal: g.goal || "",
-      parts: g.parts || "",
+      id: key,
+      goal: goal,
+      parts: parts,
       correct: c,
       wrong: w,
       attempts: a,
-      acc: acc
+      acc: a ? (c / a) : 0,
+      hasLabel: !!(String(goal).trim() || String(parts).trim())
     });
-  }
+  });
 
   const strong = rows
-    .filter(r => r.correct >= 1 && r.correct >= r.wrong)
+    .filter(r => r.attempts >= 1 && r.correct >= r.wrong)
     .sort((a, b) => (b.acc - a.acc) || (b.attempts - a.attempts));
 
   const weak = rows
-    .filter(r => r.wrong >= 1 && r.wrong > r.correct)
+    .filter(r => r.attempts >= 1 && r.wrong > r.correct)
     .sort((a, b) => (a.acc - b.acc) || (b.attempts - a.attempts));
 
   const strongOut = strong.slice(0, 10).map(r => {
-    const title = `${_esc(r.goal)} — ${_esc(r.parts)}`.trim();
+    const title = r.hasLabel
+      ? `${_esc(r.goal)} — ${_esc(r.parts)}`.trim()
+      : `Delbit-id: ${_esc(r.id)}`;
     const meta = `${r.correct}/${r.attempts} rätt`;
-    return `${title ? title : "Delbit"} <span class="mini">(${_esc(meta)})</span>`;
+    return `${title} <span class="mini">(${_esc(meta)})</span>`;
   });
 
   const weakOut = weak.slice(0, 10).map(r => {
-    const title = `${_esc(r.goal)} — ${_esc(r.parts)}`.trim();
+    const title = r.hasLabel
+      ? `${_esc(r.goal)} — ${_esc(r.parts)}`.trim()
+      : `Delbit-id: ${_esc(r.id)}`;
     const meta = `${r.correct}/${r.attempts} rätt`;
-    return `${title ? title : "Delbit"} <span class="mini">(${_esc(meta)})</span>`;
+    return `${title} <span class="mini">(${_esc(meta)})</span>`;
   });
 
   return { strongOut, weakOut };
@@ -2281,13 +2310,13 @@ function _formatPointsHtmlFromRemote(remoteData) {
   const thA = _formatPercent(sTeacher.thres && sTeacher.thres.A);
 
   let lastLine = "Senast: -";
-  const ls = remoteData && (remoteData.lastSubmission || remoteData.last || remoteData.submission || null);
+  const ls = remoteData && (remoteData.lastSubmission || remoteData.last || remoteData.submission || remoteData.lastResult || null);
   if (ls && typeof ls === "object") {
-    const lvl = (ls.level != null) ? String(ls.level) : "-";
-    const pct = (ls.percent != null) ? _formatPercent(ls.percent) : "-";
-    const got = (ls.correct != null) ? String(ls.correct) : "-";
-    const tot = (ls.total != null) ? String(ls.total) : "-";
-    const pts = (ls.pointsGained != null) ? String(ls.pointsGained) : "";
+    const lvl = (ls.level != null) ? String(ls.level) : (ls.currentLevel != null ? String(ls.currentLevel) : "-");
+    const pct = (ls.percent != null) ? _formatPercent(ls.percent) : (ls.scorePct != null ? _formatPercent(ls.scorePct) : "-");
+    const got = (ls.correct != null) ? String(ls.correct) : (ls.correctCount != null ? String(ls.correctCount) : "-");
+    const tot = (ls.total != null) ? String(ls.total) : (ls.totalCount != null ? String(ls.totalCount) : "-");
+    const pts = (ls.pointsGained != null) ? String(ls.pointsGained) : (ls.points != null ? String(ls.points) : "");
     lastLine = `Senast: nivå ${_esc(lvl)} – ${_esc(pct)}% (${_esc(got)}/${_esc(tot)} rätt)${pts ? " +" + _esc(pts) + "p" : ""}.`;
   }
 
@@ -2335,6 +2364,18 @@ function _getStudentsCollectionRefFromActiveBank() {
       .collection("students");
   }
   if (a.mode === "public" && a.publicId && (typeof PUBLIC_BANKS_COLLECTION !== "undefined")) {
+    return firebaseDbInstance
+      .collection(PUBLIC_BANKS_COLLECTION).doc(String(a.publicId))
+      .collection("students");
+  }
+  return null;
+}
+
+function _getPublicStudentsCollectionRefIfAvailable() {
+  if (!firebaseDbInstance) return null;
+  const s = loadState();
+  const a = s.activeBank || {};
+  if (a.publicId && (typeof PUBLIC_BANKS_COLLECTION !== "undefined")) {
     return firebaseDbInstance
       .collection(PUBLIC_BANKS_COLLECTION).doc(String(a.publicId))
       .collection("students");
@@ -2426,7 +2467,6 @@ async function _fetchRosterListFlexible() {
       const out = [];
       snap.forEach((d) => {
         const v = d.data() || {};
-        // doc kan vara en rad, eller innehålla en array
         const rows = _pullRosterRowsFromObj(v);
         if (rows && rows.length) {
           for (let i = 0; i < rows.length; i++) {
@@ -2472,39 +2512,49 @@ function _indexRoster(rosterList) {
 /* ====== Aktiva elever ====== */
 
 async function _fetchPlayedStudentsOnce() {
-  const ref = _getStudentsCollectionRefFromActiveBank();
-  if (!ref) return [];
+  const primaryRef = _getStudentsCollectionRefFromActiveBank();
+  const publicRef = _getPublicStudentsCollectionRefIfAvailable();
+  if (!primaryRef && !publicRef) return [];
 
-  let snap = null;
-  try {
-    snap = await ref.limit(400).get();
-  } catch (e) {
-    snap = await ref.get();
+  async function readFrom(ref) {
+    if (!ref) return [];
+    let snap = null;
+    try { snap = await ref.limit(400).get(); }
+    catch { snap = await ref.get(); }
+
+    const out = [];
+    snap.forEach((doc) => {
+      const d = doc.data() || {};
+      const token = doc.id || "";
+
+      const name = d.name || d.studentName || (d.student && d.student.name) || "";
+      const klass = d.klass || d.class || d.studentClass || (d.student && (d.student.klass || d.student.class)) || "";
+      const email = d.email || (d.student && d.student.email) || d.mail || "";
+      const pts = d.totalPoints || d.points || (d.progression && d.progression.totalPoints) || "";
+      const updatedAt = _extractUpdatedAtMillis(d.updatedAt || d.updated || d.lastUpdated || d.ts || d.timestamp || (d.lastResult && d.lastResult.updatedAt));
+
+      out.push({
+        token: String(token || ""),
+        name: String(name || ""),
+        klass: String(klass || ""),
+        email: String(email || ""),
+        points: pts,
+        updatedAt: updatedAt
+      });
+    });
+
+    out.sort((a, b) => (b.updatedAt - a.updatedAt) || (String(a.name).localeCompare(String(b.name))));
+    return out;
   }
 
-  const out = [];
-  snap.forEach((doc) => {
-    const d = doc.data() || {};
-    const token = doc.id || "";
+  let out = await readFrom(primaryRef);
 
-    const name = d.name || d.studentName || (d.student && d.student.name) || "";
-    const klass = d.klass || d.class || d.studentClass || (d.student && (d.student.klass || d.student.class)) || "";
-    const email = d.email || (d.student && d.student.email) || d.mail || "";
-    const pts = d.totalPoints || d.points || (d.progression && d.progression.totalPoints) || "";
-    const updatedAt = _extractUpdatedAtMillis(d.updatedAt || d.updated || d.lastUpdated || d.ts || d.timestamp);
+  // Fallback: om teacher-path är tom men public finns (vanligt om elever skriver till public_banks)
+  if ((!out || !out.length) && publicRef && primaryRef !== publicRef) {
+    out = await readFrom(publicRef);
+  }
 
-    out.push({
-      token: String(token || ""),
-      name: String(name || ""),
-      klass: String(klass || ""),
-      email: String(email || ""),
-      points: pts,
-      updatedAt: updatedAt
-    });
-  });
-
-  out.sort((a, b) => (b.updatedAt - a.updatedAt) || (String(a.name).localeCompare(String(b.name))));
-  return out;
+  return out || [];
 }
 
 /* ====== Rendera elevflikar ====== */
@@ -2526,8 +2576,6 @@ function _renderPlayedStudentTabsIntoUl(ul, tabs, selectedToken, messageIfEmpty)
   if (!ul) return;
 
   ul.innerHTML = "";
-
-  // gör UL till “tab-nav” så knappar får samma look som andra flikar
   ul.classList.add("tab-nav");
   ul.classList.remove("goals-list");
 
@@ -2555,16 +2603,27 @@ function _renderPlayedStudentTabsIntoUl(ul, tabs, selectedToken, messageIfEmpty)
 }
 
 async function _fetchTeacherStudentDoc(token) {
-  const ref = _getStudentsCollectionRefFromActiveBank();
-  if (!ref) return null;
+  const primaryRef = _getStudentsCollectionRefFromActiveBank();
+  const publicRef = _getPublicStudentsCollectionRefIfAvailable();
   const t = String(token || "");
   if (!t) return null;
 
-  const docRef = ref.doc(t);
-  const snap = await docRef.get();
-  if (!snap || !snap.exists) return null;
-  const data = snap.data() || {};
-  data._token = t;
+  async function readDoc(ref) {
+    if (!ref) return null;
+    const snap = await ref.doc(t).get();
+    if (!snap || !snap.exists) return null;
+    const data = snap.data() || {};
+    data._token = t;
+    return data;
+  }
+
+  let data = await readDoc(primaryRef);
+
+  // Fallback: om teacher-path saknar doc men public finns
+  if (!data && publicRef && primaryRef !== publicRef) {
+    data = await readDoc(publicRef);
+  }
+
   return data;
 }
 
@@ -2574,8 +2633,8 @@ async function trySelectTeacherStudentToken(token) {
 
   _setSelectedTeacherToken(t);
 
-  // markera aktiv flik direkt
-  tryRefreshPlayedStudentsList(true);
+  // markera aktiv flik direkt (debounced)
+  _requestUIRefresh(true);
 
   if (_fvTeacherStudentCache[t]) {
     tryUpdateProgressUI();
@@ -2604,8 +2663,9 @@ function tryRefreshPlayedStudentsList(force = false) {
   const ul = document.getElementById("playedStudentsList");
   if (!ul) return;
 
-  const ref = _getStudentsCollectionRefFromActiveBank();
-  if (!ref) {
+  const primaryRef = _getStudentsCollectionRefFromActiveBank();
+  const publicRef = _getPublicStudentsCollectionRefIfAvailable();
+  if (!primaryRef && !publicRef) {
     ul.classList.remove("tab-nav");
     ul.classList.add("goals-list");
     _renderUl(ul, [], "Ingen aktiv bank vald (eller Firebase ej initierad).");
@@ -2644,7 +2704,7 @@ function tryRefreshPlayedStudentsList(force = false) {
 
         if (!hit || !String(hit.name || "").trim()) {
           unmatched++;
-          continue; // viktigt: vi visar INTE “Okänd elev [token]”
+          continue;
         }
 
         tabs.push({
@@ -2666,7 +2726,6 @@ function tryRefreshPlayedStudentsList(force = false) {
 
       _renderPlayedStudentTabsIntoUl(ul, tabs, sel, msgEmpty);
 
-      // auto-välj första fliken om ingen vald
       if (!sel && tabs.length) {
         trySelectTeacherStudentToken(tabs[0].token);
       } else if (sel && !_fvTeacherStudentCache[sel]) {
@@ -2793,12 +2852,6 @@ function loadState() {
   }
 
   const normalized = normalizeState(s);
-
-  setTimeout(() => {
-    tryUpdateProgressUI();
-    tryRefreshPlayedStudentsList(false);
-  }, 0);
-
   return normalized;
 }
 
@@ -2809,10 +2862,7 @@ function saveState(state) {
     console.warn("Kunde inte spara state:", e);
   }
 
-  setTimeout(() => {
-    tryUpdateProgressUI();
-    tryRefreshPlayedStudentsList(false);
-  }, 0);
+  _requestUIRefresh(false);
 }
 </script>
 <!-- slut SEKTION 3B: STATE – embedded-data, load/save, roster local -->
