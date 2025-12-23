@@ -4782,117 +4782,154 @@ async function saveCurrentResultToFirestore() {
 
 
 
-<!-- start SEKTION 3M: BANKLISTA – visa Uppd på rad 1 + Elever (roster) på rad 2, utan att tappa aktiv-grön -->
+<!-- start SEKTION 3M: BANKLISTA – visa Uppd på rad 1 + räkna Elever (ifyllda) + behåll aktiv-grön -->
 <script>
 "use strict";
+
 /*
-  SEKTION 3M – Patch för bankrader i molnlistan
-  - Rad 1: "[Namn] [Public ✅] • Uppd: YYYY-MM-DD HH:MM:SS" (utan att skriva över innerHTML som kan bära aktiv-markering)
-  - Rad 2: "ID: ... • Frågor: ... • Elever: N" där N = antal roster-elever (sparade i bank-doc), inte antal inlämningar
+  SEKTION 3M:
+  - Lägger " • Uppd: YYYY-MM-DD HH:MM:SS" på RAD 1 (titeln) för varje bankrad.
+  - Tar bort "Uppd:" från RAD 2 om den råkar ligga där.
+  - Lägger " • Elever: X" på RAD 2 baserat på rosterRows/rosterList/etc (endast ifyllda rader: namn/klass/email).
+  - Rör inte bankradens struktur mer än nödvändigt => aktiv-grön (cloud-bank-active) ska fortsätta fungera.
 */
 
-(function FV3M_BankRowEnhancer(){
+(function FV3M(){
   if (window.__fv3m_ran) return;
   window.__fv3m_ran = true;
 
-  const FV3M = {
-    cache: Object.create(null),
-    inflight: Object.create(null),
-    lastRun: 0,
-    debounceMs: 80,
-    maxAgeMs: 8000
-  };
+  const _cache = Object.create(null);
+  const _inflight = Object.create(null);
 
-  function _q(sel, root){ try { return (root||document).querySelector(sel); } catch { return null; } }
-  function _qa(sel, root){ try { return Array.from((root||document).querySelectorAll(sel)); } catch { return []; } }
+  function _sleep(ms){ return new Promise(r=>setTimeout(r, ms||0)); }
 
-  function _esc(s){
-    if (typeof escapeHtml === "function") return escapeHtml(s);
-    return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  function _getListHost(){
+    return (
+      document.getElementById("cloudBanksListV4") ||
+      document.getElementById("cloudBanksList") ||
+      document.querySelector("ul#cloudBanksListV4, ul#cloudBanksList")
+    );
   }
 
-  function _pad2(n){ const x = parseInt(n,10); return (x<10?"0":"")+x; }
-  function _fmtDate(v){
-    if (!v) return "-";
-    try{
-      if (typeof v === "number") {
-        const d = new Date(v);
-        return `${d.getFullYear()}-${_pad2(d.getMonth()+1)}-${_pad2(d.getDate())} ${_pad2(d.getHours())}:${_pad2(d.getMinutes())}:${_pad2(d.getSeconds())}`;
-      }
-      if (v && typeof v.toDate === "function") {
-        const d = v.toDate();
-        return `${d.getFullYear()}-${_pad2(d.getMonth()+1)}-${_pad2(d.getDate())} ${_pad2(d.getHours())}:${_pad2(d.getMinutes())}:${_pad2(d.getSeconds())}`;
-      }
-      if (v && typeof v.toMillis === "function") {
-        return _fmtDate(v.toMillis());
-      }
-      if (v && typeof v.seconds === "number") {
-        return _fmtDate(v.seconds*1000);
-      }
-    }catch{}
-    return "-";
+  function _findTitleEl(li){
+    // Vanligast: .q-text eller .list-main .q-text
+    return (
+      li.querySelector(".q-text") ||
+      li.querySelector(".list-main .q-text") ||
+      li.querySelector("div, span") ||
+      li
+    );
   }
 
-  function _extractBankIdFromRow(li){
-    if (!li) return "";
-    try{
-      if (li.dataset && li.dataset.bankId) return String(li.dataset.bankId);
-      if (li.getAttribute && li.getAttribute("data-bank-id")) return String(li.getAttribute("data-bank-id"));
-    }catch{}
-    // fallback: leta efter "ID:" i meta
-    const meta = _q(".list-meta,.mini,.q-meta", li);
-    const txt = (meta && meta.textContent) ? meta.textContent : (li.textContent || "");
-    const m = String(txt).match(/ID:\s*([A-Za-z0-9_-]{8,})/);
-    return m ? String(m[1]) : "";
-  }
-
-  function _isPublicRow(li){
-    const t = (li && li.textContent) ? li.textContent.toLowerCase() : "";
-    return t.includes("public") || t.includes("publik");
-  }
-
-  function _getTitleEl(li){
-    return _q(".list-main,.q-text,.list-title,h4,h3", li) || li;
-  }
-
-  function _getMetaEl(li){
-    return _q(".list-meta,.q-meta,.mini", li) || li;
-  }
-
-  function _stripFragment(str, label){
-    const s = String(str||"");
-    // tar bort t.ex. "• Uppd: ..." eller "• Elever: ..."
-    return s.replace(new RegExp("\\s*•\\s*"+label+"\\s*:\\s*[^•\\n\\r]*","gi"), "");
-  }
-
-  function _ensureInlineSpan(parent, cls, text){
-    if (!parent) return;
-    let sp = _q("span."+cls, parent);
-    if (!sp) {
-      sp = document.createElement("span");
-      sp.className = "mini " + cls;
-      sp.style.marginLeft = "8px";
-      parent.appendChild(sp);
+  function _findMetaEl(li){
+    // Försök hitta "mini"/metarad (där ID/Frågor/Uppd ofta ligger)
+    const minis = Array.from(li.querySelectorAll(".mini"));
+    if (minis.length) {
+      // välj den som verkar innehålla "ID:" eller "Frågor:" (typiskt rad 2)
+      const best = minis.find(m=>{
+        const t = (m.textContent||"");
+        return t.includes("ID:") || t.toLowerCase().includes("frågor");
+      });
+      return best || minis[minis.length - 1];
     }
-    sp.textContent = text || "";
-  }
-
-  function _getFirestore(){
-    try { if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return firebaseDbInstance; } catch {}
-    try { if (window.firebaseDbInstance) return window.firebaseDbInstance; } catch {}
+    // fallback: första "div" efter titel
+    const divs = Array.from(li.querySelectorAll("div"));
+    if (divs.length >= 2) return divs[divs.length - 1];
     return null;
   }
 
-  function _getTeacherUid(){
-    try { if (typeof currentTeacherUser !== "undefined" && currentTeacherUser && currentTeacherUser.uid) return String(currentTeacherUser.uid); } catch {}
-    try { if (window.currentTeacherUser && window.currentTeacherUser.uid) return String(window.currentTeacherUser.uid); } catch {}
-    return "";
+  function _extractBankIdFromRow(li){
+    // Försök hitta bankId i data-attribut eller i text "ID: xxxx"
+    const ds = li.dataset || {};
+    const fromDs =
+      ds.bankId || ds.id || ds.docId || ds.cloudId || ds.key || ds.value || "";
+    if (fromDs) return String(fromDs).trim();
+
+    const txt = (li.textContent || "");
+    const m = txt.match(/ID:\s*([A-Za-z0-9_-]{10,})/);
+    return m ? String(m[1]).trim() : "";
   }
 
-  function _countRosterFromBankDocData(data){
-    const d = data || {};
+  function _isPublicRow(li){
+    const t = (li.textContent || "").toLowerCase();
+    return t.includes("public");
+  }
+
+  function _stripUpdFromMeta(metaEl){
+    if (!metaEl) return;
+
+    // Ta bort "• Uppd: ...." ur textnoder utan att nolla hela innerHTML.
+    try{
+      const walker = document.createTreeWalker(metaEl, NodeFilter.SHOW_TEXT, null);
+      const texts = [];
+      while (walker.nextNode()) texts.push(walker.currentNode);
+
+      const rx = /(\s*•\s*)?Uppd:\s*[^•\n\r]*/i;
+
+      for (const tn of texts){
+        const s = tn.nodeValue || "";
+        if (!s || !rx.test(s)) continue;
+
+        let ns = s.replace(rx, "");
+        // Städa dubbla separators
+        ns = ns.replace(/\s*•\s*•\s*/g, " • ");
+        ns = ns.replace(/\s{2,}/g, " ");
+        ns = ns.replace(/\s*•\s*$/g, "");
+        tn.nodeValue = ns;
+      }
+    }catch{}
+  }
+
+  function _setUpdOnTitle(titleEl, updStr){
+    if (!titleEl) return;
+    const str = String(updStr || "").trim();
+    if (!str) return;
+
+    // Lägg/uppdatera en egen span så vi inte förstör annan markup.
+    let sp = titleEl.querySelector ? titleEl.querySelector("span.fv3m-upd") : null;
+    if (!sp && titleEl.ownerDocument){
+      sp = document.createElement("span");
+      sp.className = "fv3m-upd mini";
+      sp.style.marginLeft = "6px";
+      titleEl.appendChild(sp);
+    }
+    if (sp) sp.textContent = `• Uppd: ${str}`;
+  }
+
+  function _setEleverOnMeta(metaEl, n){
+    if (!metaEl) return;
+    const num = (typeof n === "number" && isFinite(n)) ? n : 0;
+
+    let sp = metaEl.querySelector ? metaEl.querySelector("span.fv3m-elever") : null;
+    if (!sp && metaEl.ownerDocument){
+      sp = document.createElement("span");
+      sp.className = "fv3m-elever";
+      sp.style.whiteSpace = "nowrap";
+      metaEl.appendChild(document.createTextNode(" "));
+      metaEl.appendChild(sp);
+    }
+    if (sp) sp.textContent = `• Elever: ${num}`;
+  }
+
+  function _formatDate(d){
+    // d kan vara millis, firebase timestamp, {seconds}, etc.
+    try{
+      if (!d) return "";
+      if (typeof d === "string") return d;
+      if (typeof d === "number") {
+        const dt = new Date(d);
+        if (isNaN(dt.getTime())) return "";
+        return dt.toISOString().replace("T"," ").replace("Z","").slice(0,19);
+      }
+      if (d && typeof d.toMillis === "function") return _formatDate(d.toMillis());
+      if (d && typeof d.seconds === "number") return _formatDate(d.seconds * 1000);
+      return "";
+    }catch{ return ""; }
+  }
+
+  function _pullRosterRowsFromObj(obj){
+    const d = obj || {};
     const candidates = [
-      d.rosterTokens,
       d.rosterRows,
       d.rosterList,
       d.studentsRoster,
@@ -4900,222 +4937,169 @@ async function saveCurrentResultToFirestore() {
       (d.roster && d.roster.rows) ? d.roster.rows : null,
       (d.roster && d.roster.list) ? d.roster.list : null
     ];
-
-    // 1) rosterTokens (array av tokens)
-    if (Array.isArray(d.rosterTokens)) {
-      const set = new Set();
-      d.rosterTokens.forEach(t=>{
-        const tt = String(t||"").trim();
-        if (tt) set.add(tt);
-      });
-      return set.size;
-    }
-
-    // 2) rosterRows/list (array av objekt)
     for (let i=0;i<candidates.length;i++){
-      const arr = candidates[i];
-      if (!Array.isArray(arr)) continue;
-      let n = 0;
-      for (let j=0;j<arr.length;j++){
-        const r = arr[j] || {};
-        const token = String(r.token || r.id || r.code || r.studentToken || "").trim();
-        const name  = String(r.name || r.studentName || r.namn || "").trim();
-        const email = String(r.email || r.mail || "").trim();
-        const klass = String(r.klass || r.class || r.studentClass || r.klassnamn || "").trim();
-        if (token || name || email || klass) n++;
-      }
-      return n;
+      if (Array.isArray(candidates[i])) return candidates[i];
     }
-
-    return 0;
+    return [];
   }
 
-  function _countRosterLocalFallback(bankId){
-    try{
-      if (typeof loadTeacherRosterMap === "function") {
-        const map = loadTeacherRosterMap() || {};
-        const entry = map[bankId];
-        if (entry && Array.isArray(entry.students)) {
-          let n = 0;
-          entry.students.forEach(r=>{
-            const token = String(r && r.token || "").trim();
-            const name  = String(r && r.name || "").trim();
-            const email = String(r && r.email || "").trim();
-            const klass = String(r && r.klass || "").trim();
-            if (token || name || email || klass) n++;
-          });
-          return n;
-        }
-      }
-    }catch{}
-    return 0;
+  function _countFilledRosterRows(data){
+    // "ifyllda" = minst ett av: namn, klass, email (token ensam räknas inte)
+    const rows = _pullRosterRowsFromObj(data);
+    if (!rows.length) return 0;
+
+    let count = 0;
+    for (let i=0;i<rows.length;i++){
+      const r = rows[i] || {};
+      const name = String(r.name || r.studentName || r.namn || "").trim();
+      const klass = String(r.klass || r.class || r.studentClass || r.klassnamn || "").trim();
+      const email = String(r.email || r.mail || "").trim();
+      if (name || klass || email) count++;
+    }
+    return count;
   }
 
   async function _fetchBankDocMeta(bankId, isPublic){
-    const cacheKey = (isPublic ? "p:" : "t:") + String(bankId||"");
-    const now = Date.now();
-    const cached = FV3M.cache[cacheKey];
-    if (cached && (now - cached.at) < FV3M.maxAgeMs) return cached.val;
+    const key = (isPublic ? "p:" : "t:") + String(bankId);
+    if (_cache[key]) return _cache[key];
+    if (_inflight[key]) return _inflight[key];
 
-    if (FV3M.inflight[cacheKey]) return FV3M.inflight[cacheKey];
-
-    FV3M.inflight[cacheKey] = (async ()=>{
-      const db = _getFirestore();
-      if (!db || !bankId) {
-        const fallback = { rosterCount: _countRosterLocalFallback(bankId), updatedAtText: "-" };
-        FV3M.cache[cacheKey] = { at: Date.now(), val: fallback };
-        return fallback;
-      }
-
+    _inflight[key] = (async ()=>{
       try{
-        let ref = null;
+        if (!firebaseDbInstance) return { ok:false };
 
         if (isPublic) {
-          if (typeof PUBLIC_BANKS_COLLECTION === "undefined") throw new Error("PUBLIC_BANKS_COLLECTION saknas");
-          ref = db.collection(PUBLIC_BANKS_COLLECTION).doc(String(bankId));
-        } else {
-          const uid = _getTeacherUid();
-          if (!uid) throw new Error("teacher uid saknas");
-          ref = db.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bankId));
+          const ref = firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(bankId));
+          const snap = await ref.get();
+          if (!snap || !snap.exists) return { ok:false };
+          const data = snap.data() || {};
+          const upd = _formatDate(data.updatedAt || data.updated || data.lastUpdated || data.ts || data.timestamp);
+          const elever = _countFilledRosterRows(data);
+          const out = { ok:true, upd, elever };
+          _cache[key] = out;
+          return out;
         }
+
+        // teacher-bank: kräver currentTeacherUser.uid (eller activeBank.ownerUid)
+        let uid = "";
+        try{
+          if (currentTeacherUser && currentTeacherUser.uid) uid = String(currentTeacherUser.uid);
+        }catch{}
+        if (!uid) {
+          try{
+            if (typeof loadState === "function") {
+              const s = loadState();
+              if (s && s.activeBank && s.activeBank.ownerUid) uid = String(s.activeBank.ownerUid);
+            }
+          }catch{}
+        }
+        if (!uid) return { ok:false };
+
+        const ref = firebaseDbInstance
+          .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+          .collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bankId));
 
         const snap = await ref.get();
-        if (!snap || !snap.exists) {
-          const fallback = { rosterCount: _countRosterLocalFallback(bankId), updatedAtText: "-" };
-          FV3M.cache[cacheKey] = { at: Date.now(), val: fallback };
-          return fallback;
-        }
-
+        if (!snap || !snap.exists) return { ok:false };
         const data = snap.data() || {};
-        const rosterCount = _countRosterFromBankDocData(data) || _countRosterLocalFallback(bankId) || 0;
-
-        const updatedAt = data.updatedAt || data.updated || data.lastUpdated || data.ts || data.timestamp || null;
-        const updatedAtText = _fmtDate(updatedAt);
-
-        const val = { rosterCount, updatedAtText };
-        FV3M.cache[cacheKey] = { at: Date.now(), val };
-        return val;
-      }catch{
-        const fallback = { rosterCount: _countRosterLocalFallback(bankId), updatedAtText: "-" };
-        FV3M.cache[cacheKey] = { at: Date.now(), val: fallback };
-        return fallback;
+        const upd = _formatDate(data.updatedAt || data.updated || data.lastUpdated || data.ts || data.timestamp);
+        const elever = _countFilledRosterRows(data);
+        const out = { ok:true, upd, elever };
+        _cache[key] = out;
+        return out;
+      }catch(e){
+        return { ok:false, err:e };
       }finally{
-        delete FV3M.inflight[cacheKey];
+        delete _inflight[key];
       }
     })();
 
-    return FV3M.inflight[cacheKey];
+    return _inflight[key];
   }
 
-  function _extractQuestionsFromMetaText(metaText){
-    // försöker återanvända befintlig "Frågor: X MCQ, Y Bild, Z Drag"
-    const t = String(metaText||"");
-    const m = t.match(/Frågor:\s*([^•\n\r]+)/i);
-    return m ? ("Frågor: " + String(m[1]).trim()) : "";
-  }
-
-  async function _enhanceRow(li){
-    if (!li || li.__fv3m_done) return;
-    li.__fv3m_done = true;
+  async function _enhanceOneRow(li){
+    if (!li || li.nodeType !== 1) return;
+    if (li.__fv3m_done) return;
 
     const bankId = _extractBankIdFromRow(li);
     if (!bankId) return;
 
     const isPublic = _isPublicRow(li);
-    const titleEl = _getTitleEl(li);
-    const metaEl  = _getMetaEl(li);
 
-    // Hämta rosterCount + Uppd (från bank-doc)
+    // Bas: hitta title/meta, strip "Uppd" från meta så vi kan lägga den på title
+    const titleEl = _findTitleEl(li);
+    const metaEl = _findMetaEl(li);
+
+    _stripUpdFromMeta(metaEl);
+
+    // Hämta "Uppd" + "Elever" från doc (räknar bara ifyllda rader)
     const meta = await _fetchBankDocMeta(bankId, isPublic);
-    const rosterCount = (meta && typeof meta.rosterCount === "number") ? meta.rosterCount : 0;
-    const updText = (meta && meta.updatedAtText) ? meta.updatedAtText : "-";
-
-    // ===== Rad 1: behåll titelns befintliga HTML (så aktiv-grön / ✅ inte tappas), bara lägg till/uppdatera en span =====
-    if (titleEl) {
-      _ensureInlineSpan(titleEl, "fv3m-upd", `• Uppd: ${updText}`);
+    if (meta && meta.ok) {
+      if (meta.upd) _setUpdOnTitle(titleEl, meta.upd);
+      _setEleverOnMeta(metaEl, meta.elever || 0);
     }
 
-    // ===== Rad 2: skriv en ren meta-rad: "ID: ... • Frågor: ... • Elever: N" (utan Uppd på rad 2) =====
-    if (metaEl) {
-      // ta bort ev gamla "Uppd:" och "Elever:" i texten
-      let base = (metaEl.textContent || "").trim();
-      base = _stripFragment(base, "Uppd");
-      base = _stripFragment(base, "Elever");
-      base = base.replace(/\s+/g," ").trim();
+    li.__fv3m_done = true;
 
-      const questions = _extractQuestionsFromMetaText(base);
-      const idPart = `ID: ${bankId}`;
-      const qPart = questions ? questions : "";
-      const ePart = `Elever: ${rosterCount}`;
+    // Se till att aktiv-markering får en chans efter vi pillat i DOM
+    try { if (typeof _fv3d_markActive === "function") _fv3d_markActive(); } catch {}
+  }
 
-      const parts = [idPart];
-      if (qPart) parts.push(qPart);
-      parts.push(ePart);
+  async function _enhanceAll(){
+    const host = _getListHost();
+    if (!host) return;
 
-      metaEl.textContent = parts.join(" • ");
+    const items = Array.from(host.children || []).filter(n=>n && n.nodeType===1);
+    for (let i=0;i<items.length;i++){
+      await _enhanceOneRow(items[i]);
     }
   }
 
-  function _scanAndEnhance(){
-    const now = Date.now();
-    if ((now - FV3M.lastRun) < FV3M.debounceMs) return;
-    FV3M.lastRun = now;
-
-    const list =
-      document.getElementById("cloudBanksListV4") ||
-      document.getElementById("cloudBanksList") ||
-      _q("ul#cloudBanksListV4, ul#cloudBanksList");
-
-    if (!list) return;
-    const rows = _qa("li", list);
-
-    rows.forEach(li => { _enhanceRow(li); });
+  function _resetDoneFlags(){
+    const host = _getListHost();
+    if (!host) return;
+    Array.from(host.children || []).forEach(li=>{
+      try{ li.__fv3m_done = false; }catch{}
+    });
   }
 
-  // Kör när listan renderats om (observer) + när firebase blir redo
-  function _attachObservers(){
-    const list =
-      document.getElementById("cloudBanksListV4") ||
-      document.getElementById("cloudBanksList") ||
-      _q("ul#cloudBanksListV4, ul#cloudBanksList");
+  function _observeList(){
+    const host = _getListHost();
+    if (!host || host.__fv3m_obs) return;
+    host.__fv3m_obs = true;
 
-    if (list && !list.__fv3m_observed) {
-      list.__fv3m_observed = true;
-      const mo = new MutationObserver(()=>{ _scanAndEnhance(); });
-      try { mo.observe(list, { childList:true, subtree:true }); } catch {}
+    const mo = new MutationObserver(async ()=>{
+      // listan renderas ofta om → reset och enhanca
+      _resetDoneFlags();
+      await _sleep(10);
+      _enhanceAll();
+    });
+    mo.observe(host, { childList:true, subtree:false });
+  }
+
+  async function _bootstrap(){
+    // Vänta lite så listan hinner renderas första gången
+    for (let i=0;i<30;i++){
+      const host = _getListHost();
+      if (host) break;
+      await _sleep(100);
     }
-  }
+    _observeList();
+    await _enhanceAll();
 
-  // Kickstart: efter DOM + efter “ladda moln” klick
-  function _kick(){
-    _attachObservers();
-    _scanAndEnhance();
+    // Extra försök: om auth/active mark kommer efteråt
+    window.addEventListener("fv-firebase-ready", ()=>{ try{ _resetDoneFlags(); _enhanceAll(); }catch{} });
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", _kick);
+    document.addEventListener("DOMContentLoaded", _bootstrap);
   } else {
-    _kick();
+    _bootstrap();
   }
-
-  // När Firebase signalerar readiness (från 3C)
-  try{
-    window.addEventListener("fv-firebase-ready", ()=>{ setTimeout(_kick, 50); });
-  }catch{}
-
-  // Extra: när man klickar “Ladda moln-banker” igen
-  document.addEventListener("click", (ev)=>{
-    const btn = ev.target && ev.target.closest ? ev.target.closest("#btnLoadCloudBanks,button") : null;
-    if (!btn) return;
-    const t = (btn.textContent || "").toLowerCase();
-    if (btn.id === "btnLoadCloudBanks" || (t.includes("ladda") && t.includes("moln"))) {
-      setTimeout(()=>{ _kick(); }, 180);
-    }
-  }, true);
 
 })();
 </script>
-<!-- slut SEKTION 3M: BANKLISTA – visa Uppd på rad 1 + Elever (roster) på rad 2, utan att tappa aktiv-grön -->
+<!-- slut SEKTION 3M: BANKLISTA – visa Uppd på rad 1 + räkna Elever (ifyllda) + behåll aktiv-grön -->
 
 
 
