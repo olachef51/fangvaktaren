@@ -4782,345 +4782,340 @@ async function saveCurrentResultToFirestore() {
 
 
 
-<!-- start SEKTION 3M: UI-FIX – bankrad (Uppd på rad 1) + korrekt Elever-count + elevflikar i progress -->
+<!-- start SEKTION 3M: BANKLISTA – visa Uppd på rad 1 + Elever (roster) på rad 2, utan att tappa aktiv-grön -->
 <script>
 "use strict";
+/*
+  SEKTION 3M – Patch för bankrader i molnlistan
+  - Rad 1: "[Namn] [Public ✅] • Uppd: YYYY-MM-DD HH:MM:SS" (utan att skriva över innerHTML som kan bära aktiv-markering)
+  - Rad 2: "ID: ... • Frågor: ... • Elever: N" där N = antal roster-elever (sparade i bank-doc), inte antal inlämningar
+*/
 
-(function FV3M_UIFix(){
-  if (window.__fv3m_ui_fix_ran) return;
-  window.__fv3m_ui_fix_ran = true;
+(function FV3M_BankRowEnhancer(){
+  if (window.__fv3m_ran) return;
+  window.__fv3m_ran = true;
 
-  const sleep = (ms)=>new Promise(r=>setTimeout(r, ms||0));
+  const FV3M = {
+    cache: Object.create(null),
+    inflight: Object.create(null),
+    lastRun: 0,
+    debounceMs: 80,
+    maxAgeMs: 8000
+  };
 
-  function qs(sel){ try { return document.querySelector(sel); } catch { return null; } }
-  function qsa(sel){ try { return Array.from(document.querySelectorAll(sel)); } catch { return []; } }
+  function _q(sel, root){ try { return (root||document).querySelector(sel); } catch { return null; } }
+  function _qa(sel, root){ try { return Array.from((root||document).querySelectorAll(sel)); } catch { return []; } }
 
-  function getCloudListEl(){
-    return document.getElementById("cloudBanksListV4")
-        || document.getElementById("cloudBanksList")
-        || qs("ul#cloudBanksListV4")
-        || qs("ul#cloudBanksList");
+  function _esc(s){
+    if (typeof escapeHtml === "function") return escapeHtml(s);
+    return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
-  function getTeacherUid(){
-    try { if (window.currentTeacherUser && window.currentTeacherUser.uid) return String(window.currentTeacherUser.uid); } catch {}
+  function _pad2(n){ const x = parseInt(n,10); return (x<10?"0":"")+x; }
+  function _fmtDate(v){
+    if (!v) return "-";
+    try{
+      if (typeof v === "number") {
+        const d = new Date(v);
+        return `${d.getFullYear()}-${_pad2(d.getMonth()+1)}-${_pad2(d.getDate())} ${_pad2(d.getHours())}:${_pad2(d.getMinutes())}:${_pad2(d.getSeconds())}`;
+      }
+      if (v && typeof v.toDate === "function") {
+        const d = v.toDate();
+        return `${d.getFullYear()}-${_pad2(d.getMonth()+1)}-${_pad2(d.getDate())} ${_pad2(d.getHours())}:${_pad2(d.getMinutes())}:${_pad2(d.getSeconds())}`;
+      }
+      if (v && typeof v.toMillis === "function") {
+        return _fmtDate(v.toMillis());
+      }
+      if (v && typeof v.seconds === "number") {
+        return _fmtDate(v.seconds*1000);
+      }
+    }catch{}
+    return "-";
+  }
+
+  function _extractBankIdFromRow(li){
+    if (!li) return "";
+    try{
+      if (li.dataset && li.dataset.bankId) return String(li.dataset.bankId);
+      if (li.getAttribute && li.getAttribute("data-bank-id")) return String(li.getAttribute("data-bank-id"));
+    }catch{}
+    // fallback: leta efter "ID:" i meta
+    const meta = _q(".list-meta,.mini,.q-meta", li);
+    const txt = (meta && meta.textContent) ? meta.textContent : (li.textContent || "");
+    const m = String(txt).match(/ID:\s*([A-Za-z0-9_-]{8,})/);
+    return m ? String(m[1]) : "";
+  }
+
+  function _isPublicRow(li){
+    const t = (li && li.textContent) ? li.textContent.toLowerCase() : "";
+    return t.includes("public") || t.includes("publik");
+  }
+
+  function _getTitleEl(li){
+    return _q(".list-main,.q-text,.list-title,h4,h3", li) || li;
+  }
+
+  function _getMetaEl(li){
+    return _q(".list-meta,.q-meta,.mini", li) || li;
+  }
+
+  function _stripFragment(str, label){
+    const s = String(str||"");
+    // tar bort t.ex. "• Uppd: ..." eller "• Elever: ..."
+    return s.replace(new RegExp("\\s*•\\s*"+label+"\\s*:\\s*[^•\\n\\r]*","gi"), "");
+  }
+
+  function _ensureInlineSpan(parent, cls, text){
+    if (!parent) return;
+    let sp = _q("span."+cls, parent);
+    if (!sp) {
+      sp = document.createElement("span");
+      sp.className = "mini " + cls;
+      sp.style.marginLeft = "8px";
+      parent.appendChild(sp);
+    }
+    sp.textContent = text || "";
+  }
+
+  function _getFirestore(){
+    try { if (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) return firebaseDbInstance; } catch {}
+    try { if (window.firebaseDbInstance) return window.firebaseDbInstance; } catch {}
+    return null;
+  }
+
+  function _getTeacherUid(){
     try { if (typeof currentTeacherUser !== "undefined" && currentTeacherUser && currentTeacherUser.uid) return String(currentTeacherUser.uid); } catch {}
+    try { if (window.currentTeacherUser && window.currentTeacherUser.uid) return String(window.currentTeacherUser.uid); } catch {}
     return "";
   }
 
-  function hasFirebaseDb(){
-    try { return !!(window.firebaseDbInstance || (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance)); } catch { return false; }
-  }
+  function _countRosterFromBankDocData(data){
+    const d = data || {};
+    const candidates = [
+      d.rosterTokens,
+      d.rosterRows,
+      d.rosterList,
+      d.studentsRoster,
+      d.roster,
+      (d.roster && d.roster.rows) ? d.roster.rows : null,
+      (d.roster && d.roster.list) ? d.roster.list : null
+    ];
 
-  function db(){
-    return window.firebaseDbInstance || (typeof firebaseDbInstance !== "undefined" ? firebaseDbInstance : null);
-  }
-
-  const __fv3m_studentCountCache = Object.create(null);
-
-  async function countStudentsForPublic(publicId){
-    const pid = String(publicId || "").trim();
-    if (!pid || !hasFirebaseDb()) return null;
-    const key = "p:" + pid;
-    if (__fv3m_studentCountCache[key] != null) return __fv3m_studentCountCache[key];
-
-    try{
-      const ref = db().collection(PUBLIC_BANKS_COLLECTION).doc(pid).collection("students");
-      let snap = null;
-      try { snap = await ref.limit(500).get(); }
-      catch { snap = await ref.get(); }
-      const n = snap && typeof snap.size === "number" ? snap.size : 0;
-      __fv3m_studentCountCache[key] = n;
-      return n;
-    }catch(e){
-      __fv3m_studentCountCache[key] = null;
-      return null;
-    }
-  }
-
-  async function countStudentsForTeacherBank(bankId){
-    const uid = getTeacherUid();
-    const bid = String(bankId || "").trim();
-    if (!uid || !bid || !hasFirebaseDb()) return null;
-    const key = "t:" + uid + ":" + bid;
-    if (__fv3m_studentCountCache[key] != null) return __fv3m_studentCountCache[key];
-
-    try{
-      const ref = db()
-        .collection(CLOUD_ROOT_COLLECTION).doc(uid)
-        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid)
-        .collection("students");
-      let snap = null;
-      try { snap = await ref.limit(500).get(); }
-      catch { snap = await ref.get(); }
-      const n = snap && typeof snap.size === "number" ? snap.size : 0;
-      __fv3m_studentCountCache[key] = n;
-      return n;
-    }catch(e){
-      __fv3m_studentCountCache[key] = null;
-      return null;
-    }
-  }
-
-  function extractPartsFromMetaText(metaText){
-    const t = String(metaText || "").replace(/\s+/g, " ").trim();
-
-    const idMatch = t.match(/\bID:\s*([A-Za-z0-9_-]+)/i);
-    const id = idMatch ? idMatch[1] : "";
-
-    const updMatch = t.match(/\bUppd:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})/i);
-    const upd = updMatch ? updMatch[1] : "";
-
-    const frag = [];
-    const frMatch = t.match(/\bFrågor:\s*([^•]+)/i);
-    if (frMatch && frMatch[1]) frag.push("Frågor: " + frMatch[1].trim());
-
-    const rest = t
-      .replace(/\bID:\s*[A-Za-z0-9_-]+/ig, "")
-      .replace(/\bUppd:\s*[0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2}/ig, "")
-      .replace(/\bFrågor:\s*[^•]+/ig, "")
-      .replace(/^\s*•\s*/,"")
-      .trim();
-
-    if (rest) {
-      rest.split("•").map(s=>s.trim()).filter(Boolean).forEach(p=>frag.push(p));
-    }
-
-    return { id, upd, frags: frag };
-  }
-
-  function ensureLineLayout(li, titleEl, metaEl, updText){
-    if (!titleEl) return;
-
-    const title = String(titleEl.textContent || "").trim();
-
-    if (updText && !title.includes("Uppd:")) {
-      titleEl.textContent = title + " • Uppd: " + updText;
-    }
-
-    if (metaEl) {
-      metaEl.style.whiteSpace = "pre-wrap";
-    }
-  }
-
-  function findTitleAndMeta(li){
-    const titleEl =
-      li.querySelector(".q-text") ||
-      li.querySelector(".list-main .q-text") ||
-      li.querySelector(".list-main") ||
-      li.querySelector("strong") ||
-      null;
-
-    const metaEl =
-      li.querySelector(".mini") ||
-      li.querySelector(".list-meta") ||
-      li.querySelector(".list-sub") ||
-      null;
-
-    return { titleEl, metaEl };
-  }
-
-  async function enhanceOneBankRow(li){
-    if (!li || li.__fv3m_enhanced) return;
-    li.__fv3m_enhanced = true;
-
-    const { titleEl, metaEl } = findTitleAndMeta(li);
-    const titleText = String((titleEl && titleEl.textContent) || li.textContent || "");
-    const isPublic = /\bpublic\b/i.test(titleText);
-
-    const metaText = String((metaEl && metaEl.textContent) || "");
-    const { id, upd, frags } = extractPartsFromMetaText(metaText);
-
-    ensureLineLayout(li, titleEl, metaEl, upd);
-
-    let count = null;
-    if (id) {
-      if (isPublic) count = await countStudentsForPublic(id);
-      else count = await countStudentsForTeacherBank(id);
-    }
-
-    const partsOut = [];
-    if (id) partsOut.push("ID: " + id);
-
-    if (frags && frags.length) {
-      // rensa ev gamla Elever:-fragment
-      const cleaned = frags.filter(p => !/^\s*elever\s*:/i.test(p));
-      cleaned.forEach(p => partsOut.push(p));
-    }
-
-    if (count != null) partsOut.push("Elever: " + String(count));
-
-    if (metaEl) {
-      metaEl.textContent = partsOut.join(" • ");
-    }
-  }
-
-  async function enhanceBankList(){
-    const ul = getCloudListEl();
-    if (!ul) return;
-
-    const items = Array.from(ul.children || []).filter(n => n && n.nodeType === 1);
-    for (const li of items){
-      await enhanceOneBankRow(li);
-    }
-  }
-
-  function wrapLoader(fnName){
-    const orig = window[fnName];
-    if (typeof orig !== "function") return false;
-    if (orig.__fv3m_wrapped) return true;
-
-    const wrapped = async function(...args){
-      const res = await orig.apply(this, args);
-      try {
-        await enhanceBankList();
-        await sleep(180);
-        await enhanceBankList();
-        await sleep(420);
-        await enhanceBankList();
-      } catch {}
-      return res;
-    };
-    wrapped.__fv3m_wrapped = true;
-    window[fnName] = wrapped;
-    return true;
-  }
-
-  function ensureProgressTabsHost(){
-    if (document.getElementById("playedStudentsList")) return true;
-
-    const anchor =
-      document.getElementById("progressPointsText") ||
-      document.getElementById("progressStrongList") ||
-      document.getElementById("progressWeakList") ||
-      null;
-
-    const progressPanel =
-      qs('.tab-panel[data-panel="progress"]') ||
-      qs('.tab-panel[data-panel="teacher-progress"]') ||
-      (anchor ? anchor.closest(".card") : null) ||
-      (anchor ? anchor.parentElement : null);
-
-    if (!progressPanel) return false;
-
-    const ul = document.createElement("ul");
-    ul.id = "playedStudentsList";
-    ul.className = "tab-nav";
-    ul.style.marginTop = "8px";
-
-    if (anchor && anchor.parentElement) {
-      anchor.parentElement.insertBefore(ul, anchor);
-    } else {
-      progressPanel.insertBefore(ul, progressPanel.firstChild);
-    }
-
-    return true;
-  }
-
-  function ensureProgressTabsStyles(){
-    if (document.getElementById("fv3m-progress-tabs-style")) return;
-    const st = document.createElement("style");
-    st.id = "fv3m-progress-tabs-style";
-    st.textContent = `
-      #playedStudentsList.tab-nav{
-        display:flex;
-        flex-wrap:wrap;
-        gap:6px;
-        padding:0;
-        margin:8px 0 10px 0;
-        list-style:none;
-      }
-      #playedStudentsList .tab-btn{
-        display:inline-flex;
-        align-items:center;
-        gap:6px;
-        padding:6px 10px;
-        border-radius:999px;
-        border:1px solid rgba(31,41,55,1);
-        background:#020617;
-        color:inherit;
-        cursor:pointer;
-        font-size:.86rem;
-      }
-      #playedStudentsList .tab-btn.active{
-        border-color:rgba(74,222,128,.95);
-        box-shadow:0 0 0 1px rgba(22,163,74,1), 0 0 16px rgba(34,197,94,.45);
-      }
-      #playedStudentsList .tab-btn .mini{
-        opacity:.9;
-        margin-left:6px;
-      }
-    `;
-    document.head.appendChild(st);
-  }
-
-  function hookProgressTabRefresh(){
-    if (window.__fv3m_bound_progress_refresh) return;
-    window.__fv3m_bound_progress_refresh = true;
-
-    document.addEventListener("click", (ev)=>{
-      const btn = ev.target && ev.target.closest ? ev.target.closest("#tab-progress,[data-tab='progress']") : null;
-      if (!btn) return;
-      setTimeout(()=>{
-        ensureProgressTabsHost();
-        ensureProgressTabsStyles();
-        try { if (typeof tryRefreshPlayedStudentsList === "function") tryRefreshPlayedStudentsList(true); } catch {}
-        try { if (typeof tryUpdateProgressUI === "function") tryUpdateProgressUI(); } catch {}
-      }, 60);
-    }, true);
-  }
-
-  function observeLateDom(){
-    if (window.__fv3m_dom_observer) return;
-    const obs = new MutationObserver(()=>{
-      ensureProgressTabsHost();
-      ensureProgressTabsStyles();
-      enhanceBankList().catch(()=>{});
-    });
-    obs.observe(document.documentElement, { childList:true, subtree:true });
-    window.__fv3m_dom_observer = obs;
-  }
-
-  async function bootstrap(){
-    // wrap loaders om de finns
-    wrapLoader("loadCloudBanksListV4");
-    wrapLoader("loadCloudBanksList");
-
-    // när Firebase blir redo: försök igen (så count fungerar)
-    window.addEventListener("fv-firebase-ready", async ()=>{
-      try {
-        await enhanceBankList();
-      } catch {}
-    });
-
-    // om listan laddas via knapp: patcha efteråt
-    const btnLoad = document.getElementById("btnLoadCloudBanks");
-    if (btnLoad && !btnLoad.__fv3m_bound){
-      btnLoad.__fv3m_bound = true;
-      btnLoad.addEventListener("click", async ()=>{
-        await sleep(320);
-        try { await enhanceBankList(); } catch {}
+    // 1) rosterTokens (array av tokens)
+    if (Array.isArray(d.rosterTokens)) {
+      const set = new Set();
+      d.rosterTokens.forEach(t=>{
+        const tt = String(t||"").trim();
+        if (tt) set.add(tt);
       });
+      return set.size;
     }
 
-    ensureProgressTabsHost();
-    ensureProgressTabsStyles();
-    hookProgressTabRefresh();
-    observeLateDom();
+    // 2) rosterRows/list (array av objekt)
+    for (let i=0;i<candidates.length;i++){
+      const arr = candidates[i];
+      if (!Array.isArray(arr)) continue;
+      let n = 0;
+      for (let j=0;j<arr.length;j++){
+        const r = arr[j] || {};
+        const token = String(r.token || r.id || r.code || r.studentToken || "").trim();
+        const name  = String(r.name || r.studentName || r.namn || "").trim();
+        const email = String(r.email || r.mail || "").trim();
+        const klass = String(r.klass || r.class || r.studentClass || r.klassnamn || "").trim();
+        if (token || name || email || klass) n++;
+      }
+      return n;
+    }
 
-    // första körning (om lista redan finns)
-    try { await enhanceBankList(); } catch {}
+    return 0;
+  }
+
+  function _countRosterLocalFallback(bankId){
+    try{
+      if (typeof loadTeacherRosterMap === "function") {
+        const map = loadTeacherRosterMap() || {};
+        const entry = map[bankId];
+        if (entry && Array.isArray(entry.students)) {
+          let n = 0;
+          entry.students.forEach(r=>{
+            const token = String(r && r.token || "").trim();
+            const name  = String(r && r.name || "").trim();
+            const email = String(r && r.email || "").trim();
+            const klass = String(r && r.klass || "").trim();
+            if (token || name || email || klass) n++;
+          });
+          return n;
+        }
+      }
+    }catch{}
+    return 0;
+  }
+
+  async function _fetchBankDocMeta(bankId, isPublic){
+    const cacheKey = (isPublic ? "p:" : "t:") + String(bankId||"");
+    const now = Date.now();
+    const cached = FV3M.cache[cacheKey];
+    if (cached && (now - cached.at) < FV3M.maxAgeMs) return cached.val;
+
+    if (FV3M.inflight[cacheKey]) return FV3M.inflight[cacheKey];
+
+    FV3M.inflight[cacheKey] = (async ()=>{
+      const db = _getFirestore();
+      if (!db || !bankId) {
+        const fallback = { rosterCount: _countRosterLocalFallback(bankId), updatedAtText: "-" };
+        FV3M.cache[cacheKey] = { at: Date.now(), val: fallback };
+        return fallback;
+      }
+
+      try{
+        let ref = null;
+
+        if (isPublic) {
+          if (typeof PUBLIC_BANKS_COLLECTION === "undefined") throw new Error("PUBLIC_BANKS_COLLECTION saknas");
+          ref = db.collection(PUBLIC_BANKS_COLLECTION).doc(String(bankId));
+        } else {
+          const uid = _getTeacherUid();
+          if (!uid) throw new Error("teacher uid saknas");
+          ref = db.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bankId));
+        }
+
+        const snap = await ref.get();
+        if (!snap || !snap.exists) {
+          const fallback = { rosterCount: _countRosterLocalFallback(bankId), updatedAtText: "-" };
+          FV3M.cache[cacheKey] = { at: Date.now(), val: fallback };
+          return fallback;
+        }
+
+        const data = snap.data() || {};
+        const rosterCount = _countRosterFromBankDocData(data) || _countRosterLocalFallback(bankId) || 0;
+
+        const updatedAt = data.updatedAt || data.updated || data.lastUpdated || data.ts || data.timestamp || null;
+        const updatedAtText = _fmtDate(updatedAt);
+
+        const val = { rosterCount, updatedAtText };
+        FV3M.cache[cacheKey] = { at: Date.now(), val };
+        return val;
+      }catch{
+        const fallback = { rosterCount: _countRosterLocalFallback(bankId), updatedAtText: "-" };
+        FV3M.cache[cacheKey] = { at: Date.now(), val: fallback };
+        return fallback;
+      }finally{
+        delete FV3M.inflight[cacheKey];
+      }
+    })();
+
+    return FV3M.inflight[cacheKey];
+  }
+
+  function _extractQuestionsFromMetaText(metaText){
+    // försöker återanvända befintlig "Frågor: X MCQ, Y Bild, Z Drag"
+    const t = String(metaText||"");
+    const m = t.match(/Frågor:\s*([^•\n\r]+)/i);
+    return m ? ("Frågor: " + String(m[1]).trim()) : "";
+  }
+
+  async function _enhanceRow(li){
+    if (!li || li.__fv3m_done) return;
+    li.__fv3m_done = true;
+
+    const bankId = _extractBankIdFromRow(li);
+    if (!bankId) return;
+
+    const isPublic = _isPublicRow(li);
+    const titleEl = _getTitleEl(li);
+    const metaEl  = _getMetaEl(li);
+
+    // Hämta rosterCount + Uppd (från bank-doc)
+    const meta = await _fetchBankDocMeta(bankId, isPublic);
+    const rosterCount = (meta && typeof meta.rosterCount === "number") ? meta.rosterCount : 0;
+    const updText = (meta && meta.updatedAtText) ? meta.updatedAtText : "-";
+
+    // ===== Rad 1: behåll titelns befintliga HTML (så aktiv-grön / ✅ inte tappas), bara lägg till/uppdatera en span =====
+    if (titleEl) {
+      _ensureInlineSpan(titleEl, "fv3m-upd", `• Uppd: ${updText}`);
+    }
+
+    // ===== Rad 2: skriv en ren meta-rad: "ID: ... • Frågor: ... • Elever: N" (utan Uppd på rad 2) =====
+    if (metaEl) {
+      // ta bort ev gamla "Uppd:" och "Elever:" i texten
+      let base = (metaEl.textContent || "").trim();
+      base = _stripFragment(base, "Uppd");
+      base = _stripFragment(base, "Elever");
+      base = base.replace(/\s+/g," ").trim();
+
+      const questions = _extractQuestionsFromMetaText(base);
+      const idPart = `ID: ${bankId}`;
+      const qPart = questions ? questions : "";
+      const ePart = `Elever: ${rosterCount}`;
+
+      const parts = [idPart];
+      if (qPart) parts.push(qPart);
+      parts.push(ePart);
+
+      metaEl.textContent = parts.join(" • ");
+    }
+  }
+
+  function _scanAndEnhance(){
+    const now = Date.now();
+    if ((now - FV3M.lastRun) < FV3M.debounceMs) return;
+    FV3M.lastRun = now;
+
+    const list =
+      document.getElementById("cloudBanksListV4") ||
+      document.getElementById("cloudBanksList") ||
+      _q("ul#cloudBanksListV4, ul#cloudBanksList");
+
+    if (!list) return;
+    const rows = _qa("li", list);
+
+    rows.forEach(li => { _enhanceRow(li); });
+  }
+
+  // Kör när listan renderats om (observer) + när firebase blir redo
+  function _attachObservers(){
+    const list =
+      document.getElementById("cloudBanksListV4") ||
+      document.getElementById("cloudBanksList") ||
+      _q("ul#cloudBanksListV4, ul#cloudBanksList");
+
+    if (list && !list.__fv3m_observed) {
+      list.__fv3m_observed = true;
+      const mo = new MutationObserver(()=>{ _scanAndEnhance(); });
+      try { mo.observe(list, { childList:true, subtree:true }); } catch {}
+    }
+  }
+
+  // Kickstart: efter DOM + efter “ladda moln” klick
+  function _kick(){
+    _attachObservers();
+    _scanAndEnhance();
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bootstrap);
+    document.addEventListener("DOMContentLoaded", _kick);
   } else {
-    bootstrap();
+    _kick();
   }
+
+  // När Firebase signalerar readiness (från 3C)
+  try{
+    window.addEventListener("fv-firebase-ready", ()=>{ setTimeout(_kick, 50); });
+  }catch{}
+
+  // Extra: när man klickar “Ladda moln-banker” igen
+  document.addEventListener("click", (ev)=>{
+    const btn = ev.target && ev.target.closest ? ev.target.closest("#btnLoadCloudBanks,button") : null;
+    if (!btn) return;
+    const t = (btn.textContent || "").toLowerCase();
+    if (btn.id === "btnLoadCloudBanks" || (t.includes("ladda") && t.includes("moln"))) {
+      setTimeout(()=>{ _kick(); }, 180);
+    }
+  }, true);
 
 })();
 </script>
-<!-- slut SEKTION 3M: UI-FIX – bankrad (Uppd på rad 1) + korrekt Elever-count + elevflikar i progress -->
+<!-- slut SEKTION 3M: BANKLISTA – visa Uppd på rad 1 + Elever (roster) på rad 2, utan att tappa aktiv-grön -->
 
 
 
