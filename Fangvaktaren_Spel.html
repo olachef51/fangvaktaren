@@ -4005,9 +4005,9 @@ function _fv_bridgeCloudListIds(){
 }
 
 function showTeacherPasswordInStatus(){
-  const s = loadState();
+  const s = (typeof loadState === "function") ? loadState() : null;
   const statusEl = getEl("passwordStatus");
-  if (statusEl && s.teacherPassword) statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
+  if (statusEl && s && s.teacherPassword) statusEl.textContent = `Aktuellt lärarlösenord: ${s.teacherPassword}`;
   else if (statusEl) statusEl.textContent = "";
 }
 
@@ -4015,7 +4015,7 @@ function openTeacherGate(){
   const gate = getEl("teacherGate");
   const input = getEl("teacherPasswordInput");
   const text = getEl("teacherGateText");
-  const s = loadState();
+  const s = (typeof loadState === "function") ? loadState() : { teacherPassword:"" };
 
   if (gate) gate.classList.remove("hidden");
   if (input){
@@ -4053,6 +4053,11 @@ function handleTeacherConfirm(){
 
   const entered = input.value.trim();
   if (!entered){ alert("Skriv in ett lösenord."); return; }
+
+  if (typeof loadState !== "function" || typeof saveState !== "function"){
+    alert("Tekniskt fel: state-funktioner saknas.");
+    return;
+  }
 
   const s = loadState();
 
@@ -4107,6 +4112,7 @@ function setupTabNavigation(){
 }
 
 function _fv_countLocalBank(){
+  if (typeof loadState !== "function") return { mcq:0, img:0, drag:0, total:0 };
   const s = loadState();
   const b = s.bank || {};
   const mcq = Array.isArray(b.mcq) ? b.mcq.length : 0;
@@ -4136,6 +4142,11 @@ function updateBankStatusUI(){
     hostCard.insertBefore(statusEl, hostList);
   } else if (statusEl.nextSibling !== hostList){
     hostCard.insertBefore(statusEl, hostList);
+  }
+
+  if (typeof loadState !== "function"){
+    statusEl.textContent = "Status: (state saknas).";
+    return;
   }
 
   const s = loadState();
@@ -4177,90 +4188,109 @@ if (typeof window.shuffle !== "function") {
   };
 }
 
-// Hämta banknamn från rimliga input-id:n (eller prompt)
-function _fv_getBankName(){
-  const ids = ["cloudBankName","bankName","bankNameInput","newBankName","txtBankName","saveBankName"];
-  for (let i=0;i<ids.length;i++){
-    const el = getEl(ids[i]);
-    if (el && typeof el.value === "string" && el.value.trim()) return el.value.trim();
-  }
-  const p = window.prompt("Skriv ett namn för moln-banken:");
-  return (p || "").trim();
+/* ---------- Moln: robusta wrappers (när window.* saknas pga let/const-globaler) ---------- */
+
+function _fv_getFnByName(name){
+  try{
+    if (typeof window[name] === "function") return window[name];
+  }catch{}
+  try{
+    // global lexical (let/const/function i annan script) – åtkomlig som identifier
+    // eslint-disable-next-line no-eval
+    const fn = eval("typeof " + name + " === 'function' ? " + name + " : null");
+    if (typeof fn === "function") return fn;
+  }catch{}
+  return null;
 }
 
-// Ny, robust spara-till-moln som skapar NY bank om namnet skiljer sig från aktiv bank
-async function _fv_saveToCloudV5(){
-  await (typeof initFirebase === "function" ? initFirebase() : Promise.resolve());
+async function _fv_cloudLoadNow(){
+  const fn =
+    _fv_getFnByName("loadCloudBanksListV4") ||
+    _fv_getFnByName("loadCloudBanksListV5") ||
+    _fv_getFnByName("loadCloudBanksList");
 
-  // ✅ FIX: använd faktisk global instans (let) + fallback till window.* om den finns
-  const db = (typeof firebaseDbInstance !== "undefined" && firebaseDbInstance) ? firebaseDbInstance : window.firebaseDbInstance;
-  const user = (typeof currentTeacherUser !== "undefined" && currentTeacherUser) ? currentTeacherUser : window.currentTeacherUser;
-
-  if (!db) throw new Error("firebaseDbInstance saknas");
-  if (!user || !user.uid) throw new Error("Inte inloggad (currentTeacherUser saknas)");
-
-  const name = _fv_getBankName();
-  if (!name) throw new Error("Saknar banknamn");
-
-  const s = loadState();
-  const uid = String(user.uid);
-
-  const bank = (typeof ensureBankShape === "function") ? ensureBankShape(s.bank) : (s.bank || {mcq:[],img:[],drag:[]});
-  const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-
-  const a = s.activeBank || {};
-  const activeId = String(a.bankId || "").trim();
-  const activeName = String(a.bankName || a.name || "").trim();
-
-  const shouldUpdateExisting = !!(activeId && activeName && activeName === name);
-
-  const col = db
-    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
-    .collection(CLOUD_BANKS_SUBCOLLECTION);
-
-  let targetId = activeId;
-
-  if (!shouldUpdateExisting){
-    // Skapa NY bank (nytt doc-id)
-    const docRef = col.doc();
-    targetId = docRef.id;
-    await docRef.set({
-      name,
-      bank,
-      goalsMap,
-      publicId: "",
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge:true });
-  } else {
-    // Uppdatera aktiv bank (samma doc-id)
-    const docRef = col.doc(targetId);
-    await docRef.set({
-      name,
-      bank,
-      goalsMap,
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge:true });
+  if (!fn){
+    alert("Moln-loader saknas (loadCloudBanksListV4/V5). Kontrollera att SEKTION 3 är med och att inga JS-fel stoppar körning.");
+    return;
   }
+  await fn();
+  try{ updateBankStatusUI(); }catch{}
+}
 
-  // Sätt aktiv bank-meta lokalt (inkl namn så status blir tydlig)
-  if (typeof setActiveBankMeta === "function"){
-    setActiveBankMeta({ mode:"teacher", ownerUid: uid, bankId: targetId, publicId: String(a.publicId || ""), bankName: name, name });
-  } else {
-    s.activeBank = Object.assign({}, s.activeBank || {}, { mode:"teacher", ownerUid: uid, bankId: targetId, bankName: name, name });
-    saveState(s);
-    try{ window.activeCloudBankId = String(targetId); }catch{}
+function _fv_findBankNameValueNearSave(){
+  try{
+    const btn = getEl("btnSaveToCloud");
+    const card = btn ? (btn.closest(".card") || btn.parentElement) : null;
+    if (!card) return "";
+    const inputs = Array.from(card.querySelectorAll('input[type="text"], input:not([type])'));
+    for (let i=0;i<inputs.length;i++){
+      const v = (inputs[i].value || "").trim();
+      if (v) return v;
+    }
+  }catch{}
+  return "";
+}
+
+function _fv_ensureCloudNameMirror(value){
+  const v = String(value || "").trim();
+  if (!v) return;
+  try{
+    const ids = ["cloudBankName","bankName","bankNameInput","cloudBankTitle","txtCloudBankName"];
+    for (let i=0;i<ids.length;i++){
+      const el = getEl(ids[i]);
+      if (el && typeof el.value === "string"){
+        el.value = v;
+        return;
+      }
+    }
+    // Om inget av id:n finns – skapa en dold input som SEKTION 3 kan läsa
+    const hidden = document.createElement("input");
+    hidden.type = "text";
+    hidden.id = "cloudBankName";
+    hidden.value = v;
+    hidden.style.position = "fixed";
+    hidden.style.left = "-9999px";
+    hidden.style.top = "0";
+    document.body.appendChild(hidden);
+  }catch{}
+}
+
+async function _fv_cloudSaveNow(){
+  const name = _fv_findBankNameValueNearSave();
+  if (name) _fv_ensureCloudNameMirror(name);
+
+  const fn =
+    _fv_getFnByName("handleSaveToCloudV5") ||
+    _fv_getFnByName("handleSaveToCloud");
+
+  if (!fn){
+    alert("Spara till molnet saknas (handleSaveToCloudV5). Kontrollera att SEKTION 3 är med och att inga JS-fel stoppar körning.");
+    return;
   }
+  await fn();
+  try{ updateBankStatusUI(); }catch{}
+}
 
-  // Uppdatera UI-listan via SEKTION 3s loader (om finns)
-  if (typeof loadCloudBanksListV4 === "function") {
-    await loadCloudBanksListV4();
-  }
+function _fv_installOpenRosterInlineFallback(){
+  if (typeof window.openRosterInline === "function") return;
 
-  // Uppdatera status
-  updateBankStatusUI();
-
-  return { bankId: targetId, updated: shouldUpdateExisting };
+  window.openRosterInline = async function openRosterInline(bankId){
+    try{
+      const loadBankFn = _fv_getFnByName("loadCloudBankToLocal");
+      if (typeof loadBankFn === "function" && bankId) {
+        await loadBankFn(String(bankId));
+      }
+      const refreshFn = _fv_getFnByName("tryRefreshRosterTabs");
+      if (typeof refreshFn === "function") {
+        await refreshFn(true);
+      } else {
+        alert("Roster UI saknas (tryRefreshRosterTabs).");
+      }
+    }catch(e){
+      console.warn("openRosterInline fallback misslyckades:", e);
+      alert("Kunde inte ladda elever för banken. Se konsolen.");
+    }
+  };
 }
 
 function initApp(){
@@ -4274,6 +4304,9 @@ function initApp(){
 
   // Viktigt: gör så SEKTION 3 använder samma list-host som din DOM
   _fv_bridgeCloudListIds();
+
+  // Installera roster-fallback (så "Elever" inte blir död knapp)
+  _fv_installOpenRosterInlineFallback();
 
   // Initiera inställningsdelar om de finns
   if (typeof initTeacherEmailSettings === "function") initTeacherEmailSettings();
@@ -4328,9 +4361,9 @@ function initApp(){
 
   _fv_rebindButton("btnCancel", (b)=>{
     b.addEventListener("click", ()=>{
-      if (typeof window.currentLevel !== "undefined") window.currentLevel = null;
-      if (typeof window.currentQuestions !== "undefined") window.currentQuestions = [];
-      if (typeof window.currentAnswers !== "undefined") window.currentAnswers = [];
+      try{ if (typeof window.currentLevel !== "undefined") window.currentLevel = null; }catch{}
+      try{ if (typeof window.currentQuestions !== "undefined") window.currentQuestions = []; }catch{}
+      try{ if (typeof window.currentAnswers !== "undefined") window.currentAnswers = []; }catch{}
 
       const play = getEl("play");
       const result = getEl("result");
@@ -4409,25 +4442,30 @@ function initApp(){
 
   /* ---------- Firebase / Moln ---------- */
 
-  // OBS: vi binder INTE btnLoadCloudBanks här (SEKTION 3 har redan en document-listener).
-  // Vi ser bara till att status uppdateras efter laddning genom att wrap:a loadern.
-  if (!window.__fv_wrap_cloud_loader && typeof window.loadCloudBanksListV4 === "function") {
-    window.__fv_wrap_cloud_loader = true;
-    const _orig = window.loadCloudBanksListV4;
-    window.loadCloudBanksListV4 = async function(){
-      const r = await _orig();
-      try{ updateBankStatusUI(); }catch{}
-      return r;
-    };
-  }
+  // Bind "Ladda moln-bankar" här (din knapp finns, men window.loadCloudBanksListV4 kan saknas)
+  _fv_rebindButton("btnLoadCloudBanks", (b)=>{
+    b.addEventListener("click", async (ev)=>{
+      try{
+        ev.preventDefault();
+        ev.stopPropagation();
+      }catch{}
+      try{
+        await _fv_cloudLoadNow();
+      }catch(e){
+        console.warn("Kunde inte ladda moln-banker:", e);
+        alert("Kunde inte ladda moln-banker. Se konsolen.");
+      }
+    });
+  });
 
+  // Spara till molnet: använd SEKTION 3s robusta save (utan prompt)
   _fv_rebindButton("btnSaveToCloud", (b)=>{
     b.addEventListener("click", async ()=>{
       try{
-        const res = await _fv_saveToCloudV5();
-        alert(res.updated ? "Bank uppdaterad i molnet." : "Ny bank skapad i molnet.");
+        await _fv_cloudSaveNow();
+        alert("Sparat till molnet.");
       }catch(err){
-        console.error("Spara bank (V5) misslyckades:", err);
+        console.error("Spara bank misslyckades:", err);
         alert("Kunde inte spara bank till molnet. Se konsolen.");
       }
     });
