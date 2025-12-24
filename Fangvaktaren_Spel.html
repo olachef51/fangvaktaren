@@ -4374,7 +4374,7 @@ function updateBankStatusUI() {
 
 /* =========================================================
    5B – Initiering + knappar (med skydd mot dubbel-init)
-   + FIX: Spara nya banker till molnet (skapa ny doc om ingen aktiv bankId)
+   + Force-override för handleSaveToCloud (fix: kan spara nya banker)
    ========================================================= */
 
 function _fv_hasAnyLocalBank(s) {
@@ -4412,150 +4412,111 @@ function _fv_mergeEmbeddedOnce() {
   }
 }
 
-function _fv_nowIso() {
-  try { return new Date().toISOString(); } catch { return ""; }
-}
+/* -------- Force-override: robust handleSaveToCloud --------
+   - Skapar alltid NY bankdoc om ingen aktiv bankId finns
+   - Alternativt sparar till aktiv bank (update)
+   - Kräver Google-inlogg + firebaseDbInstance
+   - Dedikar "busy"-lås så klick inte dubbelkör
+----------------------------------------------------------- */
+(function FV5_ForceOverrideSaveToCloud(){
+  window.__fv5_saveToCloudBusy = false;
 
-function _fv_pickTeacherUid() {
-  try {
-    if (typeof currentTeacherUser !== "undefined" && currentTeacherUser && currentTeacherUser.uid) return String(currentTeacherUser.uid);
-  } catch {}
-  try {
-    if (typeof window.currentTeacherUser !== "undefined" && window.currentTeacherUser && window.currentTeacherUser.uid) return String(window.currentTeacherUser.uid);
-  } catch {}
-  return "";
-}
-
-function _fv_getActiveBankIdFromState() {
-  try {
-    const s = loadState();
-    const a = s && s.activeBank ? s.activeBank : {};
-    const bid = String((a && a.bankId) || (window.activeCloudBankId || "") || "").trim();
-    return bid;
-  } catch {
-    return String((window.activeCloudBankId || "") || "").trim();
-  }
-}
-
-function _fv_setActiveBankIdEverywhere(bankId, ownerUid) {
-  const bid = String(bankId || "").trim();
-  if (!bid) return;
-
-  // window.activeCloudBankId styr gröna markeringen i SEKTION 3-listan
-  try { window.activeCloudBankId = bid; } catch {}
-
-  // state.activeBank används för public/länk/submissions i SEKTION 3
-  try {
-    const s = loadState();
-    if (!s.activeBank || typeof s.activeBank !== "object") s.activeBank = { mode:"", ownerUid:"", bankId:"", publicId:"" };
-    s.activeBank.mode = "teacher";
-    s.activeBank.ownerUid = String(ownerUid || s.activeBank.ownerUid || _fv_pickTeacherUid() || "");
-    s.activeBank.bankId = bid;
-    // publicId lämnas som det är (om den finns)
-    saveState(s);
-  } catch {}
-}
-
-async function _fv_safeInitFirebase() {
-  try {
-    if (typeof initFirebase === "function") {
-      const r = initFirebase();
-      if (r && typeof r.then === "function") await r;
+  window.handleSaveToCloud = async function handleSaveToCloud_FORCE(){
+    if (window.__fv5_saveToCloudBusy) {
+      console.warn("handleSaveToCloud: busy (dubbelklick ignorerat)");
+      return;
     }
-  } catch (e) {
-    console.error("initFirebase fel:", e);
-  }
-}
+    window.__fv5_saveToCloudBusy = true;
 
-async function _fv_ensureFirestoreReadyOrThrow() {
-  await _fv_safeInitFirebase();
-
-  // firebaseDbInstance + currentTeacherUser finns i SEKTION 3
-  const hasDb = (typeof firebaseDbInstance !== "undefined") && !!firebaseDbInstance;
-  const uid = _fv_pickTeacherUid();
-  if (!hasDb) throw new Error("Firebase DB saknas (firebaseDbInstance).");
-  if (!uid) throw new Error("Inte inloggad med Google (currentTeacherUser saknas).");
-  return { uid };
-}
-
-/* ---------------------------------------------------------
-   FIX: handleSaveToCloud (skapa ny bank om ingen aktiv bankId)
-   --------------------------------------------------------- */
-if (typeof window.handleSaveToCloud !== "function") {
-  window.handleSaveToCloud = async function handleSaveToCloud() {
-    // Klick-lås
-    if (window.__FV_SAVE_TO_CLOUD_BUSY) return;
-    window.__FV_SAVE_TO_CLOUD_BUSY = true;
-
-    const btn = getEl("btnSaveToCloud");
-    const oldBtnText = btn ? btn.textContent : "";
-    if (btn) btn.textContent = "Sparar…";
-
-    try {
-      const { uid } = await _fv_ensureFirestoreReadyOrThrow();
+    try{
+      if (typeof initFirebase === "function") await initFirebase();
+      if (typeof firebaseDbInstance === "undefined" || !firebaseDbInstance) {
+        alert("⚠️ Firebase DB saknas. (initFirebase körs inte eller bibliotek saknas)");
+        return;
+      }
+      if (typeof currentTeacherUser === "undefined" || !currentTeacherUser || !currentTeacherUser.uid) {
+        alert("Logga in med Google först för att spara till molnet.");
+        return;
+      }
 
       const s = loadState();
-      const bank = (typeof ensureBankShape === "function") ? ensureBankShape(s.bank || {}) : (s.bank || { mcq:[], img:[], drag:[] });
-      const goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+      const bank = (typeof ensureBankShape === "function")
+        ? ensureBankShape(s.bank)
+        : (s.bank || { mcq:[], img:[], drag:[] });
 
-      // Banknamn från UI om det finns, annars fallback
-      const nameEl = getEl("cloudBankName") || getEl("bankName") || getEl("bankTitle");
-      const name = String((nameEl && nameEl.value) ? nameEl.value : (s.cloudBankName || s.bankName || "")).trim() || "Ny bank";
+      const uid = String(currentTeacherUser.uid);
+      const col = firebaseDbInstance
+        .collection((typeof CLOUD_ROOT_COLLECTION !== "undefined") ? CLOUD_ROOT_COLLECTION : "teachers")
+        .doc(uid)
+        .collection((typeof CLOUD_BANKS_SUBCOLLECTION !== "undefined") ? CLOUD_BANKS_SUBCOLLECTION : "banks");
 
-      // Avgör om vi ska skapa ny eller uppdatera befintlig
-      const existingBankId = _fv_getActiveBankIdFromState();
-      const shouldCreateNew = !existingBankId;
+      // Banknamn: försök läsa från UI om finns, annars fallback
+      let bankName = "";
+      try{
+        const nameEl =
+          document.getElementById("cloudBankName") ||
+          document.getElementById("bankName") ||
+          document.querySelector("input[name='bankName']");
+        if (nameEl && typeof nameEl.value === "string") bankName = nameEl.value.trim();
+      }catch{}
 
-      const colRef = firebaseDbInstance
-        .collection(CLOUD_ROOT_COLLECTION).doc(String(uid))
-        .collection(CLOUD_BANKS_SUBCOLLECTION);
+      // Aktiv bank-id (kan vara tomt om vi vill skapa NY bank)
+      const activeId =
+        (s.activeBank && s.activeBank.bankId ? String(s.activeBank.bankId) : "") ||
+        (typeof window.activeCloudBankId !== "undefined" ? String(window.activeCloudBankId || "") : "");
 
-      const docRef = shouldCreateNew ? colRef.doc() : colRef.doc(String(existingBankId));
-      const newBankId = String(docRef.id);
+      const isCreatingNew = !activeId.trim();
+
+      // skapa ny doc om ingen aktiv
+      const docRef = isCreatingNew ? col.doc() : col.doc(activeId.trim());
+      const bankId = docRef.id;
 
       const payload = {
-        name,
-        bank,
-        goalsMap,
+        name: bankName || (isCreatingNew ? ("Ny bank " + new Date().toISOString().slice(0,10)) : undefined),
+        bank: bank,
+        goalsMap: Array.isArray(s.goalsMap) ? s.goalsMap : [],
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       };
 
-      // Om docs saknar createdAt, lägg till vid ny skapelse
-      if (shouldCreateNew) {
-        payload.createdAt = firebase.firestore.FieldValue.serverTimestamp();
-      }
+      // ta bort undefined-fält (för att inte skriva över name vid update om inget angivet)
+      Object.keys(payload).forEach(k => { if (payload[k] === undefined) delete payload[k]; });
 
       await docRef.set(payload, { merge: true });
 
-      // Sätt aktiv bank överallt så bara EN bank blir aktiv/grön
-      _fv_setActiveBankIdEverywhere(newBankId, uid);
-
-      // Uppdatera ev. UI-fält så du ser bank-ID eller namn
-      try {
-        if (nameEl && shouldCreateNew && !String(nameEl.value || "").trim()) nameEl.value = name;
-      } catch {}
-
-      // Ladda om banklista så nya banken syns direkt + aktiv markering blir korrekt
-      try {
-        if (typeof loadCloudBanksListV4 === "function") await loadCloudBanksListV4();
-        else if (typeof handleLoadCloudBanks === "function") await handleLoadCloudBanks();
-      } catch (e) {
-        console.warn("Kunde inte ladda om banklistan efter spar:", e);
+      // Sätt som aktiv bank (så UI markerar korrekt och framtida spar updatear samma)
+      if (typeof setActiveBankMeta === "function") {
+        setActiveBankMeta({ mode:"teacher", ownerUid: uid, bankId: bankId, publicId: (s.activeBank && s.activeBank.publicId) ? String(s.activeBank.publicId) : "" });
+      } else {
+        // fallback: skriv in i state så gott det går
+        try{
+          const ss = loadState();
+          ss.activeBank = Object.assign({ mode:"teacher", ownerUid: uid, bankId: bankId, publicId:"" }, ss.activeBank || {});
+          saveState(ss);
+        }catch{}
       }
 
-      // Uppdatera statusraden
-      try { updateBankStatusUI(); } catch {}
+      try{ window.activeCloudBankId = String(bankId); }catch{}
 
-      alert(shouldCreateNew ? "✅ Ny bank skapad och sparad i molnet." : "✅ Bank sparad i molnet.");
-    } catch (err) {
-      console.error("handleSaveToCloud fel:", err);
-      alert("Kunde inte spara banken i molnet. Se konsolen.");
+      // Refresh banklista om funktionen finns
+      try{
+        if (typeof loadCloudBanksListV4 === "function") await loadCloudBanksListV4();
+        else if (typeof loadCloudBanksList === "function") await loadCloudBanksList();
+        else if (typeof handleLoadCloudBanks === "function") await handleLoadCloudBanks();
+      }catch(e){
+        console.warn("Kunde inte refresha banklista efter spar:", e);
+      }
+
+      if (typeof updateBankStatusUI === "function") updateBankStatusUI();
+
+      alert(isCreatingNew ? "✅ Ny bank sparad i molnet och aktiverad." : "✅ Bank uppdaterad i molnet.");
+    }catch(err){
+      console.error("handleSaveToCloud (force) error:", err);
+      alert("❌ Kunde inte spara bank till molnet. Se konsolen.");
     } finally {
-      if (btn) btn.textContent = oldBtnText || "Spara till molnet";
-      window.__FV_SAVE_TO_CLOUD_BUSY = false;
+      window.__fv5_saveToCloudBusy = false;
     }
   };
-}
+})();
 
 function initApp() {
   // Skydd mot dubbelkörning (t.ex. om DOMContentLoaded råkar finnas i flera script)
@@ -4715,54 +4676,55 @@ function initApp() {
 
   const btnLoadCloudBanks = getEl("btnLoadCloudBanks");
   if (btnLoadCloudBanks && typeof handleLoadCloudBanks === "function") {
-    btnLoadCloudBanks.addEventListener("click", () => {
+    // rensa ev. tidigare lyssnare genom att använda onclick
+    btnLoadCloudBanks.onclick = () => {
       if (typeof currentTeacherUser !== "undefined" && !currentTeacherUser) {
         alert("Logga in med Google först för att ladda moln-bankar.");
         return;
       }
       handleLoadCloudBanks();
       updateBankStatusUI();
-    });
+    };
   }
 
   const btnSaveToCloud = getEl("btnSaveToCloud");
   if (btnSaveToCloud) {
-    btnSaveToCloud.addEventListener("click", async () => {
-      try {
+    // KRITISKT: använd onclick för att rensa dubletter, och kör vår force-override
+    btnSaveToCloud.onclick = async () => {
+      try{
         if (typeof window.handleSaveToCloud !== "function") throw new Error("handleSaveToCloud saknas");
         await window.handleSaveToCloud();
+      } finally {
         updateBankStatusUI();
-      } catch (e) {
-        console.error("Spara till molnet misslyckades:", e);
       }
-    });
+    };
   }
 
   const btnExportBank = getEl("btnExportBank");
   if (btnExportBank && typeof handleExportBank === "function") {
-    btnExportBank.addEventListener("click", () => {
+    btnExportBank.onclick = () => {
       handleExportBank();
       updateBankStatusUI();
-    });
+    };
   }
 
   const fileImport = getEl("fileImport");
   if (fileImport && typeof handleImportBank === "function") {
-    fileImport.addEventListener("change", (evt) => {
+    fileImport.onchange = (evt) => {
       handleImportBank(evt);
       updateBankStatusUI();
-    });
+    };
   }
 
   const btnGoogleLogin = getEl("btnGooglePlaceholder");
-  if (btnGoogleLogin && typeof handleGoogleLogin === "function") btnGoogleLogin.addEventListener("click", handleGoogleLogin);
+  if (btnGoogleLogin && typeof handleGoogleLogin === "function") btnGoogleLogin.onclick = handleGoogleLogin;
 
   const btnGoogleLogout = getEl("btnGoogleLogout");
-  if (btnGoogleLogout && typeof handleGoogleLogout === "function") btnGoogleLogout.addEventListener("click", handleGoogleLogout);
+  if (btnGoogleLogout && typeof handleGoogleLogout === "function") btnGoogleLogout.onclick = handleGoogleLogout;
 
   // Publik bank/elevlänk (om UI finns)
   const btnPublishSharedBank = getEl("btnPublishSharedBank");
-  if (btnPublishSharedBank && typeof handlePublishSharedBank === "function") btnPublishSharedBank.addEventListener("click", handlePublishSharedBank);
+  if (btnPublishSharedBank && typeof handlePublishSharedBank === "function") btnPublishSharedBank.onclick = handlePublishSharedBank;
 
   console.log("initApp klar – knappar kopplade");
 }
