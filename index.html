@@ -1981,1019 +1981,1795 @@ Gurka
 
 
 
-<!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker, roster & moln-lista) -->
-
-<!-- start SEKTION 3A: BAS & STATE (safe helpers + localStorage) -->
+<!-- start SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker, roster, progression, editor-refresh) -->
 <script>
 "use strict";
 
-/* =========
-   3A – Bas
-   ========= */
+/* ==============================
+   Start 3A – KÄRNA: state + helpers (INGA $-deklarationer)
+   ============================== */
 
-(function(){
-  const STORAGE_KEY = "fangvaktaren-v17";
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
+  authDomain: "fangvaktaren-904db.firebaseapp.com",
+  projectId: "fangvaktaren-904db",
+  storageBucket: "fangvaktaren-904db.firebasestorage.app",
+  messagingSenderId: "105301219768",
+  appId: "1:105301219768:web:66b131fba86a541b78174d",
+  measurementId: "G-NXL9GSFZ77"
+};
 
-  function deepClone(x){ try{ return JSON.parse(JSON.stringify(x)); }catch{ return x; } }
+const STORAGE_KEY = "fangvaktaren-v17";
+const CLOUD_ROOT_COLLECTION = "teachers";
+const CLOUD_BANKS_SUBCOLLECTION = "banks";
+const PUBLIC_BANKS_COLLECTION = "public_banks";
+const TEACHER_LOCAL_ROSTER_KEY = STORAGE_KEY + "::teacherRosterByBankId_v1";
 
-  function getDefaultState(){
-    return {
-      student: { name:"", klass:"" },
-      bank: { name:"", questions:[] },
-      banks: { local:[] }, /* historik/backup om du använder det senare */
-      activeBank: { mode:"", ownerUid:"", bankId:"", publicId:"", name:"" },
-      rosterByBank: {} /* { [bankId]: { rows:[{name,email,token,sentAt}], updatedAt } } */
-    };
-  }
+function _fv_sel(q){ return document.querySelector(q); }
+function _fv_selAll(q){ return document.querySelectorAll(q); }
+function _fv_getEl(id){ return document.getElementById(id); }
 
-  function loadState(){
-    try{
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if(!raw) return getDefaultState();
-      const parsed = JSON.parse(raw);
-      const def = getDefaultState();
-      return Object.assign(def, parsed || {});
-    }catch{
-      return getDefaultState();
+function _fv_escapeHtml(str){
+  if (str === null || typeof str === "undefined") return "";
+  return String(str)
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;")
+    .replace(/'/g,"&#039;");
+}
+
+function _fv_deepClone(obj){
+  try{ return JSON.parse(JSON.stringify(obj)); }catch{ return {}; }
+}
+
+function _fv_ensureBankShape(bank){
+  const b = Object.assign({ mcq: [], img: [], drag: [] }, bank || {});
+  if (!Array.isArray(b.mcq)) b.mcq = [];
+  if (!Array.isArray(b.img)) b.img = [];
+  if (!Array.isArray(b.drag)) b.drag = [];
+  return b;
+}
+
+const _fv_defaultState = {
+  student: { name: "", klass: "", token: "" },
+  teacherEmail: "",
+  teacherPassword: "",
+  goalsMap: [],
+  bank: { mcq: [], img: [], drag: [] },
+  activeBank: { mode: "", ownerUid: "", bankId: "", publicId: "", name: "" },
+  best: { E: 0, C: 0, A: 0 },
+  thres: { E: 70, C: 70, A: 70 },
+  lastSubmission: null,
+  progression: { totalPoints: 0, wrongByGoalId: {}, correctByGoalId: {} },
+  meta: { embeddedMerged: false }
+};
+
+function _fv_normalizeState(s){
+  s = s && typeof s === "object" ? s : _fv_deepClone(_fv_defaultState);
+
+  s.student = Object.assign({ name:"", klass:"", token:"" }, s.student || {});
+  s.teacherEmail = String(s.teacherEmail || "");
+  s.teacherPassword = String(s.teacherPassword || "");
+
+  s.goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+  s.bank = _fv_ensureBankShape(s.bank);
+
+  s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"", name:"" }, s.activeBank || {});
+  s.best = Object.assign({ E:0, C:0, A:0 }, s.best || {});
+  s.thres = Object.assign({ E:70, C:70, A:70 }, s.thres || {});
+
+  s.lastSubmission = s.lastSubmission || null;
+
+  s.progression = (s.progression && typeof s.progression === "object")
+    ? s.progression
+    : { totalPoints:0, wrongByGoalId:{}, correctByGoalId:{} };
+
+  s.progression.totalPoints = Number(s.progression.totalPoints || 0) || 0;
+  s.progression.wrongByGoalId = s.progression.wrongByGoalId || {};
+  s.progression.correctByGoalId = s.progression.correctByGoalId || {};
+
+  s.meta = (s.meta && typeof s.meta === "object") ? s.meta : { embeddedMerged:false };
+  if (typeof s.meta.embeddedMerged !== "boolean") s.meta.embeddedMerged = false;
+
+  return s;
+}
+
+function _fv_hasAnyLocalBank(s){
+  try{
+    const b = s && s.bank ? s.bank : null;
+    return !!(b && (
+      (Array.isArray(b.mcq) && b.mcq.length) ||
+      (Array.isArray(b.img) && b.img.length) ||
+      (Array.isArray(b.drag) && b.drag.length)
+    ));
+  }catch{ return false; }
+}
+
+function _fv_mergeEmbeddedBank(state){
+  const el = _fv_getEl("embedded-data");
+  if (!el) return state;
+  try{
+    const raw = el.textContent || el.innerHTML || "{}";
+    const data = JSON.parse(raw);
+
+    if (data && data.bank){
+      state.bank = _fv_ensureBankShape(state.bank);
+      const eb = _fv_ensureBankShape(data.bank);
+      state.bank.mcq = (state.bank.mcq || []).concat(eb.mcq || []);
+      state.bank.img = (state.bank.img || []).concat(eb.img || []);
+      state.bank.drag = (state.bank.drag || []).concat(eb.drag || []);
     }
+    if (data && Array.isArray(data.goalsMap)){
+      state.goalsMap = data.goalsMap.slice();
+    }
+  }catch(e){
+    console.warn("Kunde inte läsa embedded-data:", e);
+  }
+  return state;
+}
+
+function loadState(){
+  let s = null;
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) s = JSON.parse(raw);
+  }catch(e){
+    console.warn("Kunde inte läsa state:", e);
   }
 
-  function saveState(s){
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(s||getDefaultState())); }catch{}
-  }
+  s = _fv_normalizeState(s);
 
-  function setActiveBankMeta(meta){
-    try{
-      const s = loadState();
-      s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"", name:"" }, meta||{});
+  try{
+    if (s.meta.embeddedMerged !== true && !_fv_hasAnyLocalBank(s)){
+      s = _fv_mergeEmbeddedBank(s);
+      s.meta = s.meta && typeof s.meta === "object" ? s.meta : {};
+      s.meta.embeddedMerged = true;
       saveState(s);
-    }catch{}
-  }
+    }else if (s.meta.embeddedMerged !== true && _fv_hasAnyLocalBank(s)){
+      s.meta.embeddedMerged = true;
+      saveState(s);
+    }
+  }catch{}
 
-  function getActiveBankId(){
-    try{
-      const s = loadState();
-      if(s && s.activeBank && s.activeBank.bankId) return String(s.activeBank.bankId||"");
-    }catch{}
-    try{
-      if(typeof window.activeCloudBankId !== "undefined" && window.activeCloudBankId !== null) return String(window.activeCloudBankId||"");
-    }catch{}
-    return "";
-  }
+  return _fv_normalizeState(s);
+}
 
-  /* expose (krävs av SEKTION 4 m.m.) */
+function saveState(state){
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(_fv_normalizeState(state))); }
+  catch(e){ console.warn("Kunde inte spara state:", e); }
+}
+
+function setActiveBankMeta(meta){
+  const s = loadState();
+  s.activeBank = Object.assign({ mode:"", ownerUid:"", bankId:"", publicId:"", name:"" }, s.activeBank || {}, meta || {});
+  saveState(s);
+  try{ window.activeCloudBankId = String(s.activeBank.bankId || ""); }catch{}
+}
+
+/* Exponera kompatibla namn om andra sektioner råkar använda dem */
+try{
+  window.escapeHtml = window.escapeHtml || _fv_escapeHtml;
+  window.ensureBankShape = window.ensureBankShape || _fv_ensureBankShape;
   window.loadState = window.loadState || loadState;
   window.saveState = window.saveState || saveState;
-  window.setActiveBankMeta = window.setActiveBankMeta || setActiveBankMeta;
-  window._fvGetActiveBankId = window._fvGetActiveBankId || getActiveBankId;
-})();
-</script>
-<!-- slut SEKTION 3A: BAS & STATE (safe helpers + localStorage) -->
+}catch{}
+
+/* ==============================
+   Slut 3A
+   ============================== */
 
 
-<!-- start SEKTION 3B: FIREBASE – init + Google login (utan design/CSS-ändringar) -->
-<script>
-"use strict";
+/* ==============================
+   Start 3B – FIREBASE: init + auth (stabil)
+   ============================== */
 
-(function(){
-  /* =========================
-     3B – Firebase config/init
-     ========================= */
+let firebaseAppInstance = null;
+let firebaseAuthInstance = null;
+let firebaseDbInstance = null;
+let currentTeacherUser = null;
 
-  const FIREBASE_CONFIG = {
-    apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
-    authDomain: "fangvaktaren-904db.firebaseapp.com",
-    projectId: "fangvaktaren-904db",
-    storageBucket: "fangvaktaren-904db.firebasestorage.app",
-    messagingSenderId: "105301219768",
-    appId: "1:105301219768:web:66b131fba86a541b78174d",
-    measurementId: "G-NXL9GSFZ77"
-  };
-
-  const CLOUD_ROOT_COLLECTION = "teachers";
-  const CLOUD_BANKS_SUBCOLLECTION = "banks";
-  const PUBLIC_BANKS_COLLECTION = "public_banks";
-
-  function _q(sel){ return document.querySelector(sel); }
-
-  function _setText(id, txt){
-    const el = document.getElementById(id);
-    if(el) el.textContent = txt;
+(function FV_FirebaseReadyBootstrap(){
+  if (!window.__fvFirebaseReadyPromise){
+    window.__fvFirebaseReadyPromise = new Promise((resolve)=>{ window.__fvFirebaseReadyResolve = resolve; });
   }
+})();
 
-  function initFirebase(){
+async function initFirebase(){
+  if (window.__fvFirebaseInitPromise) return window.__fvFirebaseInitPromise;
+
+  window.__fvFirebaseInitPromise = (async ()=>{
     try{
-      if(!window.firebase){
+      if (!window.firebase){
         console.warn("Firebase-bibliotek saknas.");
-        _setText("cloudBankStatus", "⚠️ Firebase saknas (bibliotek laddades ej).");
+        try{ if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(false); }catch{}
         return false;
       }
-      if(!firebase.apps || !firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
 
-      window.firebaseAppInstance = firebase.app();
-      window.firebaseAuthInstance = firebase.auth();
-      window.firebaseDbInstance = firebase.firestore();
+      if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
 
-      console.log("Firebase init OK");
+      firebaseAppInstance = firebase.app();
+      firebaseAuthInstance = firebase.auth();
+      firebaseDbInstance = firebase.firestore();
 
-      if(window.firebaseAuthInstance){
-        window.firebaseAuthInstance.onAuthStateChanged((user)=>{
-          window.currentTeacherUser = user || null;
+      try{
+        window.firebaseAppInstance = firebaseAppInstance;
+        window.firebaseAuthInstance = firebaseAuthInstance;
+        window.firebaseDbInstance = firebaseDbInstance;
+      }catch{}
 
-          const statusEl = _q("#googleStatus") || _q("#cloudBankStatus");
-          const btnLogout = _q("#btnGoogleLogout");
-          const btnLogin = _q("#btnGoogleLogin");
+      if (firebaseAuthInstance && !firebaseAuthInstance.__fvBound){
+        firebaseAuthInstance.__fvBound = true;
+        firebaseAuthInstance.onAuthStateChanged((user)=>{
+          currentTeacherUser = user || null;
+          try{ window.currentTeacherUser = currentTeacherUser; }catch{}
 
-          if(statusEl){
-            if(user){
+          const statusEl = _fv_getEl("googleStatus");
+          const btnLogout = _fv_getEl("btnGoogleLogout");
+          if (statusEl){
+            if (user){
               statusEl.textContent = `☁️ Inloggad som ${user.email || "lärare"} – moln-banker aktiverade.`;
-              if(btnLogout) btnLogout.classList.remove("hidden");
-              if(btnLogin) btnLogin.classList.add("hidden");
+              if (btnLogout) btnLogout.classList.remove("hidden");
             }else{
-              statusEl.textContent = "☁️ Inte inloggad – logga in för moln-banker.";
-              if(btnLogout) btnLogout.classList.add("hidden");
-              if(btnLogin) btnLogin.classList.remove("hidden");
+              statusEl.textContent = "☁️ Inte inloggad – klicka på Google för att logga in.";
+              if (btnLogout) btnLogout.classList.add("hidden");
             }
           }
         });
       }
+
+      if (!window.__fv_firebase_inited_log){
+        window.__fv_firebase_inited_log = true;
+        console.log("Firebase init OK");
+      }
+
+      try{
+        if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(true);
+        window.dispatchEvent(new CustomEvent("fv-firebase-ready"));
+      }catch{}
+
       return true;
     }catch(e){
-      console.warn("Firebase init fel:", e);
-      _setText("cloudBankStatus", "⚠️ Firebase init fel.");
+      console.error("Fel vid initFirebase:", e);
+      try{ if (window.__fvFirebaseReadyResolve) window.__fvFirebaseReadyResolve(false); }catch{}
       return false;
     }
-  }
+  })();
 
-  async function googleLogin(){
-    try{
-      if(!window.firebaseAuthInstance) return;
-      const prov = new firebase.auth.GoogleAuthProvider();
-      await window.firebaseAuthInstance.signInWithPopup(prov);
-    }catch(e){
-      console.warn("Google login fel:", e);
-      alert("Kunde inte logga in med Google. Försök igen.");
+  return window.__fvFirebaseInitPromise;
+}
+
+function _fv_hasDb(){ return !!firebaseDbInstance; }
+function _fv_hasTeacher(){ return !!(currentTeacherUser && currentTeacherUser.uid); }
+
+async function handleGoogleLogin(){
+  const ok = await initFirebase();
+  if (!ok || !firebaseAuthInstance){ alert("Tekniskt fel: Firebase Auth saknas."); return; }
+  try{
+    const provider = new firebase.auth.GoogleAuthProvider();
+    await firebaseAuthInstance.signInWithPopup(provider);
+  }catch(err){
+    console.error("Google-inloggning misslyckades:", err);
+    const statusEl = _fv_getEl("googleStatus");
+    if (statusEl) statusEl.textContent = "⚠️ Kunde inte logga in med Google. Försök igen.";
+  }
+}
+
+async function handleGoogleLogout(){
+  try{ if (firebaseAuthInstance) await firebaseAuthInstance.signOut(); }
+  catch(err){ console.error("Kunde inte logga ut:", err); }
+}
+
+/* ==============================
+   Slut 3B
+   ============================== */
+
+
+/* ==============================
+   Start 3C – MOLN-BANKER: lista + aktivera + spara + delete
+   ============================== */
+
+function _fv_fmtUpdatedAt(v){
+  try{
+    if (!v) return "-";
+    const pad = (n)=> String(n).padStart(2,"0");
+    if (typeof v === "string") return v;
+    if (typeof v.toDate === "function"){
+      const d = v.toDate();
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     }
-  }
-
-  async function googleLogout(){
-    try{
-      if(!window.firebaseAuthInstance) return;
-      await window.firebaseAuthInstance.signOut();
-    }catch(e){
-      console.warn("Google logout fel:", e);
+    if (typeof v.seconds !== "undefined"){
+      const d = new Date(Number(v.seconds)*1000);
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     }
+  }catch{}
+  return "-";
+}
+
+function _fv_pickBankObj(data){
+  try{
+    if (!data) return _fv_ensureBankShape({});
+    if (data.bank) return _fv_ensureBankShape(data.bank);
+    if (data.questions) return _fv_ensureBankShape(data.questions);
+    if (Array.isArray(data.mcq) || Array.isArray(data.img) || Array.isArray(data.drag)) return _fv_ensureBankShape(data);
+  }catch{}
+  return _fv_ensureBankShape({});
+}
+
+function _fv_getRosterTokensCount(data){
+  try{
+    const rt = data && data.rosterTokens;
+    if (!Array.isArray(rt)) return 0;
+    return rt.map(String).filter(t=>String(t||"").trim()).length;
+  }catch{ return 0; }
+}
+
+function _fv_getCloudBankNameFromUI(){
+  const ids = ["inputBankName","cloudBankName","bankName","bankNameInput","cloudBankTitle","txtCloudBankName"];
+  for (let i=0;i<ids.length;i++){
+    const el = _fv_getEl(ids[i]);
+    if (el && typeof el.value === "string" && el.value.trim()) return el.value.trim();
   }
+  return "";
+}
 
-  function bindGoogleButtons(){
-    const btnLogin = _q("#btnGoogleLogin");
-    const btnLogout = _q("#btnGoogleLogout");
+function _fv_getCloudListHost(){
+  return (
+    _fv_getEl("cloudBankList") ||
+    _fv_getEl("cloudBanksListV5") ||
+    _fv_getEl("cloudBanksListV4") ||
+    _fv_getEl("cloudBanksList") ||
+    _fv_getEl("cloudBanksListV3")
+  );
+}
 
-    if(btnLogin && !btnLogin._fvBound){
-      btnLogin._fvBound = true;
-      btnLogin.addEventListener("click", googleLogin);
+function _fv_getCloudStatusEl(){
+  return (
+    _fv_getEl("cloudBankStatus") ||
+    _fv_getEl("cloudBanksStatus") ||
+    _fv_getEl("cloudBanksStatusV5") ||
+    _fv_getEl("fv3-cloud-status")
+  );
+}
+
+function _fv_setCloudStatus(msg){
+  const el = _fv_getCloudStatusEl();
+  if (!el) return;
+  el.textContent = String(msg || "");
+}
+
+function _fv_ensureCloudStyles(){
+  if (_fv_getEl("fv3-styles")) return;
+  const st = document.createElement("style");
+  st.id = "fv3-styles";
+  st.textContent = `
+    .cloud-bank-active{
+      border-color:rgba(74,222,128,.95) !important;
+      box-shadow: 0 0 0 1px rgba(22,163,74,1), 0 0 16px rgba(34,197,94,.55), 0 12px 28px rgba(15,23,42,.9) !important;
     }
-    if(btnLogout && !btnLogout._fvBound){
-      btnLogout._fvBound = true;
-      btnLogout.addEventListener("click", googleLogout);
-    }
-  }
-
-  window._fvFirebase = window._fvFirebase || {
-    initFirebase,
-    googleLogin,
-    googleLogout,
-    CLOUD_ROOT_COLLECTION,
-    CLOUD_BANKS_SUBCOLLECTION,
-    PUBLIC_BANKS_COLLECTION
-  };
-
-  /* init + bind */
-  initFirebase();
-  bindGoogleButtons();
-})();
-</script>
-<!-- slut SEKTION 3B: FIREBASE – init + Google login (utan design/CSS-ändringar) -->
-
-
-<!-- start SEKTION 3C: FIREBASE – init + Google login + moln-bankar (FIX: load/render via teachers/{uid}/banks -> #cloudBanksListV4, tolerant frågeformat, behåller aktiv-grön + delete) -->
-<script>
-(function(){
-  "use strict";
-
-  /* =========================================================
-     3C – Moln-bankar (lista + aktivera + delete)
-     - Renderar ALLTID till #cloudBanksListV4 (det är id:t du faktiskt har)
-     - Behåller class "cloud-bank-active" för grön markering
-     - Behåller delete-knapp i listan
-     - Aktivering accepterar flera format på frågor (bank.questions / questions / JSON-sträng / items / fallback-scan)
-     ========================================================= */
-
-  const _q = (sel) => document.querySelector(sel);
-  const _id = (id) => document.getElementById(id);
-
-  const EL_LIST_ID = "cloudBanksListV4";
-  const EL_STATUS_ID = "cloudBankStatus";
-  const BTN_LOAD_ID = "btnLoadCloudBanks";
-
-  const ROOT_COL = (typeof CLOUD_ROOT_COLLECTION !== "undefined") ? CLOUD_ROOT_COLLECTION : "teachers";
-  const BANKS_SUB = (typeof CLOUD_BANKS_SUBCOLLECTION !== "undefined") ? CLOUD_BANKS_SUBCOLLECTION : "banks";
-  const PUB_COL  = (typeof PUBLIC_BANKS_COLLECTION !== "undefined") ? PUBLIC_BANKS_COLLECTION : "public_banks";
-
-  function _getDb(){
-    try{ if (window.firebaseDbInstance) return window.firebaseDbInstance; }catch(e){}
-    try{ if (window.firebaseDb) return window.firebaseDb; }catch(e){}
-    try{ if (window.firebase && window.firebase.firestore) return window.firebase.firestore(); }catch(e){}
-    return null;
-  }
-
-  function _getUser(){
-    try{ if (window.currentTeacherUser && window.currentTeacherUser.uid) return window.currentTeacherUser; }catch(e){}
-    try{
-      if (window.firebaseAuthInstance && window.firebaseAuthInstance.currentUser && window.firebaseAuthInstance.currentUser.uid) {
-        return window.firebaseAuthInstance.currentUser;
-      }
-    }catch(e){}
-    return null;
-  }
-
-  function _setStatus(msg){
-    const el = _id(EL_STATUS_ID);
-    if (el) el.textContent = String(msg || "");
-  }
-
-  function _escapeHtml(s){
-    return String(s ?? "")
-      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-      .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
-  }
-
-  function _safeJsonParse(v){
-    if (typeof v !== "string") return null;
-    const t = v.trim();
-    if (!t) return null;
-    if (!(t.startsWith("{") || t.startsWith("["))) return null;
-    try{ return JSON.parse(t); }catch(e){ return null; }
-  }
-
-  function _looksLikeQuestionArray(arr){
-    if (!Array.isArray(arr) || !arr.length) return false;
-    const q = arr[0];
-    if (!q || typeof q !== "object") return false;
-    return (
-      ("type" in q) ||
-      ("question" in q) || ("q" in q) || ("text" in q) ||
-      ("answers" in q) || ("options" in q) || ("correct" in q) ||
-      ("items" in q && Array.isArray(q.items)) ||
-      ("pairs" in q && Array.isArray(q.pairs))
-    );
-  }
-
-  function _scanFirstQuestionArray(obj){
-    if (!obj || typeof obj !== "object") return null;
-    const stack = [obj];
-    const seen = new Set();
-    while(stack.length){
-      const cur = stack.pop();
-      if (!cur || typeof cur !== "object") continue;
-      if (seen.has(cur)) continue;
-      seen.add(cur);
-
-      if (Array.isArray(cur) && _looksLikeQuestionArray(cur)) return cur;
-
-      if (Array.isArray(cur)) {
-        for (let i=0;i<cur.length;i++){
-          const v = cur[i];
-          if (v && typeof v === "object") stack.push(v);
-        }
-        continue;
-      }
-
-      for (const k of Object.keys(cur)){
-        const v = cur[k];
-        if (!v) continue;
-        if (Array.isArray(v) && _looksLikeQuestionArray(v)) return v;
-        if (typeof v === "string") {
-          const parsed = _safeJsonParse(v);
-          if (Array.isArray(parsed) && _looksLikeQuestionArray(parsed)) return parsed;
-          if (parsed && typeof parsed === "object") stack.push(parsed);
-        } else if (typeof v === "object") {
-          stack.push(v);
-        }
-      }
-    }
-    return null;
-  }
-
-  function _extractQuestionsFromDoc(data){
-    const d = (data && typeof data === "object") ? data : {};
-
-    // 1) questions direkt
-    if (_looksLikeQuestionArray(d.questions)) return d.questions;
-
-    // 2) questions som JSON-sträng
-    const qParsed = _safeJsonParse(d.questions);
-    if (_looksLikeQuestionArray(qParsed)) return qParsed;
-
-    // 3) bank-objekt
-    let bankObj = null;
-    if (d.bank && typeof d.bank === "object") bankObj = d.bank;
-
-    // 4) bank som JSON-sträng
-    if (!bankObj && typeof d.bank === "string") {
-      const bParsed = _safeJsonParse(d.bank);
-      if (bParsed && typeof bParsed === "object") bankObj = bParsed;
-    }
-
-    if (bankObj){
-      if (_looksLikeQuestionArray(bankObj.questions)) return bankObj.questions;
-
-      const bqParsed = _safeJsonParse(bankObj.questions);
-      if (_looksLikeQuestionArray(bqParsed)) return bqParsed;
-
-      if (_looksLikeQuestionArray(bankObj.items)) return bankObj.items;
-      const biParsed = _safeJsonParse(bankObj.items);
-      if (_looksLikeQuestionArray(biParsed)) return biParsed;
-    }
-
-    // 5) items fallback
-    if (_looksLikeQuestionArray(d.items)) return d.items;
-    const iParsed = _safeJsonParse(d.items);
-    if (_looksLikeQuestionArray(iParsed)) return iParsed;
-
-    // 6) sista fallback: leta första arrayen som ser ut som frågor
-    const scanned = _scanFirstQuestionArray(d);
-    if (_looksLikeQuestionArray(scanned)) return scanned;
-
-    return null;
-  }
-
-  function _normalizeQuestions(arr){
-    if (!Array.isArray(arr)) return [];
-    return arr
-      .filter(q => q && typeof q === "object")
-      .map((q, idx) => {
-        const out = Object.assign({}, q);
-        if (!out.id) out.id = (out._id || out.uuid || ("q_" + Date.now() + "_" + idx));
-        if (!out.type) {
-          // försök härleda
-          if (out.pairs) out.type = "dragdrop";
-          else if (out.image || out.img || out.imageUrl) out.type = "image";
-          else out.type = "mcq";
-        }
-        // textfält
-        if (!out.question && out.q) out.question = out.q;
-        if (!out.question && out.text) out.question = out.text;
-        return out;
-      });
-  }
-
-  function _loadStateSafe(){
-    try{ if (typeof loadState === "function") return loadState(); }catch(e){}
-    try{
-      const key = (typeof STORAGE_KEY !== "undefined") ? STORAGE_KEY : "fangvaktaren";
-      const raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : {};
-    }catch(e){}
-    return {};
-  }
-
-  function _saveStateSafe(s){
-    try{ if (typeof saveState === "function") return saveState(s); }catch(e){}
-    try{
-      const key = (typeof STORAGE_KEY !== "undefined") ? STORAGE_KEY : "fangvaktaren";
-      localStorage.setItem(key, JSON.stringify(s || {}));
-    }catch(e){}
-  }
-
-  function _getActiveBankIdFromState(){
-    try{
-      const s = _loadStateSafe();
-      if (s && s.activeBank && s.activeBank.bankId) return String(s.activeBank.bankId);
-    }catch(e){}
-    try{ if (typeof window.activeCloudBankId !== "undefined" && window.activeCloudBankId !== null) return String(window.activeCloudBankId); }catch(e){}
-    return "";
-  }
-
-  async function loadCloudBanksListV4(){
-    const listEl = _id(EL_LIST_ID);
-    if (!listEl) {
-      console.warn("Hittar inte list-container:", EL_LIST_ID);
-      return;
-    }
-
-    const db = _getDb();
-    const u = _getUser();
-
-    if (!db || !u) {
-      _setStatus("⚠️ Logga in med Google för att visa moln-bankar.");
-      listEl.innerHTML = "";
-      return;
-    }
-
-    _setStatus("⏳ Hämtar moln-bankar…");
-    listEl.innerHTML = "";
-
-    let docs = [];
-    try{
-      const snap = await db.collection(ROOT_COL).doc(String(u.uid)).collection(BANKS_SUB).get();
-      docs = snap.docs || [];
-    }catch(e){
-      console.warn("Kunde inte läsa moln-bankar:", e);
-      _setStatus("⚠️ Kunde inte läsa moln-bankar (permissions/anslutning).");
-      return;
-    }
-
-    // sortera stabilt (updatedAt desc -> name)
-    const rows = docs.map(d => ({ id: d.id, data: (d.data()||{}) }));
-    rows.sort((a,b) => {
-      const au = Number((a.data.updatedAt && a.data.updatedAt.toMillis) ? a.data.updatedAt.toMillis() : a.data.updatedAt || 0);
-      const bu = Number((b.data.updatedAt && b.data.updatedAt.toMillis) ? b.data.updatedAt.toMillis() : b.data.updatedAt || 0);
-      if (bu !== au) return bu - au;
-      const an = String(a.data.name || a.data.bankName || "Bank").toLowerCase();
-      const bn = String(b.data.name || b.data.bankName || "Bank").toLowerCase();
-      return an.localeCompare(bn);
-    });
-
-    const activeId = _getActiveBankIdFromState();
-
-    if (!rows.length){
-      _setStatus("Inga moln-bankar hittades på ditt konto.");
-      return;
-    }
-
-    _setStatus(`Visar ${rows.length} moln-bank(er).`);
-
-    const wrap = document.createElement("div");
-    wrap.className = "cloud-banks-wrap";
-
-    rows.forEach((row) => {
-      const d = row.data || {};
-      const name = String(d.name || d.bankName || "Moln-bank").trim() || "Moln-bank";
-      const qArrRaw = _extractQuestionsFromDoc(d);
-      const qCount = Array.isArray(qArrRaw) ? qArrRaw.length : 0;
-      const isActive = String(activeId || "") === String(row.id);
-
-      const item = document.createElement("div");
-      item.className = "question-item" + (isActive ? " cloud-bank-active" : "");
-      item.setAttribute("data-bank-id", String(row.id));
-
-      item.innerHTML = `
-        <div class="list-main">
-          <div class="q-text">
-            ${_escapeHtml(name)}
-            ${isActive ? ' <span class="mini">✅ Aktiv</span>' : ""}
-          </div>
-          <div class="mini">${qCount ? (qCount + " frågor") : "0 frågor"}</div>
-        </div>
-        <div class="list-actions" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;">
-          <button class="btn btn-sm" type="button" data-action="activate">Aktivera</button>
-          <button class="btn btn-sm" type="button" data-action="delete">Ta bort</button>
-        </div>
-      `;
-
-      // actions
-      item.addEventListener("click", async (ev) => {
-        const btn = ev.target && ev.target.closest ? ev.target.closest("button[data-action]") : null;
-        if (!btn) return;
-        const act = btn.getAttribute("data-action");
-        const bid = String(row.id);
-
-        if (act === "activate") {
-          await activateCloudBankV4(bid);
-        } else if (act === "delete") {
-          await deleteCloudBankV4(bid);
-        }
-      });
-
-      wrap.appendChild(item);
-    });
-
-    listEl.appendChild(wrap);
-  }
-
-  async function activateCloudBankV4(bankId){
-    const db = _getDb();
-    const u = _getUser();
-    const bid = String(bankId || "").trim();
-
-    if (!db || !u || !bid) return;
-
-    _setStatus("⏳ Laddar bank…");
-
-    let snap = null;
-    let d = {};
-    try{
-      snap = await db.collection(ROOT_COL).doc(String(u.uid)).collection(BANKS_SUB).doc(bid).get();
-      d = (snap && snap.exists) ? (snap.data() || {}) : {};
-    }catch(e){
-      console.warn("Kunde inte hämta bank:", e);
-      _setStatus("⚠️ Kunde inte hämta bank (permissions/anslutning).");
-      return;
-    }
-
-    const name = String(d.name || d.bankName || "Moln-bank").trim() || "Moln-bank";
-    const questionsRaw = _extractQuestionsFromDoc(d);
-    const questions = _normalizeQuestions(questionsRaw);
-
-    if (!questions.length){
-      console.warn("Bank saknar läsbara frågor. Doc keys:", Object.keys(d||{}), "data:", d);
-      alert("Banken saknar frågor (fel format).");
-      _setStatus("⚠️ Banken saknar frågor (fel format).");
-      return;
-    }
-
-    try{
-      // meta (behåller din logik om setActiveBankMeta finns)
-      const publicId = String(d.publicId || "").trim();
-
-      try{
-        if (typeof setActiveBankMeta === "function") {
-          setActiveBankMeta({ mode:"cloud", ownerUid:String(u.uid), bankId:bid, publicId:publicId, name:name });
-        }
-      }catch(e){}
-
-      // spara lokalt i ett kompatibelt "bank"-fält (vanligaste lokala formatet)
-      const s = _loadStateSafe();
-      if (!s.bank || typeof s.bank !== "object") s.bank = {};
-      s.bank.name = name;
-      s.bank.questions = questions;
-      s.bank.updatedAt = Date.now();
-      if (!s.activeBank || typeof s.activeBank !== "object") s.activeBank = {};
-      s.activeBank.mode = "cloud";
-      s.activeBank.ownerUid = String(u.uid);
-      s.activeBank.bankId = bid;
-      s.activeBank.publicId = publicId;
-      s.activeBank.name = name;
-
-      _saveStateSafe(s);
-
-      try{ window.activeCloudBankId = bid; }catch(e){}
-
-      // uppdatera UI om du har status-renderare
-      try{ if (typeof renderBankStatus === "function") renderBankStatus(); }catch(e){}
-      try{ if (typeof refreshEditors === "function") refreshEditors(); }catch(e){}
-
-      _setStatus(`✅ Aktiv bank: ${name} (${questions.length} frågor)`);
-      await loadCloudBanksListV4();
-    }catch(e){
-      console.warn("Kunde inte aktivera bank:", e);
-      _setStatus("⚠️ Kunde inte aktivera bank.");
-    }
-  }
-
-  async function deleteCloudBankV4(bankId){
-    const db = _getDb();
-    const u = _getUser();
-    const bid = String(bankId || "").trim();
-    if (!db || !u || !bid) return;
-
-    const ok = confirm("Ta bort moln-banken? Detta går inte att ångra.");
-    if (!ok) return;
-
-    const bankRef = db.collection(ROOT_COL).doc(String(u.uid)).collection(BANKS_SUB).doc(bid);
-
-    // försök även ta bort ev public-doc om publicId finns
-    try{
-      const snap = await bankRef.get();
-      const d = snap.exists ? (snap.data()||{}) : {};
-      const publicId = String(d.publicId||"").trim();
-      if (publicId){
-        try{ await db.collection(PUB_COL).doc(publicId).delete(); }
-        catch(e){ console.warn("Kunde inte ta bort public-banken (ok att ignorera):", e); }
-      }
-    }catch(e){}
-
-    try{
-      await bankRef.delete();
-    }catch(e){
-      console.warn("Kunde inte ta bort bank:", e);
-      alert("Kunde inte ta bort banken (permissions/anslutning).");
-      return;
-    }
-
-    // om aktiv: nollställ aktiv-meta
-    try{
-      const s = _loadStateSafe();
-      if (s && s.activeBank && String(s.activeBank.bankId||"") === bid){
-        try{
-          if (typeof setActiveBankMeta === "function"){
-            setActiveBankMeta({ mode:"", ownerUid:"", bankId:"", publicId:"", name:"" });
-          }
-        }catch(e){}
-        s.activeBank = { mode:"", ownerUid:"", bankId:"", publicId:"", name:"" };
-        _saveStateSafe(s);
-        try{ window.activeCloudBankId = ""; }catch(e){}
-      }
-    }catch(e){}
-
-    _setStatus("🗑️ Banken togs bort.");
-    await loadCloudBanksListV4();
-  }
-
-  // bind + exponera (behövs för felsökning och dina patchar i konsolen)
-  window.loadCloudBanksListV4 = loadCloudBanksListV4;
-  window.activateCloudBankV4 = activateCloudBankV4;
-  window.deleteCloudBankV4 = deleteCloudBankV4;
+    .cloud-bank-active .mini{ color:#bbf7d0 !important; }
+    .fv3-actions{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; justify-content:flex-end; }
+    .fv3-btn-xs{ padding:4px 8px; font-size:.74rem; border-radius:999px; }
+  `;
+  document.head.appendChild(st);
+}
+
+async function loadCloudBankToLocal(bankId){
+  await initFirebase();
+  if (!_fv_hasDb() || !_fv_hasTeacher()) throw new Error("Firebase ej redo eller ej inloggad");
+
+  const uid = String(currentTeacherUser.uid);
+  const bid = String(bankId || "").trim();
+  if (!bid) throw new Error("Saknar bankId");
+
+  const ref = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid);
+
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Bank finns inte: " + bid);
+
+  const d = snap.data() || {};
+  const bank = _fv_pickBankObj(d);
+  const goalsMap = Array.isArray(d.goalsMap) ? d.goalsMap : [];
+
+  const s = loadState();
+  s.bank = _fv_ensureBankShape(bank);
+  s.goalsMap = goalsMap;
+  saveState(s);
+
+  setActiveBankMeta({
+    mode: "teacher",
+    ownerUid: uid,
+    bankId: bid,
+    publicId: String(d.publicId || ""),
+    name: String(d.name || d.title || d.bankName || "")
+  });
+
+  try{ window.activeCloudBankId = bid; }catch{}
 
   try{
-    const btn = _id(BTN_LOAD_ID);
-    if (btn) btn.addEventListener("click", loadCloudBanksListV4);
-  }catch(e){}
+    window.dispatchEvent(new CustomEvent("fv-bank-changed", { detail: { source:"cloud", bankId: bid } }));
+  }catch{}
 
-})();
-</script>
-<!-- slut SEKTION 3C: FIREBASE – init + Google login + moln-bankar (FIX: load/render via teachers/{uid}/banks -> #cloudBanksListV4, tolerant frågeformat, behåller aktiv-grön + delete) -->
+  try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
+  try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
+}
 
+async function loadCloudBanksListV5(){
+  _fv_ensureCloudStyles();
+  const host = _fv_getCloudListHost();
+  if (!host) return;
 
-<!-- start SEKTION 3D: ROSTER (elevlista-knapp tillbaka + bindning + minimal modal-styrning utan designändring) -->
-<script>
-(function () {
-  "use strict";
+  host.innerHTML = "";
+  _fv_setCloudStatus("");
 
-  /* =========================================================
-     3D – Roster (elevlista)
-     - Ser till att det FINNS en elevlista-knapp (om HTML-knappen saknas skapas en liten "👥 Elevlista")
-     - Kopplar knappen till openRosterModal()
-     - Rör inte CSS, rör inte övriga knappar
-     ========================================================= */
+  await initFirebase();
 
-  const _id = (id) => document.getElementById(id);
-
-  const ROSTER_MODAL_ID = "bankRosterModal";
-  const BTN_LOAD_ID = "btnLoadCloudBanks";
-
-  // Kandidat-ID:n (om du redan har en knapp i HTML)
-  const ROSTER_BTN_CANDIDATES = [
-    "btnRoster",
-    "btnOpenRoster",
-    "btnBankRoster",
-    "btnRosterOpen",
-    "btnRosterModal",
-    "btnElevlista",
-    "btnStudentList",
-    "btnRosterList"
-  ];
-
-  function _showModal(){
-    const m = _id(ROSTER_MODAL_ID);
-    if (!m) {
-      alert("Hittar inte bankRosterModal i HTML.");
-      return false;
-    }
-    // stöd både .hidden och display none
-    try{ m.classList.remove("hidden"); }catch(e){}
-    try{ m.style.display = ""; }catch(e){}
-    return true;
+  if (!_fv_hasDb()){
+    _fv_setCloudStatus("⚠️ Firebase DB saknas.");
+    return;
+  }
+  if (!_fv_hasTeacher()){
+    _fv_setCloudStatus("☁️ Logga in med Google för att se dina moln-banker.");
+    return;
   }
 
-  function openRosterModal(){
-    // Om du har en mer avancerad version i andra delar: använd den
-    try{
-      if (window.__openRosterModalImpl && typeof window.__openRosterModalImpl === "function") {
-        return window.__openRosterModalImpl();
-      }
-    }catch(e){}
+  const uid = String(currentTeacherUser.uid);
+  const ref = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION);
 
-    // Minimal fallback: visa modalen, resten av roster-logiken ligger i din befintliga 3D om du har den
-    _showModal();
+  let snap = null;
+  try{ snap = await ref.orderBy("updatedAt","desc").get(); }
+  catch{ snap = await ref.get(); }
+
+  const docs = snap && snap.docs ? snap.docs : [];
+  if (!docs.length){
+    _fv_setCloudStatus("Inga moln-banker hittades.");
+    return;
   }
 
-  function _ensureRosterButton(){
-    // 1) hitta befintlig knapp
-    for (const id of ROSTER_BTN_CANDIDATES){
-      const el = _id(id);
-      if (el) return el;
-    }
+  const s = loadState();
+  const activeId = String(s.activeBank && s.activeBank.bankId ? s.activeBank.bankId : (window.activeCloudBankId||""));
 
-    // 2) skapa ny, placerad vid moln-knappar (utan layout/CSS-ändringar)
-    const loadBtn = _id(BTN_LOAD_ID);
-    if (!loadBtn) return null;
+  const seen = new Set();
+  for (let i=0;i<docs.length;i++){
+    const doc = docs[i];
+    const bankId = String(doc.id);
+    if (seen.has(bankId)) continue;
+    seen.add(bankId);
 
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.id = "btnOpenRoster"; // standardiserat
-    btn.className = "btn btn-sm";
-    btn.textContent = "👥 Elevlista";
+    const data = doc.data() || {};
+    const name = String(data.name || data.title || data.bankName || "Moln-bank");
+    const publicId = String(data.publicId || "");
+    const isPublic = !!publicId.trim();
 
-    // försök placera intill moln-knappen
-    const parent = loadBtn.parentElement;
-    if (parent) {
-      parent.appendChild(btn);
-    } else {
-      loadBtn.insertAdjacentElement("afterend", btn);
-    }
+    const bankObj = _fv_pickBankObj(data);
+    const nMcq = (bankObj.mcq||[]).length;
+    const nImg = (bankObj.img||[]).length;
+    const nDrag = (bankObj.drag||[]).length;
 
-    return btn;
-  }
+    const upd = _fv_fmtUpdatedAt(data.updatedAt || data.updated || data.lastUpdatedAt);
+    const studentsN = _fv_getRosterTokensCount(data);
 
-  function _bind(){
-    const btn = _ensureRosterButton();
-    if (btn) {
-      btn.addEventListener("click", openRosterModal);
-    }
-  }
+    const isActive = (activeId && activeId === bankId);
 
-  // exponera
-  window.openRosterModal = openRosterModal;
+    const li = document.createElement("li");
+    li.className = "question-item" + (isActive ? " cloud-bank-active" : "");
+    li.setAttribute("data-bank-id", bankId);
 
-  // bind vid start
-  try{ _bind(); }catch(e){}
-
-})();
-</script>
-<!-- slut SEKTION 3D: ROSTER (elevlista-knapp tillbaka + bindning + minimal modal-styrning utan designändring) -->
-
-
-<!-- start SEKTION 3X: FIX – Molnlist-render till #cloudBanksListV4 + återställ knappar + format-migrering (ingen design/CSS/HTML ändras) -->
-<script>
-(function(){
-  "use strict";
-
-  const _id = (x) => document.getElementById(x);
-
-  const LIST_ID = "cloudBanksListV4";
-  const STATUS_ID = "cloudBankStatus"; // finns hos dig enligt din ID-scan
-  const BTN_LOAD_ID = "btnLoadCloudBanks";
-
-  const CLOUD_ROOT_COLLECTION = (window.CLOUD_ROOT_COLLECTION || "teachers");
-  const CLOUD_BANKS_SUBCOLLECTION = (window.CLOUD_BANKS_SUBCOLLECTION || "banks");
-  const PUBLIC_BANKS_COLLECTION = (window.PUBLIC_BANKS_COLLECTION || "public_banks");
-
-  function _getDb(){
-    try{ if (window.firebaseDbInstance) return window.firebaseDbInstance; }catch(e){}
-    try{ if (window.firebaseDb) return window.firebaseDb; }catch(e){}
-    try{ if (window.firebase && window.firebase.firestore) return window.firebase.firestore(); }catch(e){}
-    return null;
-  }
-
-  function _getUser(){
-    try{ if (window.currentTeacherUser) return window.currentTeacherUser; }catch(e){}
-    try{
-      if (window.firebaseAuthInstance && window.firebaseAuthInstance.currentUser) return window.firebaseAuthInstance.currentUser;
-    }catch(e){}
-    return null;
-  }
-
-  function _setStatus(msg){
-    const el = _id(STATUS_ID);
-    if (el) el.textContent = msg;
-  }
-
-  function _escape(s){
-    return String(s ?? "")
-      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-      .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
-  }
-
-  function _activeBankId(){
-    try{
-      if (typeof window.activeCloudBankId !== "undefined" && window.activeCloudBankId !== null) return String(window.activeCloudBankId || "");
-    }catch(e){}
-    try{
-      if (typeof window.loadState === "function"){
-        const s = window.loadState();
-        if (s && s.activeBank && s.activeBank.bankId) return String(s.activeBank.bankId || "");
-      }
-    }catch(e){}
-    return "";
-  }
-
-  function _normalizeQuestions(d){
-    // Försök hitta frågor i gamla format
-    const candidates = [
-      d && d.questions,
-      d && d.items,
-      d && d.bank,
-      d && d.data && d.data.questions,
-      d && d.payload && d.payload.questions
-    ];
-
-    for (const c of candidates){
-      if (Array.isArray(c)) return c;
-      if (c && typeof c === "object" && Array.isArray(c.questions)) return c.questions;
-    }
-    return null;
-  }
-
-  async function _deleteBankFallback(bid){
-    const db = _getDb();
-    const u = _getUser();
-    if (!db || !u) return alert("Saknar inloggning eller databas.");
-
-    const uid = String(u.uid);
-    const bankRef = db.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bid));
-
-    // försök ta bort public-kopia om den finns
-    try{
-      const snap = await bankRef.get();
-      const d = snap.exists ? (snap.data() || {}) : {};
-      const publicId = String(d.publicId || "").trim();
-      if (publicId){
-        try{ await db.collection(PUBLIC_BANKS_COLLECTION).doc(publicId).delete(); }
-        catch(e){ console.warn("Kunde inte ta bort public-banken (ok att ignorera):", e); }
-      }
-    }catch(e){}
-
-    await bankRef.delete();
-
-    // om aktiv – nolla meta
-    try{
-      if (String(_activeBankId()) === String(bid)){
-        try{ window.activeCloudBankId = ""; }catch(e){}
-        if (typeof window.setActiveBankMeta === "function"){
-          window.setActiveBankMeta({ mode:"", ownerUid:"", bankId:"", publicId:"", name:"" });
-        }else if (typeof window.loadState === "function" && typeof window.saveState === "function"){
-          const s = window.loadState();
-          s.activeBank = { mode:"", ownerUid:"", bankId:"", publicId:"", name:"" };
-          window.saveState(s);
-        }
-        if (typeof window.renderActiveBankStatus === "function") window.renderActiveBankStatus();
-        if (typeof window.updateBankStatus === "function") window.updateBankStatus();
-      }
-    }catch(e){}
-  }
-
-  async function _activateBank(bid){
-    const db = _getDb();
-    const u = _getUser();
-    if (!db || !u) return alert("Saknar inloggning eller databas.");
-
-    const uid = String(u.uid);
-    const bankRef = db.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bid));
-    const snap = await bankRef.get();
-    if (!snap.exists) return alert("Hittar inte banken i molnet.");
-
-    const d = snap.data() || {};
-    const name = String(d.name || d.title || ("Bank " + bid));
-
-    // ✅ Migrering: om frågor finns i annan nyckel – skriv tillbaka som `questions`
-    try{
-      const q = _normalizeQuestions(d);
-      if (!Array.isArray(d.questions) && Array.isArray(q) && q.length){
-        await bankRef.update({ questions: q, _migratedAt: Date.now() });
-      }
-    }catch(e){
-      console.warn("Migrering misslyckades (ok att ignorera):", e);
-    }
-
-    // Sätt aktiv meta med befintliga funktioner om de finns
-    try{ window.activeCloudBankId = String(bid); }catch(e){}
-
-    if (typeof window.setActiveBankMeta === "function"){
-      window.setActiveBankMeta({
-        mode: "cloud",
-        ownerUid: uid,
-        bankId: String(bid),
-        publicId: String(d.publicId || ""),
-        name
-      });
-    }else if (typeof window.loadState === "function" && typeof window.saveState === "function"){
-      const s = window.loadState();
-      s.activeBank = {
-        mode: "cloud",
-        ownerUid: uid,
-        bankId: String(bid),
-        publicId: String(d.publicId || ""),
-        name
-      };
-      window.saveState(s);
-    }
-
-    // Uppdatera UI om dina funktioner finns
-    if (typeof window.renderActiveBankStatus === "function") window.renderActiveBankStatus();
-    if (typeof window.updateBankStatus === "function") window.updateBankStatus();
-  }
-
-  async function loadCloudBanksListV4_FIXED(){
-    const listEl = _id(LIST_ID);
-    const db = _getDb();
-    const u = _getUser();
-
-    if (!listEl){
-      _setStatus("⚠️ Hittar inte list-container (#" + LIST_ID + ").");
-      return;
-    }
-    if (!db){
-      _setStatus("⚠️ Firebase DB saknas.");
-      listEl.innerHTML = "";
-      return;
-    }
-    if (!u){
-      _setStatus("☁️ Logga in med Google för att se dina moln-bankar.");
-      listEl.innerHTML = "";
-      return;
-    }
-
-    _setStatus("☁️ Hämtar moln-bankar…");
-    listEl.innerHTML = "";
-
-    let snap;
-    try{
-      // orderBy kan falla om fält saknas, så vi kör safe fallback
-      try{
-        snap = await db
-          .collection(CLOUD_ROOT_COLLECTION).doc(String(u.uid))
-          .collection(CLOUD_BANKS_SUBCOLLECTION)
-          .orderBy("updatedAt","desc")
-          .limit(50).get();
-      }catch(e1){
-        snap = await db
-          .collection(CLOUD_ROOT_COLLECTION).doc(String(u.uid))
-          .collection(CLOUD_BANKS_SUBCOLLECTION)
-          .limit(50).get();
-      }
-    }catch(e){
-      console.error("Kunde inte hämta moln-bankar:", e);
-      _setStatus("⚠️ Kunde inte hämta moln-bankar (permissions/nät).");
-      return;
-    }
-
-    const activeId = _activeBankId();
-    const docs = snap.docs || [];
-    _setStatus("☁️ Moln-bankar: " + docs.length);
-
-    docs.forEach((doc)=>{
-      const d = doc.data() || {};
-      const bid = String(doc.id);
-      const name = String(d.name || d.title || ("Bank " + bid));
-      const isActive = (activeId && String(activeId) === bid);
-
-      // Rendera utan att ändra CSS: använd befintliga klasser du redan haft
-      const row = document.createElement("div");
-      row.className = "question-item" + (isActive ? " cloud-bank-active" : "");
-      row.setAttribute("data-bank-id", bid);
-
-      row.innerHTML = `
-        <div class="list-main">
-          <div class="q-text">${_escape(name)}${isActive ? ' <span class="mini">✅ Aktiv</span>' : ""}</div>
-          <div class="list-actions">
-            <button type="button" class="btn btn-sm" data-act="activate">Aktivera</button>
-            <button type="button" class="btn btn-sm" data-act="roster">👥 Elevlista</button>
-            <button type="button" class="btn btn-sm" data-act="delete">🗑️</button>
-          </div>
+    li.innerHTML = `
+      <div class="list-main">
+        <div class="q-text">
+          ${_fv_escapeHtml(name)}
+          ${isPublic ? ' <span class="mini">Public ✅</span>' : ""}
+          <span class="mini"> • Uppd: ${_fv_escapeHtml(upd)}</span>
+          ${isActive ? ' <span class="mini">✅ Aktiv</span>' : ""}
         </div>
-      `;
+        <div class="mini">
+          ID: ${_fv_escapeHtml(bankId)} • Frågor: ${nMcq} MCQ, ${nImg} Bild, ${nDrag} Drag • Elever: ${studentsN}
+        </div>
+      </div>
+      <div class="fv3-actions">
+        <button class="btn fv3-btn-xs btn-primary" type="button" data-act="activate">Aktivera</button>
+        <button class="btn fv3-btn-xs" type="button" data-act="roster">Elever</button>
+        <button class="btn fv3-btn-xs btn-danger" type="button" data-act="delete">Ta bort</button>
+      </div>
+    `;
 
-      row.addEventListener("click", async (e)=>{
-        const a = e.target && e.target.getAttribute && e.target.getAttribute("data-act");
-        if (!a) return;
+    const btnAct = li.querySelector('[data-act="activate"]');
+    const btnRos = li.querySelector('[data-act="roster"]');
+    const btnDel = li.querySelector('[data-act="delete"]');
 
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (a === "activate"){
-          // om du har egen funktion, använd den; annars fallback
-          if (typeof window.activateCloudBankV4 === "function") return window.activateCloudBankV4(bid);
-          await _activateBank(bid);
-          // re-render för att få tillbaka "grön aktiv"
-          await loadCloudBanksListV4_FIXED();
-          return;
+    if (btnAct){
+      btnAct.addEventListener("click", async ()=>{
+        try{
+          await loadCloudBankToLocal(bankId);
+          await loadCloudBanksListV5();
+        }catch(e){
+          console.error("Kunde inte aktivera bank:", e);
+          alert("Kunde inte aktivera bank. Se konsolen.");
         }
+      });
+    }
 
-        if (a === "delete"){
-          if (!confirm("Ta bort banken '" + name + "'?")) return;
-          if (typeof window.deleteCloudBankV4 === "function") return window.deleteCloudBankV4(bid);
-          await _deleteBankFallback(bid);
-          await loadCloudBanksListV4_FIXED();
-          return;
+    if (btnRos){
+      btnRos.addEventListener("click", ()=>{
+        try{ if (typeof window.openRosterInline === "function") window.openRosterInline(bankId); }catch{}
+      });
+    }
+
+    if (btnDel){
+      btnDel.addEventListener("click", async ()=>{
+        try{
+          if (!confirm("Ta bort denna moln-bank? (Kan inte ångras)")) return;
+          await deleteCloudBankV5(bankId);
+          await loadCloudBanksListV5();
+        }catch(e){
+          console.error("Kunde inte ta bort bank:", e);
+          alert("Kunde inte ta bort bank. Se konsolen.");
         }
+      });
+    }
 
-        if (a === "roster"){
-          // roster brukar öppna på aktiv bank – så aktivera först om det behövs
-          try{
-            if (!isActive) await _activateBank(bid);
-          }catch(e){}
-          if (typeof window.openRosterModal === "function") return window.openRosterModal();
-          if (typeof window.openRosterModalV4 === "function") return window.openRosterModalV4();
-          alert("Hittar ingen openRosterModal-funktion (SEKTION 3D saknas/inte laddad).");
-          return;
-        }
-      }, true);
+    host.appendChild(li);
+  }
 
-      listEl.appendChild(row);
+  _fv_setCloudStatus("");
+}
+
+async function handleSaveToCloudV5(){
+  await initFirebase();
+  if (!_fv_hasDb() || !_fv_hasTeacher()){
+    alert("Logga in med Google först.");
+    return;
+  }
+
+  const uid = String(currentTeacherUser.uid);
+  const banksRef = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION);
+
+  const s = loadState();
+  const desiredName = _fv_getCloudBankNameFromUI() || String(s.activeBank.name || "").trim();
+
+  const hasActive = !!(s.activeBank && String(s.activeBank.bankId||"").trim());
+  const activeName = String(s.activeBank && s.activeBank.name ? s.activeBank.name : "").trim();
+  const shouldCreateNew = !!(desiredName && (!hasActive || desiredName !== activeName));
+
+  const bankPayload = {
+    name: desiredName || "Moln-bank",
+    bank: _fv_ensureBankShape(s.bank || {}),
+    goalsMap: Array.isArray(s.goalsMap) ? s.goalsMap : [],
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+
+  try{
+    if (shouldCreateNew){
+      const newDoc = banksRef.doc();
+      await newDoc.set(Object.assign({}, bankPayload, {
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      }), { merge:true });
+
+      setActiveBankMeta({ mode:"teacher", ownerUid: uid, bankId: newDoc.id, publicId:"", name: bankPayload.name });
+      try{ window.activeCloudBankId = String(newDoc.id); }catch{}
+      alert("Ny bank skapad i molnet.");
+    }else{
+      const bankId = String(s.activeBank.bankId || window.activeCloudBankId || "").trim();
+      if (!bankId){
+        const newDoc = banksRef.doc();
+        await newDoc.set(Object.assign({}, bankPayload, {
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        }), { merge:true });
+        setActiveBankMeta({ mode:"teacher", ownerUid: uid, bankId: newDoc.id, publicId:"", name: bankPayload.name });
+        try{ window.activeCloudBankId = String(newDoc.id); }catch{}
+        alert("Ny bank skapad i molnet.");
+      }else{
+        await banksRef.doc(bankId).set(bankPayload, { merge:true });
+        setActiveBankMeta({ mode:"teacher", ownerUid: uid, bankId, name: bankPayload.name });
+        alert("Bank uppdaterad i molnet.");
+      }
+    }
+
+    try{ await loadCloudBanksListV5(); }catch{}
+    try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
+  }catch(e){
+    console.error("handleSaveToCloudV5 error:", e);
+    alert("Kunde inte spara till molnet. Se konsolen.");
+  }
+}
+
+async function deleteCloudBankV5(bankId){
+  await initFirebase();
+  if (!_fv_hasDb() || !_fv_hasTeacher()) throw new Error("Inte inloggad");
+
+  const uid = String(currentTeacherUser.uid);
+  const bid = String(bankId||"").trim();
+  if (!bid) throw new Error("Saknar bankId");
+
+  const bankRef = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid);
+
+  try{
+    const snap = await bankRef.get();
+    const d = snap.exists ? (snap.data()||{}) : {};
+    const publicId = String(d.publicId||"").trim();
+    if (publicId){
+      try{ await firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(publicId).delete(); }
+      catch(e){ console.warn("Kunde inte ta bort public-banken (ok att ignorera):", e); }
+    }
+  }catch{}
+
+  await bankRef.delete();
+
+  try{
+    const s = loadState();
+    if (String(s.activeBank.bankId||"") === bid){
+      setActiveBankMeta({ mode:"", ownerUid:"", bankId:"", publicId:"", name:"" });
+      try{ window.activeCloudBankId = ""; }catch{}
+    }
+  }catch{}
+}
+
+/* ==============================
+   Slut 3C
+   ============================== */
+
+
+/* ==============================
+   Start 3D – ROSTER: overlay + spara rosterRows/rosterTokens
+   ============================== */
+
+function _fv_genToken(len = 10){
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  const bytes = new Uint8Array(len);
+  (window.crypto || window.msCrypto).getRandomValues(bytes);
+  for (let i = 0; i < len; i++) out += chars[bytes[i] % chars.length];
+  return out;
+}
+
+function _fv_ensureRosterStyles(){
+  if (_fv_getEl("fv-roster-styles")) return;
+  const st = document.createElement("style");
+  st.id = "fv-roster-styles";
+  st.textContent = `
+    .fv-roster-overlay{
+      position:fixed; inset:0; background:rgba(0,0,0,.55);
+      display:flex; align-items:center; justify-content:center;
+      padding:16px; z-index:9999;
+    }
+    .fv-roster-modal{ width:min(980px, 96vw); max-height:85vh; overflow:auto; }
+    .fv-roster-head{ display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .fv-roster-grid{
+      display:grid;
+      grid-template-columns: 1.4fr 1fr 1.6fr 1fr auto;
+      gap:6px; align-items:center; margin-top:8px;
+    }
+    .fv-roster-input{
+      width:100%;
+      border:1px solid rgba(75,85,99,.9);
+      border-radius:10px;
+      background:#0b1220;
+      color:var(--text);
+      padding:6px 8px;
+      font-size:.82rem;
+    }
+    .fv-roster-row{
+      display:grid;
+      grid-template-columns: 1.4fr 1fr 1.6fr 1fr auto;
+      gap:6px; align-items:center;
+      padding:6px 0;
+      border-top:1px solid rgba(31,41,55,.8);
+    }
+    .fv-roster-actions{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; justify-content:flex-end; margin-top:10px; }
+    .fv-roster-status{ margin-top:8px; }
+    @media (max-width: 720px){
+      .fv-roster-grid, .fv-roster-row{ grid-template-columns: 1fr; }
+      .fv-roster-row{ padding:10px 0; }
+    }
+  `;
+  document.head.appendChild(st);
+}
+
+function _fv_buildRosterOverlay(){
+  _fv_ensureRosterStyles();
+  let ov = _fv_getEl("fvRosterOverlay");
+  if (ov) return ov;
+
+  ov = document.createElement("div");
+  ov.id = "fvRosterOverlay";
+  ov.className = "fv-roster-overlay hidden";
+  ov.innerHTML = `
+    <div class="card fv-roster-modal">
+      <div class="fv-roster-head">
+        <div>
+          <div class="q-text" id="fvRosterTitle">Elever</div>
+          <div class="mini" id="fvRosterSub">—</div>
+        </div>
+        <div class="fv-roster-actions">
+          <button class="btn btn-sm" type="button" id="fvRosterAdd">➕ Lägg till elev</button>
+          <button class="btn btn-sm btn-primary" type="button" id="fvRosterSave">💾 Spara elevlista</button>
+          <button class="btn btn-sm btn-danger" type="button" id="fvRosterClose">✖ Stäng</button>
+        </div>
+      </div>
+
+      <div class="fv-roster-grid mini">
+        <div>Namn</div>
+        <div>Klass</div>
+        <div>E-post</div>
+        <div>Token</div>
+        <div></div>
+      </div>
+
+      <div id="fvRosterRows"></div>
+
+      <div class="mini fv-roster-status" id="fvRosterStatus"></div>
+    </div>
+  `;
+  document.body.appendChild(ov);
+
+  ov.addEventListener("click", (e)=>{ if (e.target === ov) _fv_closeRoster(); });
+
+  const btnClose = _fv_getEl("fvRosterClose");
+  const btnAdd = _fv_getEl("fvRosterAdd");
+  const btnSave = _fv_getEl("fvRosterSave");
+
+  if (btnClose && !btnClose.__fvBound){
+    btnClose.__fvBound = true;
+    btnClose.addEventListener("click", _fv_closeRoster);
+  }
+  if (btnAdd && !btnAdd.__fvBound){
+    btnAdd.__fvBound = true;
+    btnAdd.addEventListener("click", ()=>_fv_addRosterRow());
+  }
+  if (btnSave && !btnSave.__fvBound){
+    btnSave.__fvBound = true;
+    btnSave.addEventListener("click", async ()=>{ await _fv_saveRosterFromUI(); });
+  }
+
+  return ov;
+}
+
+function _fv_setRosterStatus(msg){
+  const el = _fv_getEl("fvRosterStatus");
+  if (!el) return;
+  el.textContent = String(msg || "");
+}
+
+function _fv_openRoster(){
+  const ov = _fv_buildRosterOverlay();
+  ov.classList.remove("hidden");
+}
+
+function _fv_closeRoster(){
+  const ov = _fv_getEl("fvRosterOverlay");
+  if (ov) ov.classList.add("hidden");
+}
+
+function _fv_rowTemplate(row){
+  const r = row || {};
+  const wrap = document.createElement("div");
+  wrap.className = "fv-roster-row";
+  wrap.innerHTML = `
+    <input class="fv-roster-input" data-fv="name" type="text" placeholder="Namn" value="${_fv_escapeHtml(String(r.name||""))}">
+    <input class="fv-roster-input" data-fv="klass" type="text" placeholder="Klass" value="${_fv_escapeHtml(String(r.klass||""))}">
+    <input class="fv-roster-input" data-fv="email" type="email" placeholder="E-post" value="${_fv_escapeHtml(String(r.email||""))}">
+    <input class="fv-roster-input" data-fv="token" type="text" placeholder="Token" value="${_fv_escapeHtml(String(r.token||""))}">
+    <div class="fv3-actions" style="justify-content:flex-end">
+      <button class="btn fv3-btn-xs" type="button" data-act="gen">Ny token</button>
+      <button class="btn fv3-btn-xs btn-danger" type="button" data-act="del">Ta bort</button>
+    </div>
+  `;
+
+  const btnGen = wrap.querySelector('[data-act="gen"]');
+  const btnDel = wrap.querySelector('[data-act="del"]');
+
+  if (btnGen){
+    btnGen.addEventListener("click", ()=>{
+      const t = wrap.querySelector('input[data-fv="token"]');
+      if (t) t.value = _fv_genToken(10);
+    });
+  }
+  if (btnDel){
+    btnDel.addEventListener("click", ()=>{
+      wrap.remove();
+      _fv_setRosterStatus("");
     });
   }
 
-  // 🔁 Override (så knappen verkligen gör något)
-  window.loadCloudBanksListV4 = loadCloudBanksListV4_FIXED;
+  return wrap;
+}
 
-  // Bind knappen om den finns
-  const btn = _id(BTN_LOAD_ID);
-  if (btn){
-    btn.addEventListener("click", (e)=>{
-      e.preventDefault();
-      e.stopPropagation();
-      loadCloudBanksListV4_FIXED();
-    }, true);
+function _fv_addRosterRow(prefill){
+  const host = _fv_getEl("fvRosterRows");
+  if (!host) return;
+  host.appendChild(_fv_rowTemplate(prefill || { token: _fv_genToken(10) }));
+}
+
+function _fv_collectRosterFromUI(){
+  const host = _fv_getEl("fvRosterRows");
+  const rows = [];
+  if (!host) return rows;
+
+  const els = Array.from(host.querySelectorAll(".fv-roster-row"));
+  for (let i=0;i<els.length;i++){
+    const rowEl = els[i];
+    const name = String(rowEl.querySelector('input[data-fv="name"]')?.value || "").trim();
+    const klass = String(rowEl.querySelector('input[data-fv="klass"]')?.value || "").trim();
+    const email = String(rowEl.querySelector('input[data-fv="email"]')?.value || "").trim();
+    let token = String(rowEl.querySelector('input[data-fv="token"]')?.value || "").trim();
+
+    if (!token) {
+      token = _fv_genToken(10);
+      const tEl = rowEl.querySelector('input[data-fv="token"]');
+      if (tEl) tEl.value = token;
+    }
+
+    if (!token && !name && !email) continue;
+    rows.push({ token, name, klass, email });
+  }
+  return rows;
+}
+
+function _fv_uniqueTokensFromRows(rows){
+  const out = [];
+  const seen = new Set();
+  for (let i=0;i<rows.length;i++){
+    const t = String(rows[i].token||"").trim();
+    if (!t) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+async function _fv_loadRosterForBank(bankId){
+  await initFirebase();
+  if (!_fv_hasDb() || !_fv_hasTeacher()) throw new Error("Inte inloggad / DB saknas");
+
+  const uid = String(currentTeacherUser.uid);
+  const bid = String(bankId||"").trim();
+  if (!bid) throw new Error("Saknar bankId");
+
+  const ref = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid);
+
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Bank finns inte");
+
+  const d = snap.data() || {};
+  return {
+    bankId: bid,
+    name: String(d.name || d.title || d.bankName || "Moln-bank"),
+    publicId: String(d.publicId || ""),
+    rosterRows: Array.isArray(d.rosterRows) ? d.rosterRows : [],
+    rosterTokens: Array.isArray(d.rosterTokens) ? d.rosterTokens : []
+  };
+}
+
+async function _fv_saveRosterToBank(bankId, rows){
+  await initFirebase();
+  if (!_fv_hasDb() || !_fv_hasTeacher()) throw new Error("Inte inloggad / DB saknas");
+
+  const uid = String(currentTeacherUser.uid);
+  const bid = String(bankId||"").trim();
+  if (!bid) throw new Error("Saknar bankId");
+
+  const cleanRows = Array.isArray(rows) ? rows : [];
+  const tokens = _fv_uniqueTokensFromRows(cleanRows);
+
+  const ref = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid);
+
+  await ref.set({
+    rosterRows: cleanRows,
+    rosterTokens: tokens,
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, { merge:true });
+
+  return { tokensCount: tokens.length };
+}
+
+async function _fv_saveRosterFromUI(){
+  const ov = _fv_getEl("fvRosterOverlay");
+  const bid = ov ? String(ov.getAttribute("data-bank-id")||"").trim() : "";
+  if (!bid){
+    _fv_setRosterStatus("⚠️ Ingen bank vald.");
+    return;
   }
 
+  _fv_setRosterStatus("Sparar...");
+  try{
+    const rows = _fv_collectRosterFromUI();
+    const res = await _fv_saveRosterToBank(bid, rows);
+    _fv_setRosterStatus(`✅ Sparat. Elever: ${res.tokensCount}`);
+
+    try{ await loadCloudBanksListV5(); }catch{}
+    try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
+  }catch(e){
+    console.error("Roster save error:", e);
+    _fv_setRosterStatus("❌ Kunde inte spara elevlista (kontrollera inloggning/behörighet).");
+    alert("Kunde inte spara elevlista. Testa logga in med Google igen.");
+  }
+}
+
+async function openRosterInline(bankId){
+  try{
+    _fv_openRoster();
+    _fv_setRosterStatus("Laddar...");
+
+    const info = await _fv_loadRosterForBank(bankId);
+
+    const ov = _fv_buildRosterOverlay();
+    ov.setAttribute("data-bank-id", String(info.bankId));
+    ov.setAttribute("data-public-id", String(info.publicId||""));
+
+    const t = _fv_getEl("fvRosterTitle");
+    const sub = _fv_getEl("fvRosterSub");
+    if (t) t.textContent = "Elever – " + info.name;
+    if (sub) sub.textContent = `Bank: ${info.bankId}${info.publicId ? " • Public: " + info.publicId : ""}`;
+
+    const host = _fv_getEl("fvRosterRows");
+    if (host) host.innerHTML = "";
+
+    const rows = Array.isArray(info.rosterRows) ? info.rosterRows : [];
+    if (rows.length){
+      for (let i=0;i<rows.length;i++) _fv_addRosterRow(rows[i]);
+    } else {
+      _fv_addRosterRow({ token: _fv_genToken(10) });
+    }
+
+    _fv_setRosterStatus(`Redo. (${rows.length || 1} rader)`);
+  }catch(e){
+    console.error("openRosterInline error:", e);
+    _fv_setRosterStatus("❌ Kunde inte ladda elevlista (kontrollera inloggning/behörighet).");
+    alert("Kunde inte ladda elevlista. Testa logga in med Google igen.");
+  }
+}
+
+/* ==============================
+   Slut 3D
+   ============================== */
+
+
+/* ==============================
+   Start 3E – PROGRESSIONSFLIK: rosterTabs + elevdocs
+   ============================== */
+
+const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-v17";
+const _fvTeacherStudentCache = Object.create(null);
+
+function _fv_getSelectedToken(){
+  try{ return String(localStorage.getItem(_fvTeacherSelectedTokenKey)||""); }catch{ return ""; }
+}
+function _fv_setSelectedToken(t){
+  try{ localStorage.setItem(_fvTeacherSelectedTokenKey, String(t||"")); }catch{}
+}
+
+function _fv_getRosterTabsHost(){
+  const div = _fv_getEl("playedStudentsTabs");
+  if (div) return div;
+
+  const ul = _fv_getEl("playedStudentsList");
+  if (ul) return ul;
+
+  return null;
+}
+
+function _fv_getActiveStudentsCollectionRef(){
+  if (!_fv_hasDb()) return null;
+  const s = loadState();
+  const a = s.activeBank || {};
+
+  if (a.publicId && String(a.publicId).trim()){
+    return firebaseDbInstance.collection(PUBLIC_BANKS_COLLECTION).doc(String(a.publicId)).collection("students");
+  }
+  if (a.ownerUid && a.bankId){
+    return firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION).doc(String(a.ownerUid))
+      .collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(a.bankId))
+      .collection("students");
+  }
+  if (_fv_hasTeacher() && String(window.activeCloudBankId||"").trim()){
+    return firebaseDbInstance
+      .collection(CLOUD_ROOT_COLLECTION).doc(String(currentTeacherUser.uid))
+      .collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(window.activeCloudBankId))
+      .collection("students");
+  }
+  return null;
+}
+
+async function _fv_fetchRosterFromActiveBank(){
+  await initFirebase();
+  if (!_fv_hasDb() || !_fv_hasTeacher()) return { rows: [], tokens: [], publicId: "" };
+
+  const s = loadState();
+  const bankId = String(s.activeBank.bankId || window.activeCloudBankId || "").trim();
+  if (!bankId) return { rows: [], tokens: [], publicId: "" };
+
+  const ref = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(String(currentTeacherUser.uid))
+    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bankId));
+
+  const snap = await ref.get();
+  if (!snap.exists) return { rows: [], tokens: [], publicId: "" };
+
+  const d = snap.data() || {};
+  const rows = Array.isArray(d.rosterRows) ? d.rosterRows : [];
+  const tokens = Array.isArray(d.rosterTokens) ? d.rosterTokens.map(String).filter(t=>String(t||"").trim()) : [];
+  const publicId = String(d.publicId || "");
+
+  return { rows, tokens, publicId };
+}
+
+function _fv_normRosterEntry(x){
+  const e = x || {};
+  const token = String(e.token || e.id || e.code || e.studentToken || "").trim();
+  const name = String(e.name || e.studentName || e.namn || "").trim();
+  const klass = String(e.klass || e.class || e.studentClass || e.klassnamn || "").trim();
+  if (!token && !name) return null;
+  return { token, name, klass };
+}
+
+function _fv_buildRosterTabs(roster){
+  const rows = Array.isArray(roster.rows) ? roster.rows : [];
+  const tokens = Array.isArray(roster.tokens) ? roster.tokens : [];
+
+  const byToken = Object.create(null);
+  for (let i=0;i<rows.length;i++){
+    const r = _fv_normRosterEntry(rows[i]);
+    if (!r || !r.token) continue;
+    byToken[r.token] = r;
+  }
+
+  const out = [];
+  for (let i=0;i<tokens.length;i++){
+    const t = String(tokens[i]||"").trim();
+    if (!t) continue;
+    const hit = byToken[t] || { token:t, name:"", klass:"" };
+    out.push({
+      token: t,
+      name: hit.name || ("Token " + t),
+      klass: hit.klass || ""
+    });
+  }
+
+  out.sort((a,b)=> String(a.name).localeCompare(String(b.name)));
+  return out;
+}
+
+function _fv_renderRosterTabs(tabs){
+  const host = _fv_getRosterTabsHost();
+  if (!host) return;
+
+  host.innerHTML = "";
+
+  if (!tabs.length){
+    const span = document.createElement("span");
+    span.className = "mini";
+    span.textContent = "Ingen elevlista (rosterTokens) finns i denna bank ännu.";
+    host.appendChild(span);
+    return;
+  }
+
+  const sel = _fv_getSelectedToken();
+  for (let i=0;i<tabs.length;i++){
+    const t = tabs[i];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tab-btn" + (sel && sel === t.token ? " active" : "");
+    btn.setAttribute("data-token", t.token);
+    btn.innerHTML = `${_fv_escapeHtml(t.name)}${t.klass ? `<span class="mini"> (${_fv_escapeHtml(t.klass)})</span>` : ""}`;
+    host.appendChild(btn);
+  }
+
+  if (!host.__fvBound){
+    host.__fvBound = true;
+    host.addEventListener("click", (ev)=>{
+      const btn = ev.target && ev.target.closest ? ev.target.closest("button[data-token]") : null;
+      if (!btn) return;
+      const token = String(btn.getAttribute("data-token")||"");
+      if (!token) return;
+      trySelectStudentToken(token);
+    });
+  }
+}
+
+async function _fv_fetchStudentDoc(token){
+  const ref = _fv_getActiveStudentsCollectionRef();
+  if (!ref) return null;
+  const t = String(token||"").trim();
+  if (!t) return null;
+
+  try{
+    const snap = await ref.doc(t).get();
+    if (!snap || !snap.exists) return null;
+    const d = snap.data() || {};
+    d._token = t;
+    return d;
+  }catch(e){
+    console.warn("Kunde inte läsa elevdoc:", e);
+    return { _token: t, _error: "permissions" };
+  }
+}
+
+function _fv_safeNum(n, fallback=0){
+  const x = Number(n);
+  return isFinite(x) ? x : fallback;
+}
+
+function _fv_getProgressionFromRemote(d){
+  const prog = (d && d.progression) ? d.progression : (d && d.prog) ? d.prog : {};
+  return {
+    totalPoints: _fv_safeNum(prog.totalPoints != null ? prog.totalPoints : (d.totalPoints != null ? d.totalPoints : d.points), 0),
+    correctByGoalId: (prog.correctByGoalId && typeof prog.correctByGoalId==="object") ? prog.correctByGoalId : (d.correctByGoalId||{}),
+    wrongByGoalId: (prog.wrongByGoalId && typeof prog.wrongByGoalId==="object") ? prog.wrongByGoalId : (d.wrongByGoalId||{})
+  };
+}
+
+function _fv_renderUl(ul, items, emptyText){
+  if (!ul) return;
+  const arr = Array.isArray(items) ? items : [];
+  ul.innerHTML = "";
+  if (!arr.length){
+    const li = document.createElement("li");
+    li.textContent = emptyText || "Ingen data ännu.";
+    ul.appendChild(li);
+    return;
+  }
+  for (let i=0;i<arr.length;i++){
+    const li = document.createElement("li");
+    li.innerHTML = items[i];
+    ul.appendChild(li);
+  }
+}
+
+function _fv_computeStrongWeak(goalsMap, prog){
+  const gm = Array.isArray(goalsMap) ? goalsMap : [];
+  const corr = (prog && prog.correctByGoalId) ? prog.correctByGoalId : {};
+  const wrong = (prog && prog.wrongByGoalId) ? prog.wrongByGoalId : {};
+
+  const gmIndex = Object.create(null);
+  for (let i=0;i<gm.length;i++){
+    const g = gm[i] || {};
+    gmIndex[String(g.id)] = g;
+  }
+
+  const keys = new Set();
+  Object.keys(corr||{}).forEach(k=>keys.add(String(k)));
+  Object.keys(wrong||{}).forEach(k=>keys.add(String(k)));
+
+  const rows = [];
+  keys.forEach((k)=>{
+    const c = _fv_safeNum(corr[k],0);
+    const w = _fv_safeNum(wrong[k],0);
+    const a = c+w;
+    if (a<=0) return;
+
+    const g = gmIndex[k] || {};
+    const goal = String(g.goal||"").trim();
+    const parts = String(g.parts||g.part||"").trim();
+    const label = (goal || parts) ? `${_fv_escapeHtml(goal)} — ${_fv_escapeHtml(parts)}`.trim() : `Delbit-id: ${_fv_escapeHtml(k)}`;
+    rows.push({ label, c, w, a, acc: a ? c/a : 0 });
+  });
+
+  const strong = rows.filter(r=>r.c>=r.w).sort((a,b)=> (b.acc-a.acc)||(b.a-a.a)).slice(0,10)
+    .map(r=>`${r.label} <span class="mini">(${r.c}/${r.a} rätt)</span>`);
+  const weak = rows.filter(r=>r.w>r.c).sort((a,b)=> (a.acc-b.acc)||(b.a-a.a)).slice(0,10)
+    .map(r=>`${r.label} <span class="mini">(${r.c}/${r.a} rätt)</span>`);
+  return { strong, weak };
+}
+
+function tryUpdateProgressUI(){
+  const pEl = _fv_getEl("progressPointsText");
+  const strongUl = _fv_getEl("progressStrongList");
+  const weakUl = _fv_getEl("progressWeakList");
+
+  const token = _fv_getSelectedToken();
+  const remote = token ? (_fvTeacherStudentCache[token] || null) : null;
+
+  if (!token){
+    if (pEl) pEl.innerHTML = "Välj en elevflik.";
+    _fv_renderUl(strongUl, [], "—");
+    _fv_renderUl(weakUl, [], "—");
+    return;
+  }
+
+  if (!remote){
+    if (pEl) pEl.innerHTML = "Ingen inlämning ännu för vald elev.";
+    _fv_renderUl(strongUl, [], "Ingen data ännu.");
+    _fv_renderUl(weakUl, [], "Ingen data ännu.");
+    return;
+  }
+
+  if (remote && remote._error === "permissions"){
+    if (pEl) pEl.innerHTML = "⚠️ Behörighet saknas för att läsa elevdata (kontrollera Firestore rules).";
+    _fv_renderUl(strongUl, [], "—");
+    _fv_renderUl(weakUl, [], "—");
+    return;
+  }
+
+  const sTeacher = loadState();
+  const prog = _fv_getProgressionFromRemote(remote);
+  const total = _fv_safeNum(prog.totalPoints, 0);
+
+  if (pEl) pEl.innerHTML = `Totalt: <strong>${_fv_escapeHtml(total)} p</strong>.`;
+
+  const gm = Array.isArray(sTeacher.goalsMap) ? sTeacher.goalsMap : [];
+  const { strong, weak } = _fv_computeStrongWeak(gm, prog);
+
+  _fv_renderUl(strongUl, strong, "Inga starka delbitar inlästa ännu.");
+  _fv_renderUl(weakUl, weak, "Inga svaga delbitar inlästa ännu.");
+}
+
+async function trySelectStudentToken(token){
+  const t = String(token||"").trim();
+  if (!t) return;
+
+  _fv_setSelectedToken(t);
+
+  try{
+    const host = _fv_getRosterTabsHost();
+    if (host){
+      Array.from(host.querySelectorAll("button[data-token]")).forEach(b=>{
+        b.classList.toggle("active", String(b.getAttribute("data-token")||"") === t);
+      });
+    }
+  }catch{}
+
+  if (_fvTeacherStudentCache[t]){
+    tryUpdateProgressUI();
+    return;
+  }
+
+  try{
+    const data = await _fv_fetchStudentDoc(t);
+    if (data) _fvTeacherStudentCache[t] = data;
+  }catch(e){
+    console.warn("Kunde inte läsa elevdoc:", e);
+  }
+
+  tryUpdateProgressUI();
+}
+
+async function tryRefreshRosterTabs(){
+  try{
+    const roster = await _fv_fetchRosterFromActiveBank();
+
+    if (roster && roster.publicId){
+      const s = loadState();
+      if (String(s.activeBank.bankId||"").trim()){
+        setActiveBankMeta(Object.assign({}, s.activeBank, { publicId: String(roster.publicId||"") }));
+      }
+    }
+
+    const tabs = _fv_buildRosterTabs(roster);
+    _fv_renderRosterTabs(tabs);
+
+    const sel = _fv_getSelectedToken();
+    if (!sel && tabs.length) trySelectStudentToken(tabs[0].token);
+    if (sel && tabs.length && !tabs.find(x=>x.token===sel)) trySelectStudentToken(tabs[0].token);
+  }catch(e){
+    console.warn("Kunde inte läsa roster för flikar:", e);
+  }
+}
+
+/* ==============================
+   Slut 3E
+   ============================== */
+
+
+/* ==============================
+   Start 3F – UI refresh: goals-select + bankstatus hook
+   ============================== */
+
+function _fv_refreshGoalSelects(){
+  const ids = ["mcqGoalPart","mcqJsonGoalPart","imgGoalPart","dragGoalPart"];
+  const s = loadState();
+  const gm = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+
+  for (let k=0;k<ids.length;k++){
+    const sel = _fv_getEl(ids[k]);
+    if (!sel || sel.tagName.toLowerCase() !== "select") continue;
+
+    const prev = String(sel.value || "");
+    sel.innerHTML = "";
+
+    const def = document.createElement("option");
+    def.value = "";
+    def.textContent = "Ingen koppling";
+    sel.appendChild(def);
+
+    for (let i=0;i<gm.length;i++){
+      const g = gm[i] || {};
+      const opt = document.createElement("option");
+      opt.value = String(g.id||"");
+      const goal = String(g.goal||"").trim();
+      const parts = String(g.parts||g.part||"").trim();
+      opt.textContent = (goal ? goal : "Delmål") + (parts ? ` (${parts})` : "");
+      sel.appendChild(opt);
+    }
+
+    try{ sel.value = prev; }catch{}
+  }
+}
+
+function fvRefreshTeacherBankUI(){
+  try{ _fv_refreshGoalSelects(); }catch{}
+  try{ _fv3h_renderAllQuestionLists(); }catch{}
+  try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch{}
+}
+
+try{ window.fvRefreshTeacherBankUI = fvRefreshTeacherBankUI; }catch{}
+
+try{
+  if (!window.__fv_bank_changed_listener){
+    window.__fv_bank_changed_listener = true;
+    window.addEventListener("fv-bank-changed", ()=>{
+      try{ fvRefreshTeacherBankUI(); }catch{}
+      try{ tryRefreshRosterTabs(true); }catch{}
+    });
+  }
+}catch{}
+
+/* ==============================
+   Slut 3F
+   ============================== */
+
+
+/* ==============================
+   Start 3G – BUTTON BIND: gör att knapparna fungerar även om annan bind saknas
+   ============================== */
+
+function _fv_bindOnce(btn, fn){
+  if (!btn) return;
+  if (btn.__fvBound) return;
+  btn.__fvBound = true;
+  btn.addEventListener("click", fn);
+}
+
+function _fv_tryBindButtons(){
+  _fv_bindOnce(_fv_getEl("btnGoogleLogin"), handleGoogleLogin);
+  _fv_bindOnce(_fv_getEl("btnGoogleLogout"), handleGoogleLogout);
+
+  const btnLoad = _fv_getEl("btnLoadCloudBanks") || _fv_getEl("btnCloudBanksLoad") || _fv_getEl("btnLoadBanks");
+  _fv_bindOnce(btnLoad, ()=>{
+    try{ loadCloudBanksListV5(); }catch(e){ console.warn(e); }
+  });
+
+  const btnSave = _fv_getEl("btnSaveToCloud") || _fv_getEl("btnSaveCloud") || _fv_getEl("btnSaveCloudBank");
+  _fv_bindOnce(btnSave, ()=>{
+    try{ handleSaveToCloudV5(); }catch(e){ console.warn(e); }
+  });
+
+  const btnRoster = _fv_getEl("btnOpenRoster");
+  _fv_bindOnce(btnRoster, ()=>{
+    const s = loadState();
+    const bid = String(s.activeBank.bankId || window.activeCloudBankId || "").trim();
+    if (!bid){ alert("Ingen aktiv bank vald."); return; }
+    openRosterInline(bid);
+  });
+}
+
+/* ==============================
+   Slut 3G
+   ============================== */
+
+
+/* ==============================
+   Start 3H – LISTRENDER (MCQ/IMG/DRAG) + MINIATYR + STABIL DRAG-VISNING
+   ============================== */
+
+(function FV3H_EnsureStyles(){
+  if (document.getElementById("fv3h-qstyles")) return;
+  const st = document.createElement("style");
+  st.id = "fv3h-qstyles";
+  st.textContent = `
+    .fv3h-qrow{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; }
+    .fv3h-left{ display:flex; gap:10px; align-items:flex-start; min-width:0; flex:1; }
+    .fv3h-thumb{ width:44px; height:44px; border-radius:10px; border:1px solid rgba(75,85,99,.85); object-fit:cover; background:#0b1220; flex:0 0 auto; }
+    .fv3h-thumb-ph{ width:44px; height:44px; border-radius:10px; border:1px solid rgba(75,85,99,.85); background:#0b1220; display:flex; align-items:center; justify-content:center; font-size:.75rem; color:var(--muted); flex:0 0 auto; }
+    .fv3h-main{ min-width:0; flex:1; }
+    .fv3h-title{ font-weight:600; line-height:1.25; word-break:break-word; }
+    .fv3h-meta{ margin-top:4px; opacity:.92; }
+    .fv3h-actions{ display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; flex:0 0 auto; }
+    .fv3h-chips{ display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+    .fv3h-chip{ border:1px solid rgba(75,85,99,.85); background:#0b1220; color:var(--text); border-radius:999px; padding:3px 8px; font-size:.74rem; white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+    .fv3h-chip b{ font-weight:700; }
+  `;
+  document.head.appendChild(st);
 })();
+
+function _fv3h_safeArr(x){ return Array.isArray(x) ? x : []; }
+function _fv3h_txt(x){ return (x == null) ? "" : String(x); }
+
+function _fv3h_levelTag(q){
+  const lv = _fv3h_txt(q && (q.level || q.lv || q.niva || q.grade) || "").toUpperCase().trim();
+  return (lv === "E" || lv === "C" || lv === "A") ? lv : (lv || "-");
+}
+
+function _fv3h_goalTag(q){
+  const gp = _fv3h_txt(q && (
+    q.goalPart || q.goalpart || q.goalPartId || q.goalId ||
+    q.goalPartKey || q.goalPartRef || q.goalPartLabel ||
+    q.goalPartText || q.goalPartValue
+  ) || "").trim();
+  return gp ? gp : "";
+}
+
+function _fv3h_imgSrc(q){
+  const cand = [
+    q && q.imgData, q && q.img, q && q.image, q && q.dataUrl, q && q.url, q && q.src, q && q.fileData
+  ];
+  for (let i=0;i<cand.length;i++){
+    const s = _fv3h_txt(cand[i]).trim();
+    if (s && (s.startsWith("data:image/") || s.startsWith("http") || s.startsWith("blob:"))) return s;
+  }
+  return "";
+}
+
+function _fv3h_dragCols(q){
+  const c1 = _fv3h_txt(q && (q.col1 || q.column1 || (q.columns && q.columns[0]) || (q.cols && q.cols[0])) || "").trim();
+  const c2 = _fv3h_txt(q && (q.col2 || q.column2 || (q.columns && q.columns[1]) || (q.cols && q.cols[1])) || "").trim();
+  return { c1: c1 || "Kolumn 1", c2: c2 || "Kolumn 2" };
+}
+
+function _fv3h_dragItems(q){
+  const items = _fv3h_safeArr(q && (q.items || q.dragItems || q.cards || q.words));
+  const out = [];
+  for (let i=0;i<items.length;i++){
+    const it = items[i] || {};
+    const text = _fv3h_txt(it.text || it.label || it.word || it.value || it.item || "").trim();
+    const correct = (typeof it.correct !== "undefined") ? it.correct
+                  : (typeof it.target !== "undefined") ? it.target
+                  : (typeof it.col !== "undefined") ? it.col
+                  : (typeof it.column !== "undefined") ? it.column
+                  : (typeof it.to !== "undefined") ? it.to
+                  : 0;
+    if (!text) continue;
+    out.push({ text, correct: Number(correct) || 0 });
+  }
+  return out;
+}
+
+function _fv3h_delFromBank(kind, idx){
+  try{
+    const st = loadState();
+    st.bank = _fv_ensureBankShape(st.bank);
+    if (!st.bank[kind] || !Array.isArray(st.bank[kind])) st.bank[kind] = [];
+    st.bank[kind].splice(idx,1);
+    saveState(st);
+  }catch(e){
+    console.warn("Kunde inte ta bort:", e);
+  }
+}
+
+function _fv3h_renderMcqList(){
+  const ul = _fv_getEl("mcqList");
+  const countEl = _fv_getEl("mcqCount");
+  if (!ul) return;
+
+  const s = loadState();
+  const bank = _fv_ensureBankShape(s.bank);
+  const arr = _fv3h_safeArr(bank.mcq);
+
+  if (countEl) countEl.textContent = String(arr.length);
+  ul.innerHTML = "";
+
+  if (!arr.length){
+    const li = document.createElement("li");
+    li.className = "question-item";
+    li.innerHTML = `<div class="mini">Inga flervalsfrågor ännu.</div>`;
+    ul.appendChild(li);
+    return;
+  }
+
+  for (let i=0;i<arr.length;i++){
+    const q = arr[i] || {};
+    const lv = _fv3h_levelTag(q);
+    const text = _fv3h_txt(q.q || q.question || q.text || "").trim() || "(utan fråga)";
+    const gp = _fv3h_goalTag(q);
+
+    const li = document.createElement("li");
+    li.className = "question-item";
+    li.innerHTML = `
+      <div class="fv3h-qrow">
+        <div class="fv3h-left">
+          <div class="fv3h-thumb-ph">MCQ</div>
+          <div class="fv3h-main">
+            <div class="fv3h-title">${_fv_escapeHtml(text)}</div>
+            <div class="mini fv3h-meta">Nivå: <b>${_fv_escapeHtml(lv)}</b>${gp ? ` • Delbit: ${_fv_escapeHtml(gp)}` : ""}</div>
+          </div>
+        </div>
+        <div class="fv3h-actions">
+          <button class="btn btn-sm btn-danger" type="button" data-fv3h="mcq-del" data-idx="${i}">Ta bort</button>
+        </div>
+      </div>
+    `;
+    ul.appendChild(li);
+  }
+
+  if (!ul.__fv3hBound){
+    ul.__fv3hBound = true;
+    ul.addEventListener("click", (ev)=>{
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-fv3h="mcq-del"]') : null;
+      if (!btn) return;
+      const idx = Number(btn.getAttribute("data-idx")||"-1");
+      if (!isFinite(idx) || idx < 0) return;
+      if (!confirm("Ta bort denna flervalsfråga?")) return;
+      _fv3h_delFromBank("mcq", idx);
+      _fv3h_renderAllQuestionLists();
+      try{ if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI(); }catch{}
+    });
+  }
+}
+
+function _fv3h_renderImgList(){
+  const ul = _fv_getEl("imgList");
+  const countEl = _fv_getEl("imgCount");
+  if (!ul) return;
+
+  const s = loadState();
+  const bank = _fv_ensureBankShape(s.bank);
+  const arr = _fv3h_safeArr(bank.img);
+
+  if (countEl) countEl.textContent = String(arr.length);
+  ul.innerHTML = "";
+
+  if (!arr.length){
+    const li = document.createElement("li");
+    li.className = "question-item";
+    li.innerHTML = `<div class="mini">Inga bildfrågor ännu.</div>`;
+    ul.appendChild(li);
+    return;
+  }
+
+  for (let i=0;i<arr.length;i++){
+    const q = arr[i] || {};
+    const lv = _fv3h_levelTag(q);
+    const text = _fv3h_txt(q.q || q.question || q.text || "").trim() || "(utan fråga)";
+    const gp = _fv3h_goalTag(q);
+    const src = _fv3h_imgSrc(q);
+
+    const thumbHtml = src
+      ? `<img class="fv3h-thumb" src="${_fv_escapeHtml(src)}" alt="Miniatyr">`
+      : `<div class="fv3h-thumb-ph">IMG</div>`;
+
+    const li = document.createElement("li");
+    li.className = "question-item";
+    li.innerHTML = `
+      <div class="fv3h-qrow">
+        <div class="fv3h-left">
+          ${thumbHtml}
+          <div class="fv3h-main">
+            <div class="fv3h-title">${_fv_escapeHtml(text)}</div>
+            <div class="mini fv3h-meta">Nivå: <b>${_fv_escapeHtml(lv)}</b>${gp ? ` • Delbit: ${_fv_escapeHtml(gp)}` : ""}</div>
+          </div>
+        </div>
+        <div class="fv3h-actions">
+          <button class="btn btn-sm btn-danger" type="button" data-fv3h="img-del" data-idx="${i}">Ta bort</button>
+        </div>
+      </div>
+    `;
+    ul.appendChild(li);
+  }
+
+  if (!ul.__fv3hBound){
+    ul.__fv3hBound = true;
+    ul.addEventListener("click", (ev)=>{
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-fv3h="img-del"]') : null;
+      if (!btn) return;
+      const idx = Number(btn.getAttribute("data-idx")||"-1");
+      if (!isFinite(idx) || idx < 0) return;
+      if (!confirm("Ta bort denna bildfråga?")) return;
+      _fv3h_delFromBank("img", idx);
+      _fv3h_renderAllQuestionLists();
+      try{ if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI(); }catch{}
+    });
+  }
+}
+
+function _fv3h_renderDragList(){
+  const ul = _fv_getEl("dragList");
+  const countEl = _fv_getEl("dragCount");
+  if (!ul) return;
+
+  const s = loadState();
+  const bank = _fv_ensureBankShape(s.bank);
+  const arr = _fv3h_safeArr(bank.drag);
+
+  if (countEl) countEl.textContent = String(arr.length);
+  ul.innerHTML = "";
+
+  if (!arr.length){
+    const li = document.createElement("li");
+    li.className = "question-item";
+    li.innerHTML = `<div class="mini">Inga drag & drop-frågor ännu.</div>`;
+    ul.appendChild(li);
+    return;
+  }
+
+  for (let i=0;i<arr.length;i++){
+    const q = arr[i] || {};
+    const lv = _fv3h_levelTag(q);
+    const text = _fv3h_txt(q.q || q.question || q.text || q.instruction || q.prompt || "").trim() || "(utan instruktion)";
+    const gp = _fv3h_goalTag(q);
+
+    const cols = _fv3h_dragCols(q);
+    const items = _fv3h_dragItems(q);
+
+    const chips = items.map(it=>{
+      const colName = (Number(it.correct)||0) === 1 ? cols.c2 : cols.c1;
+      return `<span class="fv3h-chip"><b>${_fv_escapeHtml(it.text)}</b> → ${_fv_escapeHtml(colName)}</span>`;
+    }).join("");
+
+    const li = document.createElement("li");
+    li.className = "question-item";
+    li.innerHTML = `
+      <div class="fv3h-qrow">
+        <div class="fv3h-left">
+          <div class="fv3h-thumb-ph">D&amp;D</div>
+          <div class="fv3h-main">
+            <div class="fv3h-title">${_fv_escapeHtml(text)}</div>
+            <div class="mini fv3h-meta">
+              Nivå: <b>${_fv_escapeHtml(lv)}</b>
+              • Kolumner: <b>${_fv_escapeHtml(cols.c1)}</b> / <b>${_fv_escapeHtml(cols.c2)}</b>
+              • Objekt: <b>${items.length}</b>
+              ${gp ? ` • Delbit: ${_fv_escapeHtml(gp)}` : ""}
+            </div>
+            <div class="fv3h-chips">${chips || `<span class="mini">Inga objekt i frågan ännu.</span>`}</div>
+          </div>
+        </div>
+        <div class="fv3h-actions">
+          <button class="btn btn-sm btn-danger" type="button" data-fv3h="drag-del" data-idx="${i}">Ta bort</button>
+        </div>
+      </div>
+    `;
+    ul.appendChild(li);
+  }
+
+  if (!ul.__fv3hBound){
+    ul.__fv3hBound = true;
+    ul.addEventListener("click", (ev)=>{
+      const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-fv3h="drag-del"]') : null;
+      if (!btn) return;
+      const idx = Number(btn.getAttribute("data-idx")||"-1");
+      if (!isFinite(idx) || idx < 0) return;
+      if (!confirm("Ta bort denna drag & drop-fråga?")) return;
+      _fv3h_delFromBank("drag", idx);
+      _fv3h_renderAllQuestionLists();
+      try{ if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI(); }catch{}
+    });
+  }
+}
+
+function _fv3h_renderAllQuestionLists(){
+  try{ _fv3h_renderMcqList(); }catch(e){ console.warn("MCQ render fail:", e); }
+  try{ _fv3h_renderImgList(); }catch(e){ console.warn("IMG render fail:", e); }
+  try{ _fv3h_renderDragList(); }catch(e){ console.warn("DRAG render fail:", e); }
+}
+
+/* Auto-refresh triggers */
+(function FV3H_BindAutoRefresh(){
+  try{ window.__fv3h_renderAllQuestionLists = _fv3h_renderAllQuestionLists; }catch{}
+
+  try{
+    if (!window.__fv3h_docClickBound){
+      window.__fv3h_docClickBound = true;
+      document.addEventListener("click", (ev)=>{
+        const t = ev.target;
+        if (!t) return;
+        const btn = (t.closest && t.closest("button")) ? t.closest("button") : t;
+        const id = btn && btn.id ? String(btn.id) : "";
+        const hits = new Set([
+          "btnMcqAdd","btnMcqUpdate","btnMcqClear","btnMcqJsonImport",
+          "btnImgAdd","btnImgClear",
+          "btnDragAddQuestion","btnDragClearForm","btnDragAddItem",
+          "btnLoadCloudBanks","btnSaveToCloud","btnSaveCloud","btnSaveCloudBank"
+        ]);
+        if (hits.has(id)){
+          setTimeout(_fv3h_renderAllQuestionLists, 60);
+          try{ setTimeout(()=>{ if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI(); }, 80); }catch{}
+        }
+      }, true);
+    }
+  }catch{}
+
+  try{
+    const fi = _fv_getEl("fileImport");
+    if (fi && !fi.__fv3hBound){
+      fi.__fv3hBound = true;
+      fi.addEventListener("change", ()=>{ setTimeout(_fv3h_renderAllQuestionLists, 120); });
+    }
+  }catch{}
+})();
+
+/* ==============================
+   Slut 3H
+   ============================== */
+
+
+/* ==============================
+   Start 3I – OVERRIDE/EXPORT: säkra globala API-namn
+   ============================== */
+
+(function FV3_OverrideAPIs(){
+  try{
+    window.initFirebase = initFirebase;
+
+    window.handleGoogleLogin = handleGoogleLogin;
+    window.handleGoogleLogout = handleGoogleLogout;
+
+    window.loadCloudBanksListV5 = loadCloudBanksListV5;
+    window.loadCloudBanksListV4 = loadCloudBanksListV5;
+    window.loadCloudBanksList = loadCloudBanksListV5;
+    window.handleLoadCloudBanks = loadCloudBanksListV5;
+
+    window.handleSaveToCloud = handleSaveToCloudV5;
+    window.handleSaveToCloudV5 = handleSaveToCloudV5;
+
+    window.deleteCloudBank = deleteCloudBankV5;
+    window.deleteCloudBankV5 = deleteCloudBankV5;
+
+    window.openRosterInline = openRosterInline;
+
+    window.tryRefreshRosterTabs = tryRefreshRosterTabs;
+    window.trySelectStudentToken = trySelectStudentToken;
+    window.tryUpdateProgressUI = tryUpdateProgressUI;
+
+    window.fvRefreshTeacherBankUI = fvRefreshTeacherBankUI;
+  }catch{}
+})();
+
+/* ==============================
+   Slut 3I
+   ============================== */
+
+
+/* ==============================
+   Start 3Z – INIT: bind + initFirebase + första render
+   ============================== */
+
+(function FV3_Init(){
+  try{
+    if (!window.__fv3_init_bound){
+      window.__fv3_init_bound = true;
+
+      document.addEventListener("DOMContentLoaded", ()=>{
+        try{ _fv_tryBindButtons(); }catch{}
+        try{ initFirebase(); }catch{}
+        try{
+          setTimeout(()=>{
+            try{ fvRefreshTeacherBankUI(); }catch{}
+            try{ tryRefreshRosterTabs(true); }catch{}
+          }, 60);
+        }catch{}
+      });
+
+      if (document.readyState === "interactive" || document.readyState === "complete"){
+        setTimeout(()=>{
+          try{ _fv_tryBindButtons(); }catch{}
+          try{ initFirebase(); }catch{}
+          try{ fvRefreshTeacherBankUI(); }catch{}
+          try{ tryRefreshRosterTabs(true); }catch{}
+        }, 60);
+      }
+    }
+  }catch{}
+})();
+
+/* ==============================
+   Slut 3Z
+   ============================== */
+
 </script>
-<!-- slut SEKTION 3X: FIX – Molnlist-render till #cloudBanksListV4 + återställ knappar + format-migrering (ingen design/CSS/HTML ändras) -->
-
-
-<!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker, roster & moln-lista) -->
+<!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker, roster, progression, editor-refresh) -->
 
 
 
