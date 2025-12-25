@@ -3016,7 +3016,7 @@ async function openRosterInline(bankId){
 
 
 
-/* start Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) */
+<!-- start Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) -->
 
 const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-v17";
 const _fvTeacherStudentCache = Object.create(null);
@@ -3169,6 +3169,57 @@ function _fv_safeNum(n, fallback=0){
   return isFinite(x) ? x : fallback;
 }
 
+/* FIX: stöd för “dotted keys” som råkar sparas som top-level keys i elevdoc (t.ex. "progression.attemptsByLevel.E") */
+function _fv_readDottedKeyNum(d, key, fallback=0){
+  try{
+    if (!d || typeof d !== "object") return fallback;
+    if (!Object.prototype.hasOwnProperty.call(d, key)) return fallback;
+    return _fv_safeNum(d[key], fallback);
+  }catch{
+    return fallback;
+  }
+}
+function _fv_readDottedKeyAny(d, key){
+  try{
+    if (!d || typeof d !== "object") return undefined;
+    if (!Object.prototype.hasOwnProperty.call(d, key)) return undefined;
+    return d[key];
+  }catch{
+    return undefined;
+  }
+}
+function _fv_normalizeDottedProgressionIntoObject(d){
+  try{
+    if (!d || typeof d !== "object") return d;
+    if (!d.progression || typeof d.progression !== "object") d.progression = {};
+    const p = d.progression;
+
+    const e = _fv_readDottedKeyNum(d, "progression.attemptsByLevel.E", 0);
+    const c = _fv_readDottedKeyNum(d, "progression.attemptsByLevel.C", 0);
+    const a = _fv_readDottedKeyNum(d, "progression.attemptsByLevel.A", 0);
+
+    if ((e+c+a) > 0){
+      if (!p.attemptsByLevel || typeof p.attemptsByLevel !== "object") p.attemptsByLevel = { E:0, C:0, A:0 };
+      p.attemptsByLevel.E = _fv_safeNum(p.attemptsByLevel.E, 0) || 0;
+      p.attemptsByLevel.C = _fv_safeNum(p.attemptsByLevel.C, 0) || 0;
+      p.attemptsByLevel.A = _fv_safeNum(p.attemptsByLevel.A, 0) || 0;
+
+      // “dotted” vinner bara om den är > det som redan finns (så vi inte råkar nolla)
+      p.attemptsByLevel.E = Math.max(_fv_safeNum(p.attemptsByLevel.E,0), e);
+      p.attemptsByLevel.C = Math.max(_fv_safeNum(p.attemptsByLevel.C,0), c);
+      p.attemptsByLevel.A = Math.max(_fv_safeNum(p.attemptsByLevel.A,0), a);
+
+      // total om vi saknar
+      if (typeof p.attemptsTotal !== "number") p.attemptsTotal = (p.attemptsByLevel.E + p.attemptsByLevel.C + p.attemptsByLevel.A);
+    }
+
+    const t = _fv_readDottedKeyNum(d, "progression.attemptsTotal", NaN);
+    if (isFinite(t) && t >= 0) p.attemptsTotal = t;
+
+  }catch{}
+  return d;
+}
+
 async function _fv_fetchStudentDoc(token){
   const ref = _fv_getActiveStudentsCollectionRef();
   if (!ref) return null;
@@ -3178,7 +3229,8 @@ async function _fv_fetchStudentDoc(token){
   try{
     const snap = await ref.doc(t).get();
     if (!snap || !snap.exists) return null;
-    const d = snap.data() || {};
+    const d0 = snap.data() || {};
+    const d = _fv_normalizeDottedProgressionIntoObject(d0) || d0;
     d._token = t;
     d._fetchedAt = Date.now();
     return d;
@@ -3191,21 +3243,44 @@ async function _fv_fetchStudentDoc(token){
 function _fv_getProgressionFromRemote(d){
   const prog = (d && d.progression) ? d.progression : (d && d.prog) ? d.prog : {};
   return {
-    totalPoints: _fv_safeNum(prog.totalPoints != null ? prog.totalPoints : (d.totalPoints != null ? d.totalPoints : d.points), 0),
-    correctByGoalId: (prog.correctByGoalId && typeof prog.correctByGoalId==="object") ? prog.correctByGoalId : (d.correctByGoalId||{}),
-    wrongByGoalId: (prog.wrongByGoalId && typeof prog.wrongByGoalId==="object") ? prog.wrongByGoalId : (d.wrongByGoalId||{})
+    totalPoints: _fv_safeNum(
+      (prog.totalPoints != null) ? prog.totalPoints :
+      (d && d.totalPoints != null) ? d.totalPoints :
+      (d && d.points != null) ? d.points :
+      0, 0
+    ),
+    correctByGoalId: (prog.correctByGoalId && typeof prog.correctByGoalId==="object") ? prog.correctByGoalId : (d && d.correctByGoalId) ? d.correctByGoalId : {},
+    wrongByGoalId: (prog.wrongByGoalId && typeof prog.wrongByGoalId==="object") ? prog.wrongByGoalId : (d && d.wrongByGoalId) ? d.wrongByGoalId : {}
   };
 }
 
 function _fv_getAttemptsFromRemote(d){
   const prog = (d && d.progression && typeof d.progression==="object") ? d.progression : {};
+  const out = { E:0, C:0, A:0, total:0, has:false };
+
+  // 0) “dotted keys” (top-level) – vanligaste felet just nu
+  const dE = _fv_readDottedKeyNum(d, "progression.attemptsByLevel.E", 0);
+  const dC = _fv_readDottedKeyNum(d, "progression.attemptsByLevel.C", 0);
+  const dA = _fv_readDottedKeyNum(d, "progression.attemptsByLevel.A", 0);
+  if ((dE + dC + dA) > 0){
+    out.E = dE; out.C = dC; out.A = dA;
+    out.total = out.E + out.C + out.A;
+    out.has = (out.total > 0);
+    return out;
+  }
+  const dT = _fv_readDottedKeyNum(d, "progression.attemptsTotal", NaN);
+  if (isFinite(dT) && dT > 0){
+    out.total = dT;
+    out.has = true;
+    return out;
+  }
+
+  // 1) korrekt nästlat objekt (det vi vill ha)
   const candABL =
     (prog.attemptsByLevel && typeof prog.attemptsByLevel==="object") ? prog.attemptsByLevel :
-    (d.attemptsByLevel && typeof d.attemptsByLevel==="object") ? d.attemptsByLevel :
-    (d.stats && d.stats.attemptsByLevel && typeof d.stats.attemptsByLevel==="object") ? d.stats.attemptsByLevel :
+    (d && d.attemptsByLevel && typeof d.attemptsByLevel==="object") ? d.attemptsByLevel :
+    (d && d.stats && d.stats.attemptsByLevel && typeof d.stats.attemptsByLevel==="object") ? d.stats.attemptsByLevel :
     null;
-
-  const out = { E:0, C:0, A:0, total:0, has:false };
 
   if (candABL){
     out.E = _fv_safeNum(candABL.E, 0);
@@ -3218,10 +3293,10 @@ function _fv_getAttemptsFromRemote(d){
 
   const totalCand =
     (prog.attemptsTotal != null) ? prog.attemptsTotal :
-    (d.attemptsTotal != null) ? d.attemptsTotal :
-    (d.attempts != null) ? d.attempts :
-    (d.playCount != null) ? d.playCount :
-    (d.gamesPlayed != null) ? d.gamesPlayed :
+    (d && d.attemptsTotal != null) ? d.attemptsTotal :
+    (d && d.attempts != null) ? d.attempts :
+    (d && d.playCount != null) ? d.playCount :
+    (d && d.gamesPlayed != null) ? d.gamesPlayed :
     null;
 
   if (totalCand != null){
@@ -3231,9 +3306,9 @@ function _fv_getAttemptsFromRemote(d){
   }
 
   const subs =
-    Array.isArray(d && d.submissions) ? d.submissions :
-    Array.isArray(d && d.results) ? d.results :
-    Array.isArray(prog && prog.submissions) ? prog.submissions :
+    (d && Array.isArray(d.submissions)) ? d.submissions :
+    (d && Array.isArray(d.results)) ? d.results :
+    (prog && Array.isArray(prog.submissions)) ? prog.submissions :
     null;
 
   if (subs && subs.length){
@@ -3476,7 +3551,12 @@ async function tryRefreshRosterTabs(){
   }
 }
 
-/* slut Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) */
+/* debug: gör cache synlig i konsolen (påverkar inte UI) */
+try{ window._fvTeacherStudentCache = _fvTeacherStudentCache; }catch{}
+try{ window._fv_getSelectedToken = _fv_getSelectedToken; }catch{}
+try{ window._fv_getAttemptsFromRemote = _fv_getAttemptsFromRemote; }catch{}
+
+/* slut Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) -->
 
 
 
@@ -5110,11 +5190,29 @@ function finishLevel(){
   const s = _fv4_ensureProgressionShape(s0);
   s.bank = _fv4_ensureBankShape(s.bank);
 
+  // ✅ Försök per nivå + total (sparas alltid lokalt)
+  if (!s.progression.attemptsByLevel || typeof s.progression.attemptsByLevel !== "object"){
+    s.progression.attemptsByLevel = { E:0, C:0, A:0 };
+  } else {
+    if (s.progression.attemptsByLevel.E == null) s.progression.attemptsByLevel.E = 0;
+    if (s.progression.attemptsByLevel.C == null) s.progression.attemptsByLevel.C = 0;
+    if (s.progression.attemptsByLevel.A == null) s.progression.attemptsByLevel.A = 0;
+  }
+
   const goals = normalizeGoalsMap(s);
   const thres = _fv4_getThresholds(s);
 
   const lvl = currentLevel;
   const threshold = thres[lvl] != null ? thres[lvl] : 70;
+
+  // räkna försök (en finish = ett försök på nivån)
+  s.progression.attemptsByLevel[lvl] = Number(s.progression.attemptsByLevel[lvl] || 0) + 1;
+  s.progression.attemptsTotal =
+    Number(s.progression.attemptsByLevel.E || 0) +
+    Number(s.progression.attemptsByLevel.C || 0) +
+    Number(s.progression.attemptsByLevel.A || 0);
+  // bakåtkomp om någon annan del läser "attempts"
+  s.progression.attempts = s.progression.attemptsTotal;
 
   let correctCount = 0;
   let pointsGained = 0;
@@ -5230,7 +5328,13 @@ function finishLevel(){
     total,
     pointsGained,
     totalPointsAfter,
-    timestamp: nowIso
+    timestamp: nowIso,
+    attemptsByLevel: {
+      E: Number(s.progression.attemptsByLevel.E || 0),
+      C: Number(s.progression.attemptsByLevel.C || 0),
+      A: Number(s.progression.attemptsByLevel.A || 0)
+    },
+    attemptsTotal: Number(s.progression.attemptsTotal || 0)
   };
   s.progression.lastResult = lastResult;
 
@@ -5264,6 +5368,12 @@ function finishLevel(){
     total,
     pointsGained,
     totalPointsAfter,
+    attemptsByLevel: {
+      E: Number(s.progression.attemptsByLevel.E || 0),
+      C: Number(s.progression.attemptsByLevel.C || 0),
+      A: Number(s.progression.attemptsByLevel.A || 0)
+    },
+    attemptsTotal: Number(s.progression.attemptsTotal || 0),
     answers: Array.isArray(currentAnswers) ? currentAnswers.slice() : [],
     questions: currentQuestions.map((qq)=>({
       q: _fv4_getQuestionText(qq),
@@ -5317,7 +5427,6 @@ function finishLevel(){
   syncUI();
 }
 /* slut Sektion 4G: Spel-logik (render + start + finish) */
-
 
 
 
