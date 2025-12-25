@@ -177,6 +177,39 @@
       transform:none;
     }
 
+    /* --------- NYTT: Mejlad-länk i roster (gör knappen grön när JS sätter class "sent") --------- */
+    .btn.sent,
+    .sent.btn,
+    .sent{
+      background:linear-gradient(135deg,#16a34a,#22c55e) !important;
+      border-color:rgba(34,197,94,1) !important;
+      color:#ecfdf5 !important;
+      box-shadow:
+        0 0 0 1px rgba(22,163,74,1),
+        0 0 18px rgba(22,163,74,.7) !important;
+    }
+
+    .btn.sent:hover,
+    .sent.btn:hover,
+    .sent:hover{
+      background:linear-gradient(135deg,#16a34a,#22c55e) !important;
+      box-shadow:
+        0 0 0 1px rgba(22,163,74,1),
+        0 0 26px rgba(34,197,94,.9) !important;
+      transform:translateY(-1px);
+      opacity:1 !important;
+    }
+
+    .btn.sent:active,
+    .sent.btn:active,
+    .sent:active{
+      box-shadow:
+        0 0 0 1px rgba(22,163,74,1),
+        0 0 14px rgba(34,197,94,.8) !important;
+      transform:translateY(0);
+    }
+    /* --------- SLUT NYTT --------- */
+
     /* Spara elev – tydlig grön, fyllig knapp */
     #btnSaveStudent{
       background:linear-gradient(135deg,#16a34a,#22c55e);
@@ -1917,6 +1950,30 @@ Gurka
       </div>
     </div>
   </div>
+
+  <!-- NYTT: Roster-modal (behövs för mejl + grön “skickad” + rosterRows) -->
+  <div id="bankRosterModal" class="hidden">
+    <div class="card">
+      <div class="card-row" style="justify-content:space-between;align-items:center;">
+        <div class="field" style="flex:1 1 auto;">
+          <h3>Elever (aktiv bank)</h3>
+          <p class="mini" style="margin:4px 0 0;">
+            Lägg in elevens namn och e-post. Klicka ✉️ för att skapa mejl med spellänk. Knappen blir grön efter mejl.
+          </p>
+        </div>
+        <div class="field" style="flex:0 0 140px;display:flex;justify-content:flex-end;">
+          <button id="btnCloseRosterModal" class="btn btn-sm" type="button">Stäng</button>
+        </div>
+      </div>
+
+      <div class="card-row" style="margin-top:8px;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <button id="btnRosterAddRow" class="btn btn-sm btn-primary" type="button">➕ Lägg till elevrad</button>
+        <button id="btnRosterSave" class="btn btn-sm" type="button">💾 Spara elevlista</button>
+      </div>
+
+      <div id="rosterRows" style="margin-top:10px;"></div>
+    </div>
+  </div>
 </body>
 <!-- slut SEKTION 2: BODY (ELEVYTA & LÄRARLÄGE) -->
 
@@ -2549,302 +2606,449 @@ async function deleteCloudBankV5(bankId){
 // ==============================
 
 
-// ==============================
-// start SEKTION 3D: ROSTER: overlay + spara rosterRows/rosterTokens
-// ==============================
+// <!-- start SEKTION 3D: ROSTER (elevlista + token + mejl + skickat-status) -->
+/* =========================
+   3D – Roster (elevlista/tokens) + mejl-länkar + "✅ Skickat"
+   Kräver HTML-id:n: bankRosterModal, rosterRows, btnRosterAddRow, btnRosterSave, btnCloseRosterModal
+   ========================= */
 
-function _fv_genToken(len = 10){
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let out = "";
-  const bytes = new Uint8Array(len);
-  (window.crypto || window.msCrypto).getRandomValues(bytes);
-  for (let i = 0; i < len; i++) out += chars[bytes[i] % chars.length];
-  return out;
-}
+(function () {
+  "use strict";
 
-function _fv_ensureRosterStyles(){
-  if (_fv_getEl("fv-roster-styles")) return;
-  const st = document.createElement("style");
-  st.id = "fv-roster-styles";
-  st.textContent = `
-    .fv-roster-overlay{
-      position:fixed; inset:0; background:rgba(0,0,0,.55);
-      display:flex; align-items:center; justify-content:center;
-      padding:16px; z-index:9999;
-    }
-    .fv-roster-modal{ width:min(980px, 96vw); max-height:85vh; overflow:auto; }
-    .fv-roster-head{ display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
-    .fv-roster-grid{
-      display:grid;
-      grid-template-columns: 1.4fr 1fr 1.6fr 1fr auto;
-      gap:6px; align-items:center; margin-top:8px;
-    }
-    .fv-roster-input{
-      width:100%;
-      border:1px solid rgba(75,85,99,.9);
-      border-radius:10px;
-      background:#0b1220;
-      color:var(--text);
-      padding:6px 8px;
-      font-size:.82rem;
-    }
-    .fv-roster-row{
-      display:grid;
-      grid-template-columns: 1.4fr 1fr 1.6fr 1fr auto;
-      gap:6px; align-items:center;
-      padding:6px 0;
-      border-top:1px solid rgba(31,41,55,.8);
-    }
-    .fv-roster-actions{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; justify-content:flex-end; margin-top:10px; }
-    .fv-roster-status{ margin-top:8px; }
-    @media (max-width: 720px){
-      .fv-roster-grid, .fv-roster-row{ grid-template-columns: 1fr; }
-      .fv-roster-row{ padding:10px 0; }
-    }
-  `;
-  document.head.appendChild(st);
-}
+  const _q = (sel) => document.querySelector(sel);
 
-function _fv_buildRosterOverlay(){
-  _fv_ensureRosterStyles();
-  let ov = _fv_getEl("fvRosterOverlay");
-  if (ov) return ov;
+  const ROSTER_MODAL_ID = "bankRosterModal";
+  const ROSTER_ROWS_ID = "rosterRows";
+  const BTN_ADD_ROW_ID = "btnRosterAddRow";
+  const BTN_SAVE_ID = "btnRosterSave";
+  const BTN_CLOSE_ID = "btnCloseRosterModal";
 
-  ov = document.createElement("div");
-  ov.id = "fvRosterOverlay";
-  ov.className = "fv-roster-overlay hidden";
-  ov.innerHTML = `
-    <div class="card fv-roster-modal">
-      <div class="fv-roster-head">
-        <div>
-          <div class="q-text" id="fvRosterTitle">Elever</div>
-          <div class="mini" id="fvRosterSub">—</div>
-        </div>
-        <div class="fv-roster-actions">
-          <button class="btn btn-sm" type="button" id="fvRosterAdd">➕ Lägg till elev</button>
-          <button class="btn btn-sm btn-primary" type="button" id="fvRosterSave">💾 Spara elevlista</button>
-          <button class="btn btn-sm btn-danger" type="button" id="fvRosterClose">✖ Stäng</button>
-        </div>
-      </div>
-
-      <div class="fv-roster-grid mini">
-        <div>Namn</div>
-        <div>Klass</div>
-        <div>E-post</div>
-        <div>Token</div>
-        <div></div>
-      </div>
-
-      <div id="fvRosterRows"></div>
-
-      <div class="mini fv-roster-status" id="fvRosterStatus"></div>
-    </div>
-  `;
-  document.body.appendChild(ov);
-
-  ov.addEventListener("click", (e)=>{ if (e.target === ov) _fv_closeRoster(); });
-
-  _fv_getEl("fvRosterClose")?.addEventListener("click", _fv_closeRoster);
-  _fv_getEl("fvRosterAdd")?.addEventListener("click", ()=>_fv_addRosterRow());
-  _fv_getEl("fvRosterSave")?.addEventListener("click", async ()=>{ await _fv_saveRosterFromUI(); });
-
-  return ov;
-}
-
-function _fv_setRosterStatus(msg){
-  const el = _fv_getEl("fvRosterStatus");
-  if (!el) return;
-  el.textContent = String(msg || "");
-}
-
-function _fv_openRoster(){
-  const ov = _fv_buildRosterOverlay();
-  ov.classList.remove("hidden");
-}
-
-function _fv_closeRoster(){
-  const ov = _fv_getEl("fvRosterOverlay");
-  if (ov) ov.classList.add("hidden");
-}
-
-function _fv_rowTemplate(row){
-  const r = row || {};
-  const wrap = document.createElement("div");
-  wrap.className = "fv-roster-row";
-  wrap.innerHTML = `
-    <input class="fv-roster-input" data-fv="name" type="text" placeholder="Namn" value="${_fv_escapeHtml(String(r.name||""))}">
-    <input class="fv-roster-input" data-fv="klass" type="text" placeholder="Klass" value="${_fv_escapeHtml(String(r.klass||""))}">
-    <input class="fv-roster-input" data-fv="email" type="email" placeholder="E-post" value="${_fv_escapeHtml(String(r.email||""))}">
-    <input class="fv-roster-input" data-fv="token" type="text" placeholder="Token" value="${_fv_escapeHtml(String(r.token||""))}">
-    <div class="fv3-actions" style="justify-content:flex-end">
-      <button class="btn fv3-btn-xs" type="button" data-act="gen">Ny token</button>
-      <button class="btn fv3-btn-xs btn-danger" type="button" data-act="del">Ta bort</button>
-    </div>
-  `;
-  wrap.querySelector('[data-act="gen"]')?.addEventListener("click", ()=>{
-    const t = wrap.querySelector('input[data-fv="token"]');
-    if (t) t.value = _fv_genToken(10);
-  });
-  wrap.querySelector('[data-act="del"]')?.addEventListener("click", ()=>{
-    wrap.remove();
-    _fv_setRosterStatus("");
-  });
-  return wrap;
-}
-
-function _fv_addRosterRow(prefill){
-  const host = _fv_getEl("fvRosterRows");
-  if (!host) return;
-  host.appendChild(_fv_rowTemplate(prefill || { token: _fv_genToken(10) }));
-}
-
-function _fv_collectRosterFromUI(){
-  const host = _fv_getEl("fvRosterRows");
-  const rows = [];
-  if (!host) return rows;
-
-  const els = Array.from(host.querySelectorAll(".fv-roster-row"));
-  for (let i=0;i<els.length;i++){
-    const rowEl = els[i];
-    const name = String(rowEl.querySelector('input[data-fv="name"]')?.value || "").trim();
-    const klass = String(rowEl.querySelector('input[data-fv="klass"]')?.value || "").trim();
-    const email = String(rowEl.querySelector('input[data-fv="email"]')?.value || "").trim();
-    let token = String(rowEl.querySelector('input[data-fv="token"]')?.value || "").trim();
-
-    if (!token) {
-      token = _fv_genToken(10);
-      const tEl = rowEl.querySelector('input[data-fv="token"]');
-      if (tEl) tEl.value = token;
-    }
-
-    if (!token && !name && !email) continue;
-    rows.push({ token, name, klass, email });
-  }
-  return rows;
-}
-
-function _fv_uniqueTokensFromRows(rows){
-  const out = [];
-  const seen = new Set();
-  for (let i=0;i<rows.length;i++){
-    const t = String(rows[i].token||"").trim();
-    if (!t) continue;
-    if (seen.has(t)) continue;
-    seen.add(t);
-    out.push(t);
-  }
-  return out;
-}
-
-async function _fv_loadRosterForBank(bankId){
-  await initFirebase();
-  if (!_fv_hasDb() || !_fv_hasTeacher()) throw new Error("Inte inloggad / DB saknas");
-
-  const uid = String(currentTeacherUser.uid);
-  const bid = String(bankId||"").trim();
-  if (!bid) throw new Error("Saknar bankId");
-
-  const ref = firebaseDbInstance
-    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
-    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid);
-
-  const snap = await ref.get();
-  if (!snap.exists) throw new Error("Bank finns inte");
-
-  const d = snap.data() || {};
-  return {
-    bankId: bid,
-    name: String(d.name || d.title || d.bankName || "Moln-bank"),
-    publicId: String(d.publicId || ""),
-    rosterRows: Array.isArray(d.rosterRows) ? d.rosterRows : [],
-    rosterTokens: Array.isArray(d.rosterTokens) ? d.rosterTokens : []
-  };
-}
-
-async function _fv_saveRosterToBank(bankId, rows){
-  await initFirebase();
-  if (!_fv_hasDb() || !_fv_hasTeacher()) throw new Error("Inte inloggad / DB saknas");
-
-  const uid = String(currentTeacherUser.uid);
-  const bid = String(bankId||"").trim();
-  if (!bid) throw new Error("Saknar bankId");
-
-  const cleanRows = Array.isArray(rows) ? rows : [];
-  const tokens = _fv_uniqueTokensFromRows(cleanRows);
-
-  const ref = firebaseDbInstance
-    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
-    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bid);
-
-  await ref.set({
-    rosterRows: cleanRows,
-    rosterTokens: tokens,
-    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-  }, { merge:true });
-
-  return { tokensCount: tokens.length };
-}
-
-async function _fv_saveRosterFromUI(){
-  const ov = _fv_getEl("fvRosterOverlay");
-  const bid = ov ? String(ov.getAttribute("data-bank-id")||"").trim() : "";
-  if (!bid){
-    _fv_setRosterStatus("⚠️ Ingen bank vald.");
-    return;
+  function _escapeHtml(s) {
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
   }
 
-  _fv_setRosterStatus("Sparar...");
-  try{
-    const rows = _fv_collectRosterFromUI();
-    const res = await _fv_saveRosterToBank(bid, rows);
-    _fv_setRosterStatus(`✅ Sparat. Elever: ${res.tokensCount}`);
+  function _now() { return Date.now(); }
 
-    try{ await loadCloudBanksListV5(); }catch{}
-    try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
-  }catch(e){
-    console.error("Roster save error:", e);
-    _fv_setRosterStatus("❌ Kunde inte spara elevlista (kontrollera inloggning/behörighet).");
-    alert("Kunde inte spara elevlista. Testa logga in med Google igen.");
+  function _getBaseUrl() {
+    try {
+      return window.location.origin + window.location.pathname;
+    } catch (e) {
+      return String(window.location.href || "").split("?")[0];
+    }
   }
-}
 
-async function openRosterInline(bankId){
-  try{
-    _fv_openRoster();
-    _fv_setRosterStatus("Laddar...");
+  function _getActiveBankId() {
+    try {
+      if (typeof window.activeCloudBankId !== "undefined" && window.activeCloudBankId !== null) {
+        return String(window.activeCloudBankId);
+      }
+    } catch (e) {}
+    return "";
+  }
 
-    const info = await _fv_loadRosterForBank(bankId);
+  function _getTeacherUid() {
+    try {
+      if (window.currentTeacherUser && window.currentTeacherUser.uid) return String(window.currentTeacherUser.uid);
+    } catch (e) {}
+    try {
+      if (window.firebaseAuthInstance && window.firebaseAuthInstance.currentUser && window.firebaseAuthInstance.currentUser.uid) {
+        return String(window.firebaseAuthInstance.currentUser.uid);
+      }
+    } catch (e) {}
+    return "";
+  }
 
-    const ov = _fv_buildRosterOverlay();
-    ov.setAttribute("data-bank-id", String(info.bankId));
-    ov.setAttribute("data-public-id", String(info.publicId||""));
+  function _getDb() {
+    try {
+      if (window.firebaseDbInstance) return window.firebaseDbInstance;
+      if (window.firebaseDb) return window.firebaseDb;
+    } catch (e) {}
+    try {
+      if (window.firebase && window.firebase.firestore) return window.firebase.firestore();
+    } catch (e) {}
+    return null;
+  }
 
-    const t = _fv_getEl("fvRosterTitle");
-    const sub = _fv_getEl("fvRosterSub");
-    if (t) t.textContent = "Elever – " + info.name;
-    if (sub) sub.textContent = `Bank: ${info.bankId}${info.publicId ? " • Public: " + info.publicId : ""}`;
+  function _hasFirestore(db) {
+    return !!(db && typeof db.collection === "function");
+  }
 
-    const host = _fv_getEl("fvRosterRows");
-    if (host) host.innerHTML = "";
+  function _loadLocalStateSafe() {
+    try {
+      if (typeof window.loadState === "function") return window.loadState() || {};
+    } catch (e) {}
+    try {
+      const key = (typeof window.STORAGE_KEY !== "undefined" && window.STORAGE_KEY) ? String(window.STORAGE_KEY) : "fangvaktaren-v17";
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) || {}) : {};
+    } catch (e) {
+      return {};
+    }
+  }
 
-    const rows = Array.isArray(info.rosterRows) ? info.rosterRows : [];
-    if (rows.length){
-      for (let i=0;i<rows.length;i++) _fv_addRosterRow(rows[i]);
+  function _saveLocalStateSafe(stateObj) {
+    try {
+      if (typeof window.saveState === "function") { window.saveState(stateObj); return; }
+    } catch (e) {}
+    try {
+      const key = (typeof window.STORAGE_KEY !== "undefined" && window.STORAGE_KEY) ? String(window.STORAGE_KEY) : "fangvaktaren-v17";
+      localStorage.setItem(key, JSON.stringify(stateObj || {}));
+    } catch (e) {}
+  }
+
+  function _makeToken() {
+    try {
+      const buf = new Uint8Array(9);
+      if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(buf);
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+      let out = "";
+      for (let i = 0; i < buf.length; i++) out += chars[buf[i] % chars.length];
+      return out;
+    } catch (e) {
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+      let out = "";
+      for (let i = 0; i < 12; i++) out += chars[Math.floor(Math.random() * chars.length)];
+      return out;
+    }
+  }
+
+  function _openRosterModal() {
+    const m = _q("#" + ROSTER_MODAL_ID);
+    if (!m) return false;
+    m.classList.remove("hidden");
+    return true;
+  }
+
+  function _closeRosterModal() {
+    const m = _q("#" + ROSTER_MODAL_ID);
+    if (!m) return;
+    m.classList.add("hidden");
+  }
+
+  function _setMailBtnGreen(btn, isGreen) {
+    if (!btn) return;
+    if (isGreen) {
+      btn.textContent = "✅ Skickat";
+      btn.dataset.sent = "1";
+      btn.style.background = "linear-gradient(135deg,#16a34a,#22c55e)";
+      btn.style.borderColor = "rgba(34,197,94,1)";
+      btn.style.color = "#ecfdf5";
+      btn.style.boxShadow = "0 0 0 1px rgba(22,163,74,1), 0 0 18px rgba(22,163,74,.7)";
     } else {
-      _fv_addRosterRow({ token: _fv_genToken(10) });
+      btn.textContent = "✉️ Skicka länk";
+      btn.dataset.sent = "0";
+      btn.style.background = "";
+      btn.style.borderColor = "";
+      btn.style.color = "";
+      btn.style.boxShadow = "";
+    }
+  }
+
+  function _rowFromEl(rowEl) {
+    const nameEl = rowEl.querySelector("[data-roster-name]");
+    const emailEl = rowEl.querySelector("[data-roster-email]");
+    const tokenEl = rowEl.querySelector("[data-roster-token]");
+    const sentEl = rowEl.querySelector("[data-roster-sent]");
+    const sentAtEl = rowEl.querySelector("[data-roster-sentat]");
+
+    return {
+      name: nameEl ? String(nameEl.value || "").trim() : "",
+      email: emailEl ? String(emailEl.value || "").trim() : "",
+      token: tokenEl ? String(tokenEl.value || "").trim() : "",
+      sent: sentEl ? (String(sentEl.value || "0") === "1") : false,
+      sentAt: sentAtEl ? (Number(sentAtEl.value || 0) || null) : null
+    };
+  }
+
+  function _writeRowToEl(rowEl, row) {
+    const nameEl = rowEl.querySelector("[data-roster-name]");
+    const emailEl = rowEl.querySelector("[data-roster-email]");
+    const tokenEl = rowEl.querySelector("[data-roster-token]");
+    const sentEl = rowEl.querySelector("[data-roster-sent]");
+    const sentAtEl = rowEl.querySelector("[data-roster-sentat]");
+    const mailBtn = rowEl.querySelector("[data-roster-mailbtn]");
+
+    if (nameEl) nameEl.value = row.name || "";
+    if (emailEl) emailEl.value = row.email || "";
+    if (tokenEl) tokenEl.value = row.token || "";
+    if (sentEl) sentEl.value = row.sent ? "1" : "0";
+    if (sentAtEl) sentAtEl.value = row.sentAt ? String(row.sentAt) : "";
+    _setMailBtnGreen(mailBtn, !!row.sent);
+  }
+
+  function _ensureToken(row) {
+    if (row.token) return row.token;
+    row.token = _makeToken();
+    return row.token;
+  }
+
+  function _makeRowEl(row) {
+    const wrap = document.createElement("div");
+    wrap.className = "card-row";
+    wrap.style.gap = "8px";
+    wrap.style.flexWrap = "wrap";
+
+    _ensureToken(row);
+
+    wrap.innerHTML = `
+      <div class="field" style="flex:1 1 180px;min-width:0;">
+        <label class="small-label">Namn</label>
+        <input class="input" data-roster-name autocomplete="off" placeholder="Elevens namn..." />
+      </div>
+
+      <div class="field" style="flex:1 1 220px;min-width:0;">
+        <label class="small-label">E-post</label>
+        <input class="input" data-roster-email autocomplete="off" placeholder="elev@skola.se" />
+      </div>
+
+      <div class="field" style="flex:0 0 140px;">
+        <label class="small-label">Token</label>
+        <input class="input" data-roster-token readonly />
+        <input type="hidden" data-roster-sent value="0" />
+        <input type="hidden" data-roster-sentat value="" />
+      </div>
+
+      <div class="field" style="flex:0 0 170px;display:flex;justify-content:flex-end;gap:6px;align-items:flex-end;">
+        <button type="button" class="btn btn-sm" data-roster-mailbtn>✉️ Skicka länk</button>
+        <button type="button" class="btn btn-sm btn-danger" data-roster-delbtn>🗑️</button>
+      </div>
+    `;
+
+    _writeRowToEl(wrap, row);
+
+    const delBtn = wrap.querySelector("[data-roster-delbtn]");
+    if (delBtn) {
+      delBtn.addEventListener("click", function () {
+        wrap.remove();
+      });
     }
 
-    _fv_setRosterStatus(`Redo. (${rows.length || 1} rader)`);
-  }catch(e){
-    console.error("openRosterInline error:", e);
-    _fv_setRosterStatus("❌ Kunde inte ladda elevlista (kontrollera inloggning/behörighet).");
-    alert("Kunde inte ladda elevlista. Testa logga in med Google igen.");
-  }
-}
+    const mailBtn = wrap.querySelector("[data-roster-mailbtn]");
+    if (mailBtn) {
+      mailBtn.addEventListener("click", async function () {
+        const bankId = _getActiveBankId();
+        if (!bankId) { alert("Ingen aktiv bank vald. Aktivera en bank först."); return; }
 
-// ==============================
-// slut SEKTION 3D
-// ==============================
+        const rowNow = _rowFromEl(wrap);
+        _ensureToken(rowNow);
+
+        if (!rowNow.email) { alert("Skriv elevens e-post först."); return; }
+
+        const link = `${_getBaseUrl()}?public=${encodeURIComponent(bankId)}&token=${encodeURIComponent(rowNow.token)}`;
+        const subject = "Fångvaktaren – din spellänk";
+        const body =
+          `Hej!\n\nHär är din länk till Fångvaktaren:\n${link}\n\n` +
+          `Öppna länken och spela.\n\n/ Lärare`;
+
+        // Markera som skickat direkt (krav: grön efter mejl)
+        rowNow.sent = true;
+        rowNow.sentAt = _now();
+        _writeRowToEl(wrap, rowNow);
+
+        // Spara roster (både lokalt och till moln om möjligt)
+        try { await window.fvRoster_saveRoster(); } catch (e) {}
+
+        // Öppna mejlklient
+        const mailto = `mailto:${encodeURIComponent(rowNow.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+        window.location.href = mailto;
+      });
+    }
+
+    return wrap;
+  }
+
+  function _getRowsHost() {
+    return _q("#" + ROSTER_ROWS_ID);
+  }
+
+  function _renderRows(rows) {
+    const host = _getRowsHost();
+    if (!host) return;
+
+    host.innerHTML = "";
+
+    const list = Array.isArray(rows) ? rows : [];
+    if (list.length === 0) {
+      host.appendChild(_makeRowEl({ name: "", email: "", token: "", sent: false, sentAt: null }));
+      return;
+    }
+
+    list.forEach((r) => {
+      host.appendChild(_makeRowEl({
+        name: r && r.name ? String(r.name) : "",
+        email: r && r.email ? String(r.email) : "",
+        token: r && r.token ? String(r.token) : "",
+        sent: !!(r && (r.sent || r.sentAt)),
+        sentAt: (r && r.sentAt) ? (Number(r.sentAt) || null) : null
+      }));
+    });
+  }
+
+  function _readRowsFromDom() {
+    const host = _getRowsHost();
+    if (!host) return [];
+    const els = Array.from(host.querySelectorAll(".card-row"));
+    const rows = els.map(_rowFromEl);
+
+    rows.forEach(_ensureToken);
+
+    // rensa helt tomma rader (om allt tomt)
+    return rows.filter((r) => (r.name || r.email || r.token));
+  }
+
+  async function _loadRosterFromCloud() {
+    const bankId = _getActiveBankId();
+    const uid = _getTeacherUid();
+    const db = _getDb();
+
+    if (!bankId || !uid || !_hasFirestore(db)) return null;
+
+    try {
+      const ref = db.collection("teachers").doc(uid).collection("banks").doc(bankId);
+      const snap = await ref.get();
+      if (!snap.exists) return [];
+      const data = snap.data() || {};
+      const rr = Array.isArray(data.rosterRows) ? data.rosterRows : [];
+      const rt = Array.isArray(data.rosterTokens) ? data.rosterTokens : [];
+
+      if (rr.length) return rr;
+      if (rt.length) return rt;
+      return [];
+    } catch (e) {
+      console.warn("3D roster load failed:", e);
+      return [];
+    }
+  }
+
+  async function _saveRosterToCloud(rows) {
+    const bankId = _getActiveBankId();
+    const uid = _getTeacherUid();
+    const db = _getDb();
+
+    if (!bankId || !uid || !_hasFirestore(db)) return false;
+
+    const clean = (rows || []).map((r) => ({
+      name: r.name || "",
+      email: r.email || "",
+      token: r.token || _makeToken(),
+      sent: !!r.sent,
+      sentAt: r.sent ? (r.sentAt || _now()) : null
+    }));
+
+    const tokens = clean.map((r) => ({
+      name: r.name,
+      email: r.email,
+      token: r.token,
+      sent: r.sent,
+      sentAt: r.sentAt
+    }));
+
+    try {
+      const ref = db.collection("teachers").doc(uid).collection("banks").doc(bankId);
+      await ref.set({
+        rosterRows: clean,
+        rosterTokens: tokens,
+        rosterUpdatedAt: _now()
+      }, { merge: true });
+      return true;
+    } catch (e) {
+      console.warn("3D roster save failed:", e);
+      return false;
+    }
+  }
+
+  function _saveRosterToLocal(rows) {
+    const s = _loadLocalStateSafe();
+    s.rosterLocal = Array.isArray(rows) ? rows : [];
+    _saveLocalStateSafe(s);
+  }
+
+  function _loadRosterFromLocal() {
+    const s = _loadLocalStateSafe();
+    return Array.isArray(s.rosterLocal) ? s.rosterLocal : [];
+  }
+
+  async function fvRoster_openModal() {
+    const ok = _openRosterModal();
+    if (!ok) {
+      alert("Roster-modal saknas i HTML (#bankRosterModal).");
+      return;
+    }
+
+    // försök moln först
+    const cloud = await _loadRosterFromCloud();
+    if (Array.isArray(cloud)) {
+      _renderRows(cloud);
+      _saveRosterToLocal(cloud);
+      return;
+    }
+
+    // annars local
+    const local = _loadRosterFromLocal();
+    _renderRows(local);
+  }
+
+  async function fvRoster_saveRoster() {
+    const rows = _readRowsFromDom();
+    _saveRosterToLocal(rows);
+    await _saveRosterToCloud(rows);
+    return true;
+  }
+
+  function fvRoster_addRow() {
+    const host = _getRowsHost();
+    if (!host) return;
+    host.appendChild(_makeRowEl({ name: "", email: "", token: "", sent: false, sentAt: null }));
+  }
+
+  function _bindRosterUiOnce() {
+    const btnClose = _q("#" + BTN_CLOSE_ID);
+    if (btnClose) btnClose.addEventListener("click", _closeRosterModal);
+
+    const btnAdd = _q("#" + BTN_ADD_ROW_ID);
+    if (btnAdd) btnAdd.addEventListener("click", fvRoster_addRow);
+
+    const btnSave = _q("#" + BTN_SAVE_ID);
+    if (btnSave) {
+      btnSave.addEventListener("click", async function () {
+        const bankId = _getActiveBankId();
+        if (!bankId) { alert("Ingen aktiv bank vald. Aktivera en bank först."); return; }
+
+        const ok = await fvRoster_saveRoster();
+        if (ok) alert("Elevlista sparad.");
+      });
+    }
+
+    // klick på backdrop stänger (om man klickar utanför kortet)
+    const modal = _q("#" + ROSTER_MODAL_ID);
+    if (modal) {
+      modal.addEventListener("click", function (e) {
+        if (e && e.target === modal) _closeRosterModal();
+      });
+    }
+  }
+
+  // Exponera kompatibla globala API-namn (så befintliga knappar kan kalla detta)
+  window.openRosterModal = fvRoster_openModal;
+  window.fvRoster_openModal = fvRoster_openModal;
+  window.fvRoster_saveRoster = fvRoster_saveRoster;
+  window.fvRoster_addRow = fvRoster_addRow;
+
+  document.addEventListener("DOMContentLoaded", function () {
+    _bindRosterUiOnce();
+  });
+})();
+
+/* =========================
+   SLUT 3D – Roster
+   ========================= */
+// <!-- slut SEKTION 3D: ROSTER (elevlista + token + mejl + skickat-status) -->
+
 
 
 // ==============================
