@@ -3618,6 +3618,8 @@ try{
 /* slut Sektion 3F: UI refresh (goals-select + bankstatus hook) */
 
 
+
+
 /* start Sektion 3G: BUTTON BIND + export av globala API-namn (+ submit-fix: saveCurrentResultToFirestore) */
 
 function _fv_bindOnce(btn, fn){
@@ -3657,6 +3659,85 @@ function _fv_getUrlParam(name){
   }catch{ return ""; }
 }
 
+/* FIX: säker shape i molnet (inkl attempts) + skydd mot “dotted keys” i elevdoc */
+function _fv_buildCloudSafeProgression(payloadObj, stateObj){
+  const p = (payloadObj && typeof payloadObj === "object") ? payloadObj : {};
+  const s = (stateObj && typeof stateObj === "object") ? stateObj : {};
+
+  const progIn =
+    (p.progression && typeof p.progression === "object") ? p.progression :
+    (s.progression && typeof s.progression === "object") ? s.progression :
+    {};
+
+  const safeObj = (x)=> (x && typeof x === "object") ? x : {};
+  const safeNum = (n, fb=0)=>{ const x = Number(n); return isFinite(x) ? x : fb; };
+
+  const correctByGoalId = Object.assign({}, safeObj(progIn.correctByGoalId), safeObj(safeObj(s.progression).correctByGoalId));
+  const wrongByGoalId = Object.assign({}, safeObj(progIn.wrongByGoalId), safeObj(safeObj(s.progression).wrongByGoalId));
+
+  const totalPoints = safeNum(
+    (progIn.totalPoints != null) ? progIn.totalPoints :
+    (s.progression && s.progression.totalPoints != null) ? s.progression.totalPoints :
+    0, 0
+  );
+
+  const lastResult =
+    (progIn.lastResult && typeof progIn.lastResult === "object") ? progIn.lastResult :
+    (p.lastResult && typeof p.lastResult === "object") ? p.lastResult :
+    (s.progression && s.progression.lastResult && typeof s.progression.lastResult === "object") ? s.progression.lastResult :
+    null;
+
+  // attemptsByLevel: försök hämta från progIn, annars från lastResult, annars från state
+  const ablIn =
+    (progIn.attemptsByLevel && typeof progIn.attemptsByLevel === "object") ? progIn.attemptsByLevel :
+    (lastResult && lastResult.attemptsByLevel && typeof lastResult.attemptsByLevel === "object") ? lastResult.attemptsByLevel :
+    (s.progression && s.progression.attemptsByLevel && typeof s.progression.attemptsByLevel === "object") ? s.progression.attemptsByLevel :
+    null;
+
+  const attemptsByLevel = {
+    E: safeNum(ablIn && ablIn.E, 0),
+    C: safeNum(ablIn && ablIn.C, 0),
+    A: safeNum(ablIn && ablIn.A, 0)
+  };
+
+  const attemptsTotalCand =
+    (progIn.attemptsTotal != null) ? progIn.attemptsTotal :
+    (lastResult && lastResult.attemptsTotal != null) ? lastResult.attemptsTotal :
+    (s.progression && s.progression.attemptsTotal != null) ? s.progression.attemptsTotal :
+    (progIn.attempts != null) ? progIn.attempts :
+    (s.progression && s.progression.attempts != null) ? s.progression.attempts :
+    null;
+
+  const attemptsTotal = (attemptsTotalCand != null)
+    ? safeNum(attemptsTotalCand, (attemptsByLevel.E + attemptsByLevel.C + attemptsByLevel.A))
+    : (attemptsByLevel.E + attemptsByLevel.C + attemptsByLevel.A);
+
+  return {
+    totalPoints,
+    correctByGoalId,
+    wrongByGoalId,
+    lastResult: lastResult || null,
+    attemptsByLevel,
+    attemptsTotal,
+    attempts: attemptsTotal // bakåtkomp
+  };
+}
+
+/* FIX: rensa felaktiga top-level fält med punkt i namnet (t.ex. "progression.attemptsByLevel.E") */
+async function _fv_tryDeleteDottedAttemptFields(ref){
+  try{
+    if (!ref || !firebase || !firebase.firestore || !firebase.firestore.FieldPath) return;
+    const del = firebase.firestore.FieldValue.delete();
+    const fpE = new firebase.firestore.FieldPath("progression.attemptsByLevel.E");
+    const fpC = new firebase.firestore.FieldPath("progression.attemptsByLevel.C");
+    const fpA = new firebase.firestore.FieldPath("progression.attemptsByLevel.A");
+    const fpT = new firebase.firestore.FieldPath("progression.attemptsTotal");
+    await ref.update(fpE, del, fpC, del, fpA, del, fpT, del);
+  }catch(e){
+    // ok att ignorera (doc kan saknas / permissions / redan rensat)
+  }
+}
+
 async function saveCurrentResultToFirestore(payload){
   await initFirebase();
   if (!_fv_hasDb()) throw new Error("Firebase DB saknas");
@@ -3693,6 +3774,9 @@ async function saveCurrentResultToFirestore(payload){
       .collection("students").doc(String(token));
   }
 
+  // Försök rensa gamla dotted keys (om de råkat hamna som top-level i dokumentet)
+  try{ await _fv_tryDeleteDottedAttemptFields(ref); }catch{}
+
   const student = Object.assign(
     { name:"", klass:"", token: token },
     (s.student && typeof s.student === "object") ? s.student : {},
@@ -3700,10 +3784,7 @@ async function saveCurrentResultToFirestore(payload){
   );
   student.token = token;
 
-  const progression =
-    (p.progression && typeof p.progression === "object") ? p.progression :
-    (s.progression && typeof s.progression === "object") ? s.progression :
-    { totalPoints:0, wrongByGoalId:{}, correctByGoalId:{} };
+  const progression = _fv_buildCloudSafeProgression(p, s);
 
   const lastSubmission =
     (typeof p.lastSubmission !== "undefined") ? p.lastSubmission :
@@ -3761,6 +3842,11 @@ async function saveCurrentResultToFirestore(payload){
 })();
 
 /* slut Sektion 3G: BUTTON BIND + export av globala API-namn (+ submit-fix: saveCurrentResultToFirestore) */
+
+
+
+
+
 
 
 /* start Sektion 3H: LISTRENDER (MCQ/IMG/DRAG) + MINIATYR + STABIL DRAG-VISNING */
