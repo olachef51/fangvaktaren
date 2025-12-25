@@ -1985,9 +1985,9 @@ Gurka
 <script>
 "use strict";
 
-/* ==============================
-   Start 3A – KÄRNA: state + helpers (INGA $-deklarationer)
-   ============================== */
+/* =========================================================
+   3A – KÄRNA: state + helpers (INGA $-deklarationer)
+   ========================================================= */
 
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCMDcMxvZdtdQB3I4SJdibcq9UPJ7Mg1u8",
@@ -2010,7 +2010,7 @@ function _fv_selAll(q){ return document.querySelectorAll(q); }
 function _fv_getEl(id){ return document.getElementById(id); }
 
 function _fv_escapeHtml(str){
-  if (str === null || typeof str === "undefined") return "";
+  if (!str && str !== 0) return "";
   return String(str)
     .replace(/&/g,"&amp;")
     .replace(/</g,"&lt;")
@@ -2147,22 +2147,22 @@ function setActiveBankMeta(meta){
   try{ window.activeCloudBankId = String(s.activeBank.bankId || ""); }catch{}
 }
 
-/* Exponera kompatibla namn om andra sektioner råkar använda dem */
-try{
-  window.escapeHtml = window.escapeHtml || _fv_escapeHtml;
-  window.ensureBankShape = window.ensureBankShape || _fv_ensureBankShape;
-  window.loadState = window.loadState || loadState;
-  window.saveState = window.saveState || saveState;
-}catch{}
+/* Bank-nyckel: används för bank-specifik cache/val */
+function _fv_getBankKey(){
+  const s = loadState();
+  const a = s.activeBank || {};
+  const key = [
+    String(a.mode || ""),
+    String(a.ownerUid || ""),
+    String(a.bankId || ""),
+    String(a.publicId || "")
+  ].join("|");
+  return key.trim() ? key : "__noactive__";
+}
 
-/* ==============================
-   Slut 3A
-   ============================== */
-
-
-/* ==============================
-   Start 3B – FIREBASE: init + auth (stabil)
-   ============================== */
+/* =========================================================
+   3B – FIREBASE: init + auth (stabil)
+   ========================================================= */
 
 let firebaseAppInstance = null;
 let firebaseAuthInstance = null;
@@ -2260,14 +2260,9 @@ async function handleGoogleLogout(){
   catch(err){ console.error("Kunde inte logga ut:", err); }
 }
 
-/* ==============================
-   Slut 3B
-   ============================== */
-
-
-/* ==============================
-   Start 3C – MOLN-BANKER: lista + aktivera + spara + delete
-   ============================== */
+/* =========================================================
+   3C – MOLN-BANKER: lista + aktivera + spara + delete + uppdatera aktiv
+   ========================================================= */
 
 function _fv_fmtUpdatedAt(v){
   try{
@@ -2393,7 +2388,6 @@ async function loadCloudBankToLocal(bankId){
   }catch{}
 
   try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
-  try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
 }
 
 async function loadCloudBanksListV5(){
@@ -2478,40 +2472,31 @@ async function loadCloudBanksListV5(){
       </div>
     `;
 
-    const btnAct = li.querySelector('[data-act="activate"]');
-    const btnRos = li.querySelector('[data-act="roster"]');
-    const btnDel = li.querySelector('[data-act="delete"]');
+    li.querySelector('[data-act="activate"]')?.addEventListener("click", async ()=>{
+      try{
+        await loadCloudBankToLocal(bankId);
+        await loadCloudBanksListV5();
+        try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
+      }catch(e){
+        console.error("Kunde inte aktivera bank:", e);
+        alert("Kunde inte aktivera bank. Se konsolen.");
+      }
+    });
 
-    if (btnAct){
-      btnAct.addEventListener("click", async ()=>{
-        try{
-          await loadCloudBankToLocal(bankId);
-          await loadCloudBanksListV5();
-        }catch(e){
-          console.error("Kunde inte aktivera bank:", e);
-          alert("Kunde inte aktivera bank. Se konsolen.");
-        }
-      });
-    }
+    li.querySelector('[data-act="roster"]')?.addEventListener("click", ()=>{
+      try{ if (typeof window.openRosterInline === "function") window.openRosterInline(bankId); }catch{}
+    });
 
-    if (btnRos){
-      btnRos.addEventListener("click", ()=>{
-        try{ if (typeof window.openRosterInline === "function") window.openRosterInline(bankId); }catch{}
-      });
-    }
-
-    if (btnDel){
-      btnDel.addEventListener("click", async ()=>{
-        try{
-          if (!confirm("Ta bort denna moln-bank? (Kan inte ångras)")) return;
-          await deleteCloudBankV5(bankId);
-          await loadCloudBanksListV5();
-        }catch(e){
-          console.error("Kunde inte ta bort bank:", e);
-          alert("Kunde inte ta bort bank. Se konsolen.");
-        }
-      });
-    }
+    li.querySelector('[data-act="delete"]')?.addEventListener("click", async ()=>{
+      try{
+        if (!confirm("Ta bort denna moln-bank? (Kan inte ångras)")) return;
+        await deleteCloudBankV5(bankId);
+        await loadCloudBanksListV5();
+      }catch(e){
+        console.error("Kunde inte ta bort bank:", e);
+        alert("Kunde inte ta bort bank. Se konsolen.");
+      }
+    });
 
     host.appendChild(li);
   }
@@ -2573,10 +2558,48 @@ async function handleSaveToCloudV5(){
     }
 
     try{ await loadCloudBanksListV5(); }catch{}
-    try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
   }catch(e){
     console.error("handleSaveToCloudV5 error:", e);
     alert("Kunde inte spara till molnet. Se konsolen.");
+  }
+}
+
+/* Nytt: Uppdatera ENDAST aktiv bank (efter borttagning av frågor) */
+async function updateActiveCloudBankV5(){
+  await initFirebase();
+  if (!_fv_hasDb() || !_fv_hasTeacher()){
+    alert("Logga in med Google först.");
+    return;
+  }
+
+  const s = loadState();
+  const a = s.activeBank || {};
+  const bankId = String(a.bankId || window.activeCloudBankId || "").trim();
+  if (!bankId){
+    alert("Ingen aktiv bank vald.");
+    return;
+  }
+
+  const uid = String(currentTeacherUser.uid);
+  const ref = firebaseDbInstance
+    .collection(CLOUD_ROOT_COLLECTION).doc(uid)
+    .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bankId);
+
+  const payload = {
+    name: String(a.name || _fv_getCloudBankNameFromUI() || "Moln-bank"),
+    bank: _fv_ensureBankShape(s.bank || {}),
+    goalsMap: Array.isArray(s.goalsMap) ? s.goalsMap : [],
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+
+  try{
+    await ref.set(payload, { merge:true });
+    setActiveBankMeta({ mode:"teacher", ownerUid: uid, bankId, name: payload.name });
+    alert("Aktiv bank uppdaterad i molnet.");
+    try{ await loadCloudBanksListV5(); }catch{}
+  }catch(e){
+    console.error("updateActiveCloudBankV5 error:", e);
+    alert("Kunde inte uppdatera aktiv bank. Se konsolen.");
   }
 }
 
@@ -2613,14 +2636,9 @@ async function deleteCloudBankV5(bankId){
   }catch{}
 }
 
-/* ==============================
-   Slut 3C
-   ============================== */
-
-
-/* ==============================
-   Start 3D – ROSTER: overlay + spara rosterRows/rosterTokens
-   ============================== */
+/* =========================================================
+   3D – ROSTER: overlay + spara rosterRows/rosterTokens
+   ========================================================= */
 
 function _fv_genToken(len = 10){
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -2713,22 +2731,9 @@ function _fv_buildRosterOverlay(){
 
   ov.addEventListener("click", (e)=>{ if (e.target === ov) _fv_closeRoster(); });
 
-  const btnClose = _fv_getEl("fvRosterClose");
-  const btnAdd = _fv_getEl("fvRosterAdd");
-  const btnSave = _fv_getEl("fvRosterSave");
-
-  if (btnClose && !btnClose.__fvBound){
-    btnClose.__fvBound = true;
-    btnClose.addEventListener("click", _fv_closeRoster);
-  }
-  if (btnAdd && !btnAdd.__fvBound){
-    btnAdd.__fvBound = true;
-    btnAdd.addEventListener("click", ()=>_fv_addRosterRow());
-  }
-  if (btnSave && !btnSave.__fvBound){
-    btnSave.__fvBound = true;
-    btnSave.addEventListener("click", async ()=>{ await _fv_saveRosterFromUI(); });
-  }
+  _fv_getEl("fvRosterClose")?.addEventListener("click", _fv_closeRoster);
+  _fv_getEl("fvRosterAdd")?.addEventListener("click", ()=>_fv_addRosterRow());
+  _fv_getEl("fvRosterSave")?.addEventListener("click", async ()=>{ await _fv_saveRosterFromUI(); });
 
   return ov;
 }
@@ -2763,23 +2768,14 @@ function _fv_rowTemplate(row){
       <button class="btn fv3-btn-xs btn-danger" type="button" data-act="del">Ta bort</button>
     </div>
   `;
-
-  const btnGen = wrap.querySelector('[data-act="gen"]');
-  const btnDel = wrap.querySelector('[data-act="del"]');
-
-  if (btnGen){
-    btnGen.addEventListener("click", ()=>{
-      const t = wrap.querySelector('input[data-fv="token"]');
-      if (t) t.value = _fv_genToken(10);
-    });
-  }
-  if (btnDel){
-    btnDel.addEventListener("click", ()=>{
-      wrap.remove();
-      _fv_setRosterStatus("");
-    });
-  }
-
+  wrap.querySelector('[data-act="gen"]')?.addEventListener("click", ()=>{
+    const t = wrap.querySelector('input[data-fv="token"]');
+    if (t) t.value = _fv_genToken(10);
+  });
+  wrap.querySelector('[data-act="del"]')?.addEventListener("click", ()=>{
+    wrap.remove();
+    _fv_setRosterStatus("");
+  });
   return wrap;
 }
 
@@ -2933,23 +2929,34 @@ async function openRosterInline(bankId){
   }
 }
 
-/* ==============================
-   Slut 3D
-   ============================== */
+/* =========================================================
+   3E – PROGRESSIONSFLIK: rosterTabs + elevdocs (bank-specifik cache)
+   ========================================================= */
 
+const _fvTeacherSelectedTokenKeyBase = "fangvaktaren-teacher-selected-student-token-v17";
+const _fvTeacherStudentCacheByBank = Object.create(null);
 
-/* ==============================
-   Start 3E – PROGRESSIONSFLIK: rosterTabs + elevdocs
-   ============================== */
-
-const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-v17";
-const _fvTeacherStudentCache = Object.create(null);
+function _fv_getSelectedTokenKey(){
+  return _fvTeacherSelectedTokenKeyBase + "::" + _fv_getBankKey();
+}
 
 function _fv_getSelectedToken(){
-  try{ return String(localStorage.getItem(_fvTeacherSelectedTokenKey)||""); }catch{ return ""; }
+  try{ return String(localStorage.getItem(_fv_getSelectedTokenKey())||""); }catch{ return ""; }
 }
+
 function _fv_setSelectedToken(t){
-  try{ localStorage.setItem(_fvTeacherSelectedTokenKey, String(t||"")); }catch{}
+  try{ localStorage.setItem(_fv_getSelectedTokenKey(), String(t||"")); }catch{}
+}
+
+function _fv_getStudentCacheForActiveBank(){
+  const k = _fv_getBankKey();
+  if (!_fvTeacherStudentCacheByBank[k]) _fvTeacherStudentCacheByBank[k] = Object.create(null);
+  return _fvTeacherStudentCacheByBank[k];
+}
+
+function _fv_clearActiveBankCache(){
+  const k = _fv_getBankKey();
+  _fvTeacherStudentCacheByBank[k] = Object.create(null);
 }
 
 function _fv_getRosterTabsHost(){
@@ -3125,7 +3132,7 @@ function _fv_renderUl(ul, items, emptyText){
   }
   for (let i=0;i<arr.length;i++){
     const li = document.createElement("li");
-    li.innerHTML = items[i];
+    li.innerHTML = arr[i];
     ul.appendChild(li);
   }
 }
@@ -3166,18 +3173,27 @@ function _fv_computeStrongWeak(goalsMap, prog){
   return { strong, weak };
 }
 
+function _fv_clearProgressUI(msg){
+  const pEl = _fv_getEl("progressPointsText");
+  const strongUl = _fv_getEl("progressStrongList");
+  const weakUl = _fv_getEl("progressWeakList");
+
+  if (pEl) pEl.innerHTML = msg || "Välj en elevflik.";
+  _fv_renderUl(strongUl, [], "—");
+  _fv_renderUl(weakUl, [], "—");
+}
+
 function tryUpdateProgressUI(){
   const pEl = _fv_getEl("progressPointsText");
   const strongUl = _fv_getEl("progressStrongList");
   const weakUl = _fv_getEl("progressWeakList");
 
   const token = _fv_getSelectedToken();
-  const remote = token ? (_fvTeacherStudentCache[token] || null) : null;
+  const cache = _fv_getStudentCacheForActiveBank();
+  const remote = token ? (cache[token] || null) : null;
 
   if (!token){
-    if (pEl) pEl.innerHTML = "Välj en elevflik.";
-    _fv_renderUl(strongUl, [], "—");
-    _fv_renderUl(weakUl, [], "—");
+    _fv_clearProgressUI("Välj en elevflik.");
     return;
   }
 
@@ -3223,14 +3239,17 @@ async function trySelectStudentToken(token){
     }
   }catch{}
 
-  if (_fvTeacherStudentCache[t]){
+  _fv_clearProgressUI("Laddar elevresultat...");
+
+  const cache = _fv_getStudentCacheForActiveBank();
+  if (cache[t]){
     tryUpdateProgressUI();
     return;
   }
 
   try{
     const data = await _fv_fetchStudentDoc(t);
-    if (data) _fvTeacherStudentCache[t] = data;
+    if (data) cache[t] = data;
   }catch(e){
     console.warn("Kunde inte läsa elevdoc:", e);
   }
@@ -3255,19 +3274,15 @@ async function tryRefreshRosterTabs(){
     const sel = _fv_getSelectedToken();
     if (!sel && tabs.length) trySelectStudentToken(tabs[0].token);
     if (sel && tabs.length && !tabs.find(x=>x.token===sel)) trySelectStudentToken(tabs[0].token);
+    if (sel && !tabs.length) _fv_clearProgressUI("Ingen elevlista i denna bank.");
   }catch(e){
     console.warn("Kunde inte läsa roster för flikar:", e);
   }
 }
 
-/* ==============================
-   Slut 3E
-   ============================== */
-
-
-/* ==============================
-   Start 3F – UI refresh: goals-select + bankstatus hook
-   ============================== */
+/* =========================================================
+   3F – UI refresh: goals-select + bankstatus hook
+   ========================================================= */
 
 function _fv_refreshGoalSelects(){
   const ids = ["mcqGoalPart","mcqJsonGoalPart","imgGoalPart","dragGoalPart"];
@@ -3312,20 +3327,19 @@ try{
   if (!window.__fv_bank_changed_listener){
     window.__fv_bank_changed_listener = true;
     window.addEventListener("fv-bank-changed", ()=>{
+      try{
+        _fv_clearActiveBankCache();
+        _fv_clearProgressUI("Välj en elevflik.");
+      }catch{}
       try{ fvRefreshTeacherBankUI(); }catch{}
       try{ tryRefreshRosterTabs(true); }catch{}
     });
   }
 }catch{}
 
-/* ==============================
-   Slut 3F
-   ============================== */
-
-
-/* ==============================
-   Start 3G – BUTTON BIND: gör att knapparna fungerar även om annan bind saknas
-   ============================== */
+/* =========================================================
+   3G – BUTTON BIND + NY KNAPP: Uppdatera aktiv bank
+   ========================================================= */
 
 function _fv_bindOnce(btn, fn){
   if (!btn) return;
@@ -3334,19 +3348,37 @@ function _fv_bindOnce(btn, fn){
   btn.addEventListener("click", fn);
 }
 
+function _fv_ensureUpdateActiveBtn(){
+  if (_fv_getEl("btnUpdateActiveCloudBank")) return;
+
+  const saveBtn =
+    _fv_getEl("btnSaveToCloud") ||
+    _fv_getEl("btnSaveCloud") ||
+    _fv_getEl("btnSaveCloudBank");
+
+  if (!saveBtn || !saveBtn.parentElement) return;
+
+  const btn = document.createElement("button");
+  btn.id = "btnUpdateActiveCloudBank";
+  btn.type = "button";
+  btn.className = saveBtn.className || "btn btn-sm";
+  btn.textContent = "💾 Uppdatera aktiv bank";
+  btn.style.marginLeft = "8px";
+  saveBtn.parentElement.appendChild(btn);
+}
+
 function _fv_tryBindButtons(){
   _fv_bindOnce(_fv_getEl("btnGoogleLogin"), handleGoogleLogin);
   _fv_bindOnce(_fv_getEl("btnGoogleLogout"), handleGoogleLogout);
 
   const btnLoad = _fv_getEl("btnLoadCloudBanks") || _fv_getEl("btnCloudBanksLoad") || _fv_getEl("btnLoadBanks");
-  _fv_bindOnce(btnLoad, ()=>{
-    try{ loadCloudBanksListV5(); }catch(e){ console.warn(e); }
-  });
+  _fv_bindOnce(btnLoad, ()=>{ try{ loadCloudBanksListV5(); }catch(e){ console.warn(e); } });
 
   const btnSave = _fv_getEl("btnSaveToCloud") || _fv_getEl("btnSaveCloud") || _fv_getEl("btnSaveCloudBank");
-  _fv_bindOnce(btnSave, ()=>{
-    try{ handleSaveToCloudV5(); }catch(e){ console.warn(e); }
-  });
+  _fv_bindOnce(btnSave, ()=>{ try{ handleSaveToCloudV5(); }catch(e){ console.warn(e); } });
+
+  _fv_ensureUpdateActiveBtn();
+  _fv_bindOnce(_fv_getEl("btnUpdateActiveCloudBank"), ()=>{ try{ updateActiveCloudBankV5(); }catch(e){ console.warn(e); } });
 
   const btnRoster = _fv_getEl("btnOpenRoster");
   _fv_bindOnce(btnRoster, ()=>{
@@ -3357,14 +3389,23 @@ function _fv_tryBindButtons(){
   });
 }
 
-/* ==============================
-   Slut 3G
-   ============================== */
+(function FV_BindOnReady(){
+  try{
+    if (!window.__fv_btn_bind_ready){
+      window.__fv_btn_bind_ready = true;
+      document.addEventListener("DOMContentLoaded", ()=>{ try{ _fv_tryBindButtons(); }catch{} });
+    }
+  }catch{}
+  try{
+    if (document.readyState === "interactive" || document.readyState === "complete"){
+      setTimeout(()=>{ try{ _fv_tryBindButtons(); }catch{} }, 30);
+    }
+  }catch{}
+})();
 
-
-/* ==============================
-   Start 3H – LISTRENDER (MCQ/IMG/DRAG) + MINIATYR + STABIL DRAG-VISNING
-   ============================== */
+/* =========================================================
+   3H – LISTRENDER (MCQ/IMG/DRAG) + MINIATYR + STABIL DRAG-VISNING
+   ========================================================= */
 
 (function FV3H_EnsureStyles(){
   if (document.getElementById("fv3h-qstyles")) return;
@@ -3655,7 +3696,6 @@ function _fv3h_renderAllQuestionLists(){
   try{ _fv3h_renderDragList(); }catch(e){ console.warn("DRAG render fail:", e); }
 }
 
-/* Auto-refresh triggers */
 (function FV3H_BindAutoRefresh(){
   try{ window.__fv3h_renderAllQuestionLists = _fv3h_renderAllQuestionLists; }catch{}
 
@@ -3671,7 +3711,8 @@ function _fv3h_renderAllQuestionLists(){
           "btnMcqAdd","btnMcqUpdate","btnMcqClear","btnMcqJsonImport",
           "btnImgAdd","btnImgClear",
           "btnDragAddQuestion","btnDragClearForm","btnDragAddItem",
-          "btnLoadCloudBanks","btnSaveToCloud","btnSaveCloud","btnSaveCloudBank"
+          "btnLoadCloudBanks","btnSaveToCloud","btnSaveCloud","btnSaveCloudBank",
+          "btnUpdateActiveCloudBank"
         ]);
         if (hits.has(id)){
           setTimeout(_fv3h_renderAllQuestionLists, 60);
@@ -3688,19 +3729,33 @@ function _fv3h_renderAllQuestionLists(){
       fi.addEventListener("change", ()=>{ setTimeout(_fv3h_renderAllQuestionLists, 120); });
     }
   }catch{}
+
+  try{
+    if (!window.__fv3h_domReadyBound){
+      window.__fv3h_domReadyBound = true;
+      document.addEventListener("DOMContentLoaded", ()=>{ setTimeout(_fv3h_renderAllQuestionLists, 30); });
+    }
+  }catch{}
+
+  try{
+    if (document.readyState === "interactive" || document.readyState === "complete"){
+      setTimeout(_fv3h_renderAllQuestionLists, 30);
+    }
+  }catch{}
 })();
 
-/* ==============================
-   Slut 3H
-   ============================== */
-
-
-/* ==============================
-   Start 3I – OVERRIDE/EXPORT: säkra globala API-namn
-   ============================== */
+/* =========================================================
+   3I – OVERRIDE/EXPORT: säkra globala API-namn
+   ========================================================= */
 
 (function FV3_OverrideAPIs(){
   try{
+    window.loadState = loadState;
+    window.saveState = saveState;
+    window.setActiveBankMeta = setActiveBankMeta;
+    window.ensureBankShape = _fv_ensureBankShape;
+    window.escapeHtml = _fv_escapeHtml;
+
     window.initFirebase = initFirebase;
 
     window.handleGoogleLogin = handleGoogleLogin;
@@ -3714,6 +3769,8 @@ function _fv3h_renderAllQuestionLists(){
     window.handleSaveToCloud = handleSaveToCloudV5;
     window.handleSaveToCloudV5 = handleSaveToCloudV5;
 
+    window.updateActiveCloudBankV5 = updateActiveCloudBankV5;
+
     window.deleteCloudBank = deleteCloudBankV5;
     window.deleteCloudBankV5 = deleteCloudBankV5;
 
@@ -3724,49 +3781,10 @@ function _fv3h_renderAllQuestionLists(){
     window.tryUpdateProgressUI = tryUpdateProgressUI;
 
     window.fvRefreshTeacherBankUI = fvRefreshTeacherBankUI;
+
+    window._fv_tryBindButtons = _fv_tryBindButtons;
   }catch{}
 })();
-
-/* ==============================
-   Slut 3I
-   ============================== */
-
-
-/* ==============================
-   Start 3Z – INIT: bind + initFirebase + första render
-   ============================== */
-
-(function FV3_Init(){
-  try{
-    if (!window.__fv3_init_bound){
-      window.__fv3_init_bound = true;
-
-      document.addEventListener("DOMContentLoaded", ()=>{
-        try{ _fv_tryBindButtons(); }catch{}
-        try{ initFirebase(); }catch{}
-        try{
-          setTimeout(()=>{
-            try{ fvRefreshTeacherBankUI(); }catch{}
-            try{ tryRefreshRosterTabs(true); }catch{}
-          }, 60);
-        }catch{}
-      });
-
-      if (document.readyState === "interactive" || document.readyState === "complete"){
-        setTimeout(()=>{
-          try{ _fv_tryBindButtons(); }catch{}
-          try{ initFirebase(); }catch{}
-          try{ fvRefreshTeacherBankUI(); }catch{}
-          try{ tryRefreshRosterTabs(true); }catch{}
-        }, 60);
-      }
-    }
-  }catch{}
-})();
-
-/* ==============================
-   Slut 3Z
-   ============================== */
 
 </script>
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker, roster, progression, editor-refresh) -->
