@@ -3022,12 +3022,6 @@ const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-
 const _fvTeacherStudentCache = Object.create(null);
 const _fvTeacherStudentCacheTtlMs = 15000; // 15s – så byte elev inte “tappar” uppdateringar men hämtar om ofta
 
-// Bedömningslogik (lärarvy):
-// A = senaste N per nivå (recentByGoalLevel) styr stark/svag
-// C = totals per nivå (correct/wrongByGoalLevel) fallback om A saknas/för lite data
-// B = trend (decay/EMA) visas som pil, avgör inte stark/svag
-const _fvAssessMinAttempts = 3;
-
 function _fv_getSelectedToken(){
   try{ return String(localStorage.getItem(_fvTeacherSelectedTokenKey)||""); }catch{ return ""; }
 }
@@ -3198,21 +3192,63 @@ function _fv_getProgressionFromRemote(d){
   const prog = (d && d.progression) ? d.progression : (d && d.prog) ? d.prog : {};
   return {
     totalPoints: _fv_safeNum(prog.totalPoints != null ? prog.totalPoints : (d.totalPoints != null ? d.totalPoints : d.points), 0),
-
-    // äldre export (blandat)
     correctByGoalId: (prog.correctByGoalId && typeof prog.correctByGoalId==="object") ? prog.correctByGoalId : (d.correctByGoalId||{}),
-    wrongByGoalId: (prog.wrongByGoalId && typeof prog.wrongByGoalId==="object") ? prog.wrongByGoalId : (d.wrongByGoalId||{}),
-
-    // per nivå (C-fallback)
-    correctByGoalLevel: (prog.correctByGoalLevel && typeof prog.correctByGoalLevel==="object") ? prog.correctByGoalLevel : (d.correctByGoalLevel||null),
-    wrongByGoalLevel: (prog.wrongByGoalLevel && typeof prog.wrongByGoalLevel==="object") ? prog.wrongByGoalLevel : (d.wrongByGoalLevel||null),
-
-    // senaste N (A-styr)
-    recentByGoalLevel: (prog.recentByGoalLevel && typeof prog.recentByGoalLevel==="object") ? prog.recentByGoalLevel : (d.recentByGoalLevel||null),
-
-    // trend/EMA (B-indikator)
-    decayByGoalLevel: (prog.decayByGoalLevel && typeof prog.decayByGoalLevel==="object") ? prog.decayByGoalLevel : (d.decayByGoalLevel||null)
+    wrongByGoalId: (prog.wrongByGoalId && typeof prog.wrongByGoalId==="object") ? prog.wrongByGoalId : (d.wrongByGoalId||{})
   };
+}
+
+function _fv_getAttemptsFromRemote(d){
+  const prog = (d && d.progression && typeof d.progression==="object") ? d.progression : {};
+  const candABL =
+    (prog.attemptsByLevel && typeof prog.attemptsByLevel==="object") ? prog.attemptsByLevel :
+    (d.attemptsByLevel && typeof d.attemptsByLevel==="object") ? d.attemptsByLevel :
+    (d.stats && d.stats.attemptsByLevel && typeof d.stats.attemptsByLevel==="object") ? d.stats.attemptsByLevel :
+    null;
+
+  const out = { E:0, C:0, A:0, total:0, has:false };
+
+  if (candABL){
+    out.E = _fv_safeNum(candABL.E, 0);
+    out.C = _fv_safeNum(candABL.C, 0);
+    out.A = _fv_safeNum(candABL.A, 0);
+    out.total = out.E + out.C + out.A;
+    out.has = (out.total > 0);
+    return out;
+  }
+
+  const totalCand =
+    (prog.attemptsTotal != null) ? prog.attemptsTotal :
+    (d.attemptsTotal != null) ? d.attemptsTotal :
+    (d.attempts != null) ? d.attempts :
+    (d.playCount != null) ? d.playCount :
+    (d.gamesPlayed != null) ? d.gamesPlayed :
+    null;
+
+  if (totalCand != null){
+    out.total = _fv_safeNum(totalCand, 0);
+    out.has = (out.total > 0);
+    return out;
+  }
+
+  const subs =
+    Array.isArray(d && d.submissions) ? d.submissions :
+    Array.isArray(d && d.results) ? d.results :
+    Array.isArray(prog && prog.submissions) ? prog.submissions :
+    null;
+
+  if (subs && subs.length){
+    let e=0,c=0,a=0;
+    for (let i=0;i<subs.length;i++){
+      const lv = String((subs[i] && (subs[i].level || subs[i].lvl || subs[i].niva)) || "").toUpperCase();
+      if (lv==="A") a++;
+      else if (lv==="C") c++;
+      else if (lv==="E") e++;
+    }
+    out.E=e; out.C=c; out.A=a; out.total=e+c+a; out.has=(out.total>0);
+    return out;
+  }
+
+  return out;
 }
 
 function _fv_renderUl(ul, items, emptyText){
@@ -3280,268 +3316,59 @@ function _fv_pickThresholdForGoalId(goalId, levelsMap){
   return 0.50;
 }
 
-function _fv_normLevelObj(x){
-  return (x && typeof x === "object") ? x : {};
-}
-
-function _fv_recentStatsFromAny(x){
-  // Stöd: array [1,0,1], array [{ok:true}], obj {c,w}, obj {correct,wrong}, obj {items:[...]}, obj {recent:[...]}
-  if (!x) return null;
-
-  if (Array.isArray(x)){
-    let c=0,w=0,a=0;
-    for (let i=0;i<x.length;i++){
-      const it = x[i];
-      const ok = (typeof it === "boolean") ? it
-              : (typeof it === "number") ? (it === 1)
-              : (it && typeof it === "object" && ("ok" in it)) ? !!it.ok
-              : (it && typeof it === "object" && ("correct" in it)) ? !!it.correct
-              : null;
-      if (ok === null) continue;
-      a++;
-      if (ok) c++; else w++;
-    }
-    return { c, w, a };
-  }
-
-  if (typeof x === "object"){
-    if (Array.isArray(x.items)) return _fv_recentStatsFromAny(x.items);
-    if (Array.isArray(x.recent)) return _fv_recentStatsFromAny(x.recent);
-
-    const c = _fv_safeNum(
-      ("c" in x) ? x.c :
-      ("correct" in x) ? x.correct :
-      ("right" in x) ? x.right : 0, 0
-    );
-    const w = _fv_safeNum(
-      ("w" in x) ? x.w :
-      ("wrong" in x) ? x.wrong :
-      ("errors" in x) ? x.errors : 0, 0
-    );
-    const a = _fv_safeNum(
-      ("a" in x) ? x.a :
-      ("total" in x) ? x.total :
-      (c+w), (c+w)
-    );
-    if ((c+w+a) === 0) return null;
-    return { c, w, a: (a>0 ? a : (c+w)) };
-  }
-
-  return null;
-}
-
-function _fv_getRecentStats(prog, level, goalId){
-  const rb = _fv_normLevelObj(prog && prog.recentByGoalLevel ? prog.recentByGoalLevel : null);
-  const lv = String(level||"").toUpperCase();
-  const byLv = _fv_normLevelObj(rb[lv]);
-  const x = byLv ? byLv[String(goalId)] : null;
-  return _fv_recentStatsFromAny(x);
-}
-
-function _fv_getTotalsStats(prog, level, goalId){
-  const cL = _fv_normLevelObj(prog && prog.correctByGoalLevel ? prog.correctByGoalLevel : null);
-  const wL = _fv_normLevelObj(prog && prog.wrongByGoalLevel ? prog.wrongByGoalLevel : null);
-
-  const lv = String(level||"").toUpperCase();
-  const cObj = _fv_normLevelObj(cL[lv]);
-  const wObj = _fv_normLevelObj(wL[lv]);
-
-  const c = _fv_safeNum(cObj[String(goalId)], 0);
-  const w = _fv_safeNum(wObj[String(goalId)], 0);
-  const a = c + w;
-  if (a <= 0) return null;
-  return { c, w, a };
-}
-
-function _fv_getTrendSymbol(prog, level, goalId){
-  const dL = _fv_normLevelObj(prog && prog.decayByGoalLevel ? prog.decayByGoalLevel : null);
-  const lv = String(level||"").toUpperCase();
-  const byLv = _fv_normLevelObj(dL[lv]);
-  const x = byLv ? byLv[String(goalId)] : null;
-
-  let ema = null;
-  let prev = null;
-
-  if (typeof x === "number"){
-    ema = x;
-  } else if (x && typeof x === "object"){
-    ema = _fv_safeNum(
-      ("ema" in x) ? x.ema :
-      ("value" in x) ? x.value :
-      ("v" in x) ? x.v :
-      ("score" in x) ? x.score : NaN,
-      NaN
-    );
-    prev = _fv_safeNum(
-      ("prev" in x) ? x.prev :
-      ("previous" in x) ? x.previous :
-      ("last" in x) ? x.last :
-      ("lastEma" in x) ? x.lastEma : NaN,
-      NaN
-    );
-  }
-
-  if (!isFinite(ema)) return "";
-  if (!isFinite(prev)) return `<span class="mini">•</span>`;
-
-  const delta = ema - prev;
-  if (delta >= 0.03) return `<span class="mini">⬆️</span>`;
-  if (delta <= -0.03) return `<span class="mini">⬇️</span>`;
-  return `<span class="mini">➡️</span>`;
-}
-
 function _fv_computeStrongWeak(goalsMap, prog, bank){
   const gm = Array.isArray(goalsMap) ? goalsMap : [];
+  const corr = (prog && prog.correctByGoalId) ? prog.correctByGoalId : {};
+  const wrong = (prog && prog.wrongByGoalId) ? prog.wrongByGoalId : {};
+
   const gmIndex = Object.create(null);
   for (let i=0;i<gm.length;i++){
     const g = gm[i] || {};
     gmIndex[String(g.id)] = g;
   }
 
-  const hasPerLevel =
-    !!(prog && (prog.recentByGoalLevel || prog.correctByGoalLevel || prog.wrongByGoalLevel || prog.decayByGoalLevel));
+  const levelsMap = _fv_goalIdLevelsMapFromBank(bank);
 
-  // Bakåtkomp: om per-level saknas helt, kör gamla "mixade" logiken (men tröskel baserad på frågors nivåförekomst)
-  if (!hasPerLevel){
-    const corr = (prog && prog.correctByGoalId) ? prog.correctByGoalId : {};
-    const wrong = (prog && prog.wrongByGoalId) ? prog.wrongByGoalId : {};
-    const levelsMap = _fv_goalIdLevelsMapFromBank(bank);
-
-    const keys = new Set();
-    Object.keys(corr||{}).forEach(k=>keys.add(String(k)));
-    Object.keys(wrong||{}).forEach(k=>keys.add(String(k)));
-
-    const rows = [];
-    keys.forEach((k)=>{
-      const c = _fv_safeNum(corr[k],0);
-      const w = _fv_safeNum(wrong[k],0);
-      const a = c+w;
-      if (a<=0) return;
-
-      const g = gmIndex[k] || {};
-      const goal = String(g.goal||"").trim();
-      const parts = String(g.parts||g.part||"").trim();
-
-      let label = "";
-      if (goal || parts){
-        if (goal && parts) label = `${_fv_escapeHtml(goal)} — ${_fv_escapeHtml(parts)}`;
-        else label = _fv_escapeHtml(goal || parts);
-      }else{
-        label = `Delbit-id: ${_fv_escapeHtml(k)}`;
-      }
-
-      const acc = a ? (c/a) : 0;
-      const th = _fv_pickThresholdForGoalId(k, levelsMap);
-
-      rows.push({ key:k, label, c, w, a, acc, th });
-    });
-
-    const strong = rows
-      .filter(r=> r.a >= _fvAssessMinAttempts && r.acc >= r.th)
-      .sort((a,b)=> (b.acc-a.acc) || (b.a-a.a))
-      .slice(0,10)
-      .map(r=>`${r.label} <span class="mini">(${r.c}/${r.a} rätt, ${Math.round(r.acc*100)}%)</span>`);
-
-    const weak = rows
-      .filter(r=> r.a >= _fvAssessMinAttempts && r.acc < r.th)
-      .sort((a,b)=> (a.acc-b.acc) || (b.a-a.a))
-      .slice(0,10)
-      .map(r=>`${r.label} <span class="mini">(${r.c}/${r.a} rätt, ${Math.round(r.acc*100)}%)</span>`);
-
-    return { strong, weak };
-  }
-
-  // Ny logik: A (recent) per nivå styr, C (totals per nivå) fallback, B (trend) bara indikator
-  const levels = ["E","C","A"];
   const keys = new Set();
-
-  // Samla goalIds från både recent och totals
-  for (let li=0; li<levels.length; li++){
-    const lv = levels[li];
-
-    const rb = _fv_normLevelObj(prog.recentByGoalLevel ? prog.recentByGoalLevel[lv] : null);
-    Object.keys(rb||{}).forEach(k=>keys.add(String(k)));
-
-    const cL = _fv_normLevelObj(prog.correctByGoalLevel ? prog.correctByGoalLevel[lv] : null);
-    const wL = _fv_normLevelObj(prog.wrongByGoalLevel ? prog.wrongByGoalLevel[lv] : null);
-    Object.keys(cL||{}).forEach(k=>keys.add(String(k)));
-    Object.keys(wL||{}).forEach(k=>keys.add(String(k)));
-  }
+  Object.keys(corr||{}).forEach(k=>keys.add(String(k)));
+  Object.keys(wrong||{}).forEach(k=>keys.add(String(k)));
 
   const rows = [];
-  keys.forEach((goalId)=>{
-    for (let li=0; li<levels.length; li++){
-      const lv = levels[li];
+  keys.forEach((k)=>{
+    const c = _fv_safeNum(corr[k],0);
+    const w = _fv_safeNum(wrong[k],0);
+    const a = c+w;
+    if (a<=0) return;
 
-      // A: recent
-      const r = _fv_getRecentStats(prog, lv, goalId);
-      const t = _fv_getTotalsStats(prog, lv, goalId);
+    const g = gmIndex[k] || null;
+    const goal = g ? String(g.goal||"").trim() : "";
+    const part = g ? String(g.parts||g.part||"").trim() : "";
 
-      let basis = null;
-      let basisLabel = "";
-
-      if (r && r.a >= _fvAssessMinAttempts){
-        basis = r;
-        basisLabel = "senaste";
-      } else if (t && t.a >= _fvAssessMinAttempts){
-        basis = t;
-        basisLabel = "total";
-      } else {
-        // För lite data => visa inte som stark/svag (undviker falska slutsatser)
-        return;
-      }
-
-      const c = _fv_safeNum(basis.c, 0);
-      const a = _fv_safeNum(basis.a, 0);
-      const acc = a ? (c / a) : 0;
-      const th = _fv_thresholdForLevel(lv);
-
-      const g = gmIndex[String(goalId)] || {};
-      const goal = String(g.goal||"").trim();
-      const parts = String(g.parts||g.part||"").trim();
-
-      let label = "";
-      if (goal || parts){
-        if (goal && parts) label = `${_fv_escapeHtml(goal)} — ${_fv_escapeHtml(parts)}`;
-        else label = _fv_escapeHtml(goal || parts);
-      }else{
-        label = `Delbit-id: ${_fv_escapeHtml(goalId)}`;
-      }
-
-      const trend = _fv_getTrendSymbol(prog, lv, goalId);
-      rows.push({
-        goalId: String(goalId),
-        level: lv,
-        label,
-        c,
-        a,
-        acc,
-        th,
-        basisLabel,
-        trend
-      });
+    let label = "";
+    if (g && (goal || part)){
+      if (goal && part) label = `Delbit ${_fv_escapeHtml(k)}: ${_fv_escapeHtml(goal)} — ${_fv_escapeHtml(part)}`;
+      else label = `Delbit ${_fv_escapeHtml(k)}: ${_fv_escapeHtml(goal || part)}`;
+    }else{
+      label = `Okänd delbit (id ${_fv_escapeHtml(k)}) <span class="mini">– kontrollera kopplingen i frågebanken</span>`;
     }
+
+    const acc = a ? (c/a) : 0;
+    const th = _fv_pickThresholdForGoalId(k, levelsMap);
+
+    rows.push({ key:k, label, c, w, a, acc, th });
   });
 
   const strong = rows
     .filter(r=> r.acc >= r.th)
-    .sort((a,b)=> (b.acc-a.acc) || (b.a-a.a) || (a.level < b.level ? 1 : -1))
+    .sort((a,b)=> (b.acc-a.acc) || (b.a-a.a))
     .slice(0,10)
-    .map(r=>{
-      const pct = Math.round(r.acc*100);
-      const thPct = Math.round(r.th*100);
-      return `${r.label} ${r.trend} <span class="mini">(<b>${_fv_escapeHtml(r.level)}</b> • ${r.basisLabel} • ${r.c}/${r.a} rätt, ${pct}% / gräns ${thPct}%)</span>`;
-    });
+    .map(r=>`${r.label} <span class="mini">(${r.c}/${r.a} rätt, ${Math.round(r.acc*100)}%)</span>`);
 
   const weak = rows
     .filter(r=> r.acc < r.th)
-    .sort((a,b)=> (a.acc-b.acc) || (b.a-a.a) || (a.level < b.level ? 1 : -1))
+    .sort((a,b)=> (a.acc-b.acc) || (b.a-a.a))
     .slice(0,10)
-    .map(r=>{
-      const pct = Math.round(r.acc*100);
-      const thPct = Math.round(r.th*100);
-      return `${r.label} ${r.trend} <span class="mini">(<b>${_fv_escapeHtml(r.level)}</b> • ${r.basisLabel} • ${r.c}/${r.a} rätt, ${pct}% / gräns ${thPct}%)</span>`;
-    });
+    .map(r=>`${r.label} <span class="mini">(${r.c}/${r.a} rätt, ${Math.round(r.acc*100)}%)</span>`);
 
   return { strong, weak };
 }
@@ -3579,14 +3406,19 @@ function tryUpdateProgressUI(){
   const prog = _fv_getProgressionFromRemote(remote);
   const total = _fv_safeNum(prog.totalPoints, 0);
 
-  if (pEl) pEl.innerHTML = `Totalt: <strong>${_fv_escapeHtml(total)} p</strong>. <span class="mini">(Stark/svag kräver minst ${_fvAssessMinAttempts} försök per nivå.)</span>`;
+  const attempts = _fv_getAttemptsFromRemote(remote);
+  const attemptsHtml = attempts.has
+    ? ` <span class="mini">(Försök: E ${_fv_escapeHtml(attempts.E)} • C ${_fv_escapeHtml(attempts.C)} • A ${_fv_escapeHtml(attempts.A)} • Totalt ${_fv_escapeHtml(attempts.total)})</span>`
+    : ` <span class="mini">(Försök: saknas i elevdata)</span>`;
+
+  if (pEl) pEl.innerHTML = `Totalt: <strong>${_fv_escapeHtml(total)} p</strong>.${attemptsHtml}`;
 
   const gm = Array.isArray(sTeacher.goalsMap) ? sTeacher.goalsMap : [];
   const bank = sTeacher.bank || {};
   const { strong, weak } = _fv_computeStrongWeak(gm, prog, bank);
 
   _fv_renderUl(strongUl, strong, "För lite data för tydliga styrkor ännu – låt eleven spela mer på nivån.");
-  _fv_renderUl(weakUl, weak, "För lite data för tydliga svagheter ännu – låt eleven spela mer på nivån.");
+  _fv_renderUl(weakUl, weak, "Inga delbitar att öva på ännu.");
 }
 
 async function trySelectStudentToken(token){
@@ -3645,7 +3477,6 @@ async function tryRefreshRosterTabs(){
 }
 
 /* slut Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) */
-
 
 
 
@@ -5546,6 +5377,161 @@ if (document.readyState === "loading"){
   _fv4_bindOnce();
 }
 /* slut Sektion 4H: Bindningar (knappar) */
+
+
+
+
+/* start Sektion 4I: FIREBASE – elevinlämning (attemptsByLevel + attemptsTotal) */
+
+function _fv4_safeNum2(n, fallback=0){
+  const x = Number(n);
+  return isFinite(x) ? x : fallback;
+}
+
+function _fv4_getStudentTokenForCloud(){
+  try{
+    const s = _fv4_loadState();
+    const qs = new URLSearchParams(location.search);
+    const t =
+      (s && (s.studentToken || s.token || (s.student && s.student.token))) ||
+      qs.get("token") ||
+      "";
+    return String(t || "").trim();
+  }catch(e){
+    return "";
+  }
+}
+
+function _fv4_getStudentsCollectionRefForCloud(){
+  try{
+    if (!window.firebaseDbInstance || typeof firebaseDbInstance.collection !== "function") return null;
+
+    const s = _fv4_loadState();
+    const ab = (s && s.activeBank && typeof s.activeBank==="object") ? s.activeBank : {};
+    const qs = new URLSearchParams(location.search);
+
+    const publicId = String(ab.publicId || qs.get("public") || "").trim();
+    if (publicId){
+      return firebaseDbInstance
+        .collection(PUBLIC_BANKS_COLLECTION).doc(publicId)
+        .collection("students");
+    }
+
+    const ownerUid = String(ab.ownerUid || "").trim();
+    const bankId = String(ab.bankId || ab.id || "").trim();
+    if (ownerUid && bankId){
+      return firebaseDbInstance
+        .collection(CLOUD_ROOT_COLLECTION).doc(ownerUid)
+        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(bankId)
+        .collection("students");
+    }
+
+    if (window.currentTeacherUser && currentTeacherUser.uid && String(window.activeCloudBankId||"").trim()){
+      return firebaseDbInstance
+        .collection(CLOUD_ROOT_COLLECTION).doc(String(currentTeacherUser.uid))
+        .collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(window.activeCloudBankId))
+        .collection("students");
+    }
+
+    return null;
+  }catch(e){
+    return null;
+  }
+}
+
+async function fvSubmitLastResultToCloud(){
+  try{ if (typeof initFirebase === "function") await initFirebase(); }catch(e){}
+
+  try{
+    if (!window.firebase || !window.firebaseDbInstance) return { ok:false, reason:"no_firebase" };
+    if (!firebase.firestore || !firebase.firestore.FieldValue) return { ok:false, reason:"no_fieldvalue" };
+
+    const ref = _fv4_getStudentsCollectionRefForCloud();
+    if (!ref) return { ok:false, reason:"no_ref" };
+
+    const token = _fv4_getStudentTokenForCloud();
+    if (!token) return { ok:false, reason:"no_token" };
+
+    const s0 = _fv4_loadState();
+    const s = _fv4_ensureProgressionShape(s0);
+    const prog = (s && s.progression) ? s.progression : {};
+
+    const last = (prog && prog.lastResult && typeof prog.lastResult==="object") ? prog.lastResult : null;
+    const lvlRaw =
+      (lastSubmission && lastSubmission.level) ||
+      (last && last.level) ||
+      "E";
+    const lvl = (String(lvlRaw || "E").toUpperCase() === "A" || String(lvlRaw || "E").toUpperCase() === "C")
+      ? String(lvlRaw || "E").toUpperCase()
+      : "E";
+
+    const inc = firebase.firestore.FieldValue.increment(1);
+    const ts = (firebase.firestore.FieldValue.serverTimestamp)
+      ? firebase.firestore.FieldValue.serverTimestamp()
+      : _fv4_nowIso();
+
+    const lastCompact = last ? last : (lastSubmission ? {
+      level: lvl,
+      score: _fv4_safeNum2(lastSubmission.score, 0),
+      correct: _fv4_safeNum2(lastSubmission.correct, 0),
+      total: _fv4_safeNum2(lastSubmission.total, 0),
+      pointsGained: _fv4_safeNum2(lastSubmission.pointsGained, 0),
+      totalPointsAfter: _fv4_safeNum2(lastSubmission.totalPointsAfter, _fv4_safeNum2(prog.totalPoints, 0)),
+      timestamp: String(lastSubmission.timestamp || _fv4_nowIso())
+    } : null);
+
+    const data = {
+      studentName: (s.student && s.student.name) ? String(s.student.name) : "",
+      studentClass: (s.student && s.student.klass) ? String(s.student.klass) : "",
+      updatedAt: ts,
+
+      "progression.totalPoints": _fv4_safeNum2(prog.totalPoints, 0),
+      "progression.correctByGoalId": (prog.correctByGoalId && typeof prog.correctByGoalId==="object") ? prog.correctByGoalId : {},
+      "progression.wrongByGoalId": (prog.wrongByGoalId && typeof prog.wrongByGoalId==="object") ? prog.wrongByGoalId : {},
+      "progression.lastResult": lastCompact,
+
+      "progression.attemptsTotal": inc
+    };
+    data[`progression.attemptsByLevel.${lvl}`] = inc;
+
+    await ref.doc(String(token)).set(data, { merge: true });
+    return { ok:true };
+  }catch(e){
+    console.warn("fvSubmitLastResultToCloud misslyckades:", e);
+    return { ok:false, reason:"error" };
+  }
+}
+
+try{ window.fvSubmitLastResultToCloud = fvSubmitLastResultToCloud; }catch(e){}
+
+/* Auto-hook: kör efter varje finishLevel (utan att du måste ändra 4G) */
+(function(){
+  try{
+    if (window.__fv4_finishlevel_cloud_hooked) return;
+    if (typeof window.finishLevel !== "function") return;
+    window.__fv4_finishlevel_cloud_hooked = true;
+
+    const _orig = window.finishLevel;
+    window.finishLevel = function(){
+      const r = _orig.apply(this, arguments);
+      try{
+        if (typeof window.fvSubmitLastResultToCloud === "function"){
+          Promise.resolve().then(()=>window.fvSubmitLastResultToCloud()).catch(()=>{});
+        }
+      }catch(e){}
+      return r;
+    };
+  }catch(e){}
+})();
+
+/* slut Sektion 4I: FIREBASE – elevinlämning (attemptsByLevel + attemptsTotal) */
+
+
+
+
+
+
+
 </script>
 <!-- slut SEKTION 4: SCRIPT & LOGIK FÅNGVAKTAREN (elev, spel, progression & highscore) -->
 
