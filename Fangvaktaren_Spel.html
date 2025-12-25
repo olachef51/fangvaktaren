@@ -2704,6 +2704,295 @@ Gurka
 </script>
 <!-- slut SEKTION 3D: ROSTER (elevlista-knapp tillbaka + bindning + minimal modal-styrning utan designändring) -->
 
+
+<!-- start SEKTION 3X: FIX – Molnlist-render till #cloudBanksListV4 + återställ knappar + format-migrering (ingen design/CSS/HTML ändras) -->
+<script>
+(function(){
+  "use strict";
+
+  const _id = (x) => document.getElementById(x);
+
+  const LIST_ID = "cloudBanksListV4";
+  const STATUS_ID = "cloudBankStatus"; // finns hos dig enligt din ID-scan
+  const BTN_LOAD_ID = "btnLoadCloudBanks";
+
+  const CLOUD_ROOT_COLLECTION = (window.CLOUD_ROOT_COLLECTION || "teachers");
+  const CLOUD_BANKS_SUBCOLLECTION = (window.CLOUD_BANKS_SUBCOLLECTION || "banks");
+  const PUBLIC_BANKS_COLLECTION = (window.PUBLIC_BANKS_COLLECTION || "public_banks");
+
+  function _getDb(){
+    try{ if (window.firebaseDbInstance) return window.firebaseDbInstance; }catch(e){}
+    try{ if (window.firebaseDb) return window.firebaseDb; }catch(e){}
+    try{ if (window.firebase && window.firebase.firestore) return window.firebase.firestore(); }catch(e){}
+    return null;
+  }
+
+  function _getUser(){
+    try{ if (window.currentTeacherUser) return window.currentTeacherUser; }catch(e){}
+    try{
+      if (window.firebaseAuthInstance && window.firebaseAuthInstance.currentUser) return window.firebaseAuthInstance.currentUser;
+    }catch(e){}
+    return null;
+  }
+
+  function _setStatus(msg){
+    const el = _id(STATUS_ID);
+    if (el) el.textContent = msg;
+  }
+
+  function _escape(s){
+    return String(s ?? "")
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+  }
+
+  function _activeBankId(){
+    try{
+      if (typeof window.activeCloudBankId !== "undefined" && window.activeCloudBankId !== null) return String(window.activeCloudBankId || "");
+    }catch(e){}
+    try{
+      if (typeof window.loadState === "function"){
+        const s = window.loadState();
+        if (s && s.activeBank && s.activeBank.bankId) return String(s.activeBank.bankId || "");
+      }
+    }catch(e){}
+    return "";
+  }
+
+  function _normalizeQuestions(d){
+    // Försök hitta frågor i gamla format
+    const candidates = [
+      d && d.questions,
+      d && d.items,
+      d && d.bank,
+      d && d.data && d.data.questions,
+      d && d.payload && d.payload.questions
+    ];
+
+    for (const c of candidates){
+      if (Array.isArray(c)) return c;
+      if (c && typeof c === "object" && Array.isArray(c.questions)) return c.questions;
+    }
+    return null;
+  }
+
+  async function _deleteBankFallback(bid){
+    const db = _getDb();
+    const u = _getUser();
+    if (!db || !u) return alert("Saknar inloggning eller databas.");
+
+    const uid = String(u.uid);
+    const bankRef = db.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bid));
+
+    // försök ta bort public-kopia om den finns
+    try{
+      const snap = await bankRef.get();
+      const d = snap.exists ? (snap.data() || {}) : {};
+      const publicId = String(d.publicId || "").trim();
+      if (publicId){
+        try{ await db.collection(PUBLIC_BANKS_COLLECTION).doc(publicId).delete(); }
+        catch(e){ console.warn("Kunde inte ta bort public-banken (ok att ignorera):", e); }
+      }
+    }catch(e){}
+
+    await bankRef.delete();
+
+    // om aktiv – nolla meta
+    try{
+      if (String(_activeBankId()) === String(bid)){
+        try{ window.activeCloudBankId = ""; }catch(e){}
+        if (typeof window.setActiveBankMeta === "function"){
+          window.setActiveBankMeta({ mode:"", ownerUid:"", bankId:"", publicId:"", name:"" });
+        }else if (typeof window.loadState === "function" && typeof window.saveState === "function"){
+          const s = window.loadState();
+          s.activeBank = { mode:"", ownerUid:"", bankId:"", publicId:"", name:"" };
+          window.saveState(s);
+        }
+        if (typeof window.renderActiveBankStatus === "function") window.renderActiveBankStatus();
+        if (typeof window.updateBankStatus === "function") window.updateBankStatus();
+      }
+    }catch(e){}
+  }
+
+  async function _activateBank(bid){
+    const db = _getDb();
+    const u = _getUser();
+    if (!db || !u) return alert("Saknar inloggning eller databas.");
+
+    const uid = String(u.uid);
+    const bankRef = db.collection(CLOUD_ROOT_COLLECTION).doc(uid).collection(CLOUD_BANKS_SUBCOLLECTION).doc(String(bid));
+    const snap = await bankRef.get();
+    if (!snap.exists) return alert("Hittar inte banken i molnet.");
+
+    const d = snap.data() || {};
+    const name = String(d.name || d.title || ("Bank " + bid));
+
+    // ✅ Migrering: om frågor finns i annan nyckel – skriv tillbaka som `questions`
+    try{
+      const q = _normalizeQuestions(d);
+      if (!Array.isArray(d.questions) && Array.isArray(q) && q.length){
+        await bankRef.update({ questions: q, _migratedAt: Date.now() });
+      }
+    }catch(e){
+      console.warn("Migrering misslyckades (ok att ignorera):", e);
+    }
+
+    // Sätt aktiv meta med befintliga funktioner om de finns
+    try{ window.activeCloudBankId = String(bid); }catch(e){}
+
+    if (typeof window.setActiveBankMeta === "function"){
+      window.setActiveBankMeta({
+        mode: "cloud",
+        ownerUid: uid,
+        bankId: String(bid),
+        publicId: String(d.publicId || ""),
+        name
+      });
+    }else if (typeof window.loadState === "function" && typeof window.saveState === "function"){
+      const s = window.loadState();
+      s.activeBank = {
+        mode: "cloud",
+        ownerUid: uid,
+        bankId: String(bid),
+        publicId: String(d.publicId || ""),
+        name
+      };
+      window.saveState(s);
+    }
+
+    // Uppdatera UI om dina funktioner finns
+    if (typeof window.renderActiveBankStatus === "function") window.renderActiveBankStatus();
+    if (typeof window.updateBankStatus === "function") window.updateBankStatus();
+  }
+
+  async function loadCloudBanksListV4_FIXED(){
+    const listEl = _id(LIST_ID);
+    const db = _getDb();
+    const u = _getUser();
+
+    if (!listEl){
+      _setStatus("⚠️ Hittar inte list-container (#" + LIST_ID + ").");
+      return;
+    }
+    if (!db){
+      _setStatus("⚠️ Firebase DB saknas.");
+      listEl.innerHTML = "";
+      return;
+    }
+    if (!u){
+      _setStatus("☁️ Logga in med Google för att se dina moln-bankar.");
+      listEl.innerHTML = "";
+      return;
+    }
+
+    _setStatus("☁️ Hämtar moln-bankar…");
+    listEl.innerHTML = "";
+
+    let snap;
+    try{
+      // orderBy kan falla om fält saknas, så vi kör safe fallback
+      try{
+        snap = await db
+          .collection(CLOUD_ROOT_COLLECTION).doc(String(u.uid))
+          .collection(CLOUD_BANKS_SUBCOLLECTION)
+          .orderBy("updatedAt","desc")
+          .limit(50).get();
+      }catch(e1){
+        snap = await db
+          .collection(CLOUD_ROOT_COLLECTION).doc(String(u.uid))
+          .collection(CLOUD_BANKS_SUBCOLLECTION)
+          .limit(50).get();
+      }
+    }catch(e){
+      console.error("Kunde inte hämta moln-bankar:", e);
+      _setStatus("⚠️ Kunde inte hämta moln-bankar (permissions/nät).");
+      return;
+    }
+
+    const activeId = _activeBankId();
+    const docs = snap.docs || [];
+    _setStatus("☁️ Moln-bankar: " + docs.length);
+
+    docs.forEach((doc)=>{
+      const d = doc.data() || {};
+      const bid = String(doc.id);
+      const name = String(d.name || d.title || ("Bank " + bid));
+      const isActive = (activeId && String(activeId) === bid);
+
+      // Rendera utan att ändra CSS: använd befintliga klasser du redan haft
+      const row = document.createElement("div");
+      row.className = "question-item" + (isActive ? " cloud-bank-active" : "");
+      row.setAttribute("data-bank-id", bid);
+
+      row.innerHTML = `
+        <div class="list-main">
+          <div class="q-text">${_escape(name)}${isActive ? ' <span class="mini">✅ Aktiv</span>' : ""}</div>
+          <div class="list-actions">
+            <button type="button" class="btn btn-sm" data-act="activate">Aktivera</button>
+            <button type="button" class="btn btn-sm" data-act="roster">👥 Elevlista</button>
+            <button type="button" class="btn btn-sm" data-act="delete">🗑️</button>
+          </div>
+        </div>
+      `;
+
+      row.addEventListener("click", async (e)=>{
+        const a = e.target && e.target.getAttribute && e.target.getAttribute("data-act");
+        if (!a) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (a === "activate"){
+          // om du har egen funktion, använd den; annars fallback
+          if (typeof window.activateCloudBankV4 === "function") return window.activateCloudBankV4(bid);
+          await _activateBank(bid);
+          // re-render för att få tillbaka "grön aktiv"
+          await loadCloudBanksListV4_FIXED();
+          return;
+        }
+
+        if (a === "delete"){
+          if (!confirm("Ta bort banken '" + name + "'?")) return;
+          if (typeof window.deleteCloudBankV4 === "function") return window.deleteCloudBankV4(bid);
+          await _deleteBankFallback(bid);
+          await loadCloudBanksListV4_FIXED();
+          return;
+        }
+
+        if (a === "roster"){
+          // roster brukar öppna på aktiv bank – så aktivera först om det behövs
+          try{
+            if (!isActive) await _activateBank(bid);
+          }catch(e){}
+          if (typeof window.openRosterModal === "function") return window.openRosterModal();
+          if (typeof window.openRosterModalV4 === "function") return window.openRosterModalV4();
+          alert("Hittar ingen openRosterModal-funktion (SEKTION 3D saknas/inte laddad).");
+          return;
+        }
+      }, true);
+
+      listEl.appendChild(row);
+    });
+  }
+
+  // 🔁 Override (så knappen verkligen gör något)
+  window.loadCloudBanksListV4 = loadCloudBanksListV4_FIXED;
+
+  // Bind knappen om den finns
+  const btn = _id(BTN_LOAD_ID);
+  if (btn){
+    btn.addEventListener("click", (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      loadCloudBanksListV4_FIXED();
+    }, true);
+  }
+
+})();
+</script>
+<!-- slut SEKTION 3X: FIX – Molnlist-render till #cloudBanksListV4 + återställ knappar + format-migrering (ingen design/CSS/HTML ändras) -->
+
+
 <!-- slut SEKTION 3: SCRIPT & LOGIK FÅNGVAKTAREN (bas, firebase, banker, roster & moln-lista) -->
 
 
