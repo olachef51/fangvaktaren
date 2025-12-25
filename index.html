@@ -4780,6 +4780,321 @@ function finishLevel() {
 
 
 
+<!-- start SEKTION 4X: PATCH A – Migrera delbit-id (timestamp -> 1..N) + bättre progressionstext -->
+<script>
+"use strict";
+
+/* start Sektion 4X: MIGRERING + UI-FIX (Patch A) */
+
+(function FV4X_PatchA_Init(){
+  function _fv4x_isTimestampLike(id){
+    const n = Number(id);
+    return Number.isFinite(n) && n >= 1000000000000; // ~2001+ i ms (typiskt Date.now())
+  }
+
+  function _fv4x_readGoalRef(q){
+    if (!q || typeof q !== "object") return "";
+    const cand = [
+      q.goalPart, q.goalpart, q.goalPartId, q.goalId,
+      q.goalPartKey, q.goalPartRef, q.goalPartLabel,
+      q.goalPartText, q.goalPartValue
+    ];
+    for (let i=0;i<cand.length;i++){
+      const v = cand[i];
+      if (v == null) continue;
+      const s = String(v).trim();
+      if (s) return s;
+    }
+    return "";
+  }
+
+  function _fv4x_writeGoalRef(q, newId){
+    if (!q || typeof q !== "object") return;
+    // Skriv på vanligaste fältet. Behåll övriga orörda.
+    if ("goalPart" in q) q.goalPart = String(newId);
+    else if ("goalpart" in q) q.goalpart = String(newId);
+    else if ("goalPartId" in q) q.goalPartId = String(newId);
+    else if ("goalId" in q) q.goalId = String(newId);
+    else q.goalPart = String(newId);
+  }
+
+  function _fv4x_buildGoalMap(goalsArr){
+    const map = {};
+    const arr = Array.isArray(goalsArr) ? goalsArr : [];
+    arr.forEach((g)=>{
+      if (!g) return;
+      const id = (g.id != null) ? String(g.id) : "";
+      if (!id) return;
+      map[id] = { goal: String(g.goal || ""), part: String(g.part || "") };
+    });
+    return map;
+  }
+
+  function _fv4x_migrateGoalIdsToSequential(){
+    if (typeof window.loadState !== "function" || typeof window.saveState !== "function") return;
+
+    const s = loadState();
+    if (!s || typeof s !== "object") return;
+
+    s.migrations = (s.migrations && typeof s.migrations === "object") ? s.migrations : {};
+    if (s.migrations.goalIdsSequential_v1 === true) return;
+
+    // Hämta goalsMap (stöd flera placeringar)
+    const rawGoals =
+      (Array.isArray(s.goalsMap) && s.goalsMap) ||
+      (s.bank && Array.isArray(s.bank.goalsMap) && s.bank.goalsMap) ||
+      (s.bank && s.bank.meta && Array.isArray(s.bank.meta.goalsMap) && s.bank.meta.goalsMap) ||
+      [];
+
+    if (!rawGoals.length){
+      // Inget att migrera – men markera ändå så vi inte kör varje gång
+      s.migrations.goalIdsSequential_v1 = true;
+      saveState(s);
+      return;
+    }
+
+    // Bygg mapping oldId -> newId (1..N i den ordning som goalsMap ligger)
+    const idMap = {};
+    let needs = false;
+
+    for (let i=0;i<rawGoals.length;i++){
+      const g = rawGoals[i] || {};
+      const oldId = (g.id != null) ? String(g.id).trim() : String(i+1);
+      const newId = String(i + 1);
+
+      if (oldId !== newId) idMap[oldId] = newId;
+
+      if (_fv4x_isTimestampLike(oldId)) needs = true;
+      // även om inte timestamp: om id:n är "konstiga" (inte 1..N) så migrerar vi
+      if (oldId !== newId) needs = true;
+    }
+
+    if (!needs){
+      s.migrations.goalIdsSequential_v1 = true;
+      saveState(s);
+      return;
+    }
+
+    // 1) Uppdatera goalsMap-id:n
+    const newGoals = rawGoals.map((g, i)=>{
+      const gg = (g && typeof g === "object") ? Object.assign({}, g) : {};
+      gg.id = String(i + 1);
+      return gg;
+    });
+
+    if (Array.isArray(s.goalsMap)) s.goalsMap = newGoals;
+    else {
+      s.goalsMap = newGoals;
+      if (s.bank && Array.isArray(s.bank.goalsMap)) s.bank.goalsMap = newGoals;
+      if (s.bank && s.bank.meta && Array.isArray(s.bank.meta.goalsMap)) s.bank.meta.goalsMap = newGoals;
+    }
+
+    // 2) Migrera frågor som pekar på gamla delbit-id:n
+    s.bank = (s.bank && typeof s.bank === "object") ? s.bank : {};
+    const kinds = ["mcq","img","drag"];
+    kinds.forEach((kind)=>{
+      const arr = Array.isArray(s.bank[kind]) ? s.bank[kind] : [];
+      for (let i=0;i<arr.length;i++){
+        const q = arr[i];
+        const ref = _fv4x_readGoalRef(q);
+        if (!ref) continue;
+        if (idMap[ref]) _fv4x_writeGoalRef(q, idMap[ref]);
+      }
+      s.bank[kind] = arr;
+    });
+
+    // 3) Migrera progressionens map-nycklar (fel/rätt per delbit)
+    s.progression = (s.progression && typeof s.progression === "object") ? s.progression : {};
+    const wb = (s.progression.wrongByGoalId && typeof s.progression.wrongByGoalId === "object") ? s.progression.wrongByGoalId : {};
+    const cb = (s.progression.correctByGoalId && typeof s.progression.correctByGoalId === "object") ? s.progression.correctByGoalId : {};
+
+    function remapCounts(obj){
+      const out = {};
+      Object.keys(obj).forEach((k)=>{
+        const nk = idMap[String(k)] || String(k);
+        out[nk] = (out[nk] || 0) + (Number(obj[k]) || 0);
+      });
+      return out;
+    }
+
+    s.progression.wrongByGoalId = remapCounts(wb);
+    s.progression.correctByGoalId = remapCounts(cb);
+
+    s.migrations.goalIdsSequential_v1 = true;
+    saveState(s);
+  }
+
+  // Override: bättre progressionstext (Delmål-rubrik + Delbit-underrad)
+  function _fv4x_updateProgressionPanel(){
+    if (typeof window.getEl !== "function" || typeof window.loadState !== "function") return;
+
+    const s = loadState();
+    const prog = s.progression || {};
+    const best = s.best || {};
+    const thres = s.thres || {};
+
+    const pointsText = getEl("progressPointsText");
+    const strongEl = getEl("progressStrongList");
+    const weakEl = getEl("progressWeakList");
+
+    const last = prog.lastResult || null;
+    const totalPoints = typeof prog.totalPoints === "number" ? prog.totalPoints : 0;
+
+    const tE = (thres && typeof thres.E === "number") ? thres.E : 70;
+    const tC = (thres && typeof thres.C === "number") ? thres.C : 70;
+    const tA = (thres && typeof thres.A === "number") ? thres.A : 70;
+
+    if (pointsText) {
+      if (!last) {
+        pointsText.textContent = "Ingen data ännu. Låt eleven spela och lämna in nivåer.";
+      } else {
+        pointsText.textContent =
+          `Totalt: ${totalPoints} p. ` +
+          `Senast: nivå ${last.level} – ${last.score}% (${last.correct}/${last.total} rätt) +${last.pointsGained || 0}p. ` +
+          `Bästa: E ${best.E || 0}% (gräns ${tE}%), C ${best.C || 0}% (gräns ${tC}%), A ${best.A || 0}% (gräns ${tA}%).`;
+      }
+    }
+
+    if (strongEl) strongEl.innerHTML = "";
+    if (weakEl) weakEl.innerHTML = "";
+
+    const wrongByGoal = (prog.wrongByGoalId && typeof prog.wrongByGoalId === "object") ? prog.wrongByGoalId : {};
+    const correctByGoal = (prog.correctByGoalId && typeof prog.correctByGoalId === "object") ? prog.correctByGoalId : {};
+
+    const allIds = new Set([
+      ...Object.keys(wrongByGoal),
+      ...Object.keys(correctByGoal)
+    ]);
+
+    if (!allIds.size) {
+      if (strongEl) {
+        const li = document.createElement("li");
+        li.textContent = "Inga starka delbitar inlästa ännu.";
+        strongEl.appendChild(li);
+      }
+      if (weakEl) {
+        const li = document.createElement("li");
+        li.textContent = "Inga svaga delbitar inlästa ännu.";
+        weakEl.appendChild(li);
+      }
+      return;
+    }
+
+    // Använd E-tröskel som “styrka”-nivå i progressionpanelen (vanligast du justerar den)
+    const baseThres = (typeof thres.E === "number") ? thres.E : 70;
+
+    // Bygg label-map från goalsMap (om den finns)
+    const goalsArr = (Array.isArray(s.goalsMap) && s.goalsMap) || [];
+    const labelMap = _fv4x_buildGoalMap(goalsArr);
+
+    const stats = [];
+    allIds.forEach((id) => {
+      const c = Number(correctByGoal[id] || 0);
+      const w = Number(wrongByGoal[id] || 0);
+      const total = c + w;
+      if (!total) return;
+      const acc = Math.round((c / total) * 100);
+      stats.push({ id: String(id), correct: c, wrong: w, total, acc });
+    });
+
+    const strong = stats
+      .filter((st) => st.acc >= baseThres && st.correct > 0)
+      .sort((a, b) => b.acc - a.acc || b.correct - a.correct)
+      .slice(0, 12);
+
+    const weak = stats
+      .filter((st) => st.acc < baseThres || st.wrong > 0)
+      .sort((a, b) => b.wrong - a.wrong || a.acc - b.acc)
+      .slice(0, 12);
+
+    function liHtml(st, mode){
+      const meta = labelMap[st.id] || { goal:"", part:"" };
+      const goalTitle = (meta.goal || "").trim() || "Delmål";
+      const partText = (meta.part || "").trim() || `Delbit ${st.id}`;
+      const third =
+        (mode === "strong")
+          ? `${st.acc}% rätt (${st.correct}/${st.total})`
+          : `${st.wrong} fel (${st.correct}/${st.total} rätt, ${st.acc}%)`;
+
+      return `
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <div><strong>${goalTitle}</strong></div>
+          <div class="mini">${partText}</div>
+          <div class="mini">Delbit ${st.id} – ${third}</div>
+        </div>
+      `;
+    }
+
+    if (strongEl) {
+      if (!strong.length) {
+        const li = document.createElement("li");
+        li.textContent = "Inga tydliga styrkor ännu – fortsätt spela.";
+        strongEl.appendChild(li);
+      } else {
+        strong.forEach((st) => {
+          const li = document.createElement("li");
+          li.innerHTML = liHtml(st, "strong");
+          strongEl.appendChild(li);
+        });
+      }
+    }
+
+    if (weakEl) {
+      if (!weak.length) {
+        const li = document.createElement("li");
+        li.textContent = "Inga tydliga svagheter – bra jobbat!";
+        weakEl.appendChild(li);
+      } else {
+        weak.forEach((st) => {
+          const li = document.createElement("li");
+          li.innerHTML = liHtml(st, "weak");
+          weakEl.appendChild(li);
+        });
+      }
+    }
+  }
+
+  // Kör migrering direkt (en gång)
+  try{ _fv4x_migrateGoalIdsToSequential(); }catch(e){ console.warn("FV4X migrate fail:", e); }
+
+  // Hooka in så UI alltid använder patchade panelen
+  try{
+    if (typeof window.updateProgressionPanel === "function") {
+      window.__fv4x_orig_updateProgressionPanel = window.updateProgressionPanel;
+    }
+    window.updateProgressionPanel = _fv4x_updateProgressionPanel;
+  }catch(e){ console.warn("FV4X override updateProgressionPanel fail:", e); }
+
+  // Se till att migrering körs innan UI-uppdateringar i framtiden också
+  try{
+    if (typeof window.updateAllProgressionUI === "function" && !window.__fv4x_updateAllHooked){
+      window.__fv4x_updateAllHooked = true;
+      const old = window.updateAllProgressionUI;
+      window.updateAllProgressionUI = function(){
+        try{ _fv4x_migrateGoalIdsToSequential(); }catch(e){}
+        return old.apply(this, arguments);
+      };
+    }
+  }catch(e){ console.warn("FV4X hook updateAllProgressionUI fail:", e); }
+
+  // Trigger en UI-refresh efter patch (för att direkt byta ut listorna)
+  try{
+    setTimeout(()=>{
+      try{ if (typeof window.updateAllProgressionUI === "function") window.updateAllProgressionUI(); }catch(e){}
+    }, 60);
+  }catch(e){}
+})();
+
+/* slut Sektion 4X: MIGRERING + UI-FIX (Patch A) */
+</script>
+<!-- slut SEKTION 4X: PATCH A – Migrera delbit-id (timestamp -> 1..N) + bättre progressionstext -->
+
+
+
+
+
+
+
 <!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering & knappar) -->
 <script>
 "use strict";
