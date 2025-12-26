@@ -3906,51 +3906,21 @@ function _fv_refreshGoalSelects(){
   }
 }
 
-/* FIX: Sanera goalsMap-text (tar bort ev. HTML-taggar som råkat hamna i delbit-text) */
-function _fv_stripHtml(s){
-  return String(s||"")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function _fv_sanitizeGoalsMapText(){
+/* --- FIX: ta bort legacy goals-editor om den hamnat på framsidan (body) --- */
+function _fv_removeLegacyGoalsEditorUI(){
   try{
-    const s = loadState();
-    const gm = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-    if (!gm.length) return;
-
-    let changed = 0;
-    const ngm = gm.map((g)=>{
-      const o = g || {};
-      const id = String(o.id||"").trim();
-      const goal0 = String(o.goal||"");
-      const parts0 = String(o.parts||o.part||"");
-
-      const goal = _fv_stripHtml(goal0);
-      const parts = _fv_stripHtml(parts0);
-
-      const out = Object.assign({}, o);
-      if (goal !== goal0){ out.goal = goal; changed++; }
-      if (parts !== parts0){
-        out.parts = parts;
-        if (Object.prototype.hasOwnProperty.call(out,"part")) delete out.part;
-        changed++;
-      }
-      if (!out.id && id) out.id = id;
-      return out;
-    });
-
-    if (changed > 0){
-      s.goalsMap = ngm;
-      saveState(s);
-      try{ if (typeof window.fvToast === "function") window.fvToast(`🧹 Rensade text i delmål/delbitar (${changed} ändringar).`); }catch{}
+    const legacy = _fv_getEl("fvTeacherGoalsEditorHost");
+    if (!legacy) return;
+    // Om legacy INTE ligger i teacherModal => ta bort (den ska aldrig ligga på framsidan/body)
+    if (!legacy.closest || !legacy.closest("#teacherModal")){
+      legacy.remove();
     }
   }catch{}
 }
 
-/* --- Lärarinställningar: hitta host + render “Aktuella delmål och delbitar” som rutor --- */
+/* --- Lärarinställningar: hitta host (för nya rutan) --- */
 function _fv_findGoalsSettingsHost(){
+  // 1) Försök på fasta id:n (om de finns i din HTML)
   const ids = [
     "teacherGoalsSettings",
     "teacherGoalsBox",
@@ -3968,6 +3938,25 @@ function _fv_findGoalsSettingsHost(){
     const el = _fv_getEl(ids[i]);
     if (el) return el;
   }
+
+  // 2) FIX: hitta rätt kort i teacherModal via rubriken (H3) "Aktuella delmål och delbitar"
+  try{
+    const modal = _fv_getEl("teacherModal") || document.querySelector("#teacherModal");
+    if (modal){
+      const hs = Array.from(modal.querySelectorAll("h1,h2,h3,h4"));
+      const h = hs.find(x => String(x.textContent||"").trim() === "Aktuella delmål och delbitar");
+      if (h){
+        const card = (h.closest && h.closest(".card")) ? h.closest(".card") : h.parentElement;
+        if (card) return card;
+        return h.parentElement || modal;
+      }
+      // fallback: settings-grid om den finns
+      const grid = modal.querySelector(".settings-grid");
+      if (grid) return grid;
+    }
+  }catch{}
+
+  // 3) Om vi inte hittar host i teacherModal: return null (viktigt: skapa INTE på body)
   return null;
 }
 
@@ -4115,23 +4104,20 @@ function _fv_convertLegacyLinkIds(){
 }
 
 function _fv_renderGoalsManager(){
-  /* FIX: Om legacy-goals-editor redan finns, skapa INTE en extra (och rensa ev. gammal "fvGoalsManagerBox") */
-  const legacyExists = !!(
-    _fv_getEl("fvTeacherGoalsEditorHost") ||
-    _fv_getEl("fvTeacherGoalsEditorList") ||
-    _fv_getEl("fvGoalsRebuildFromLinks") ||
-    _fv_getEl("fvGoalsClearAll")
-  );
-  if (legacyExists){
-    const mine = _fv_getEl("fvGoalsManagerBox");
-    if (mine && mine.parentNode) mine.parentNode.removeChild(mine);
-    return;
-  }
+  // Viktigt: rensa legacy som råkat hamna på framsidan
+  try{ _fv_removeLegacyGoalsEditorUI(); }catch{}
 
   const host = _fv_findGoalsSettingsHost();
-  if (!host) return;
+  if (!host) return; // Om host saknas: skapa INTE på body
 
   _fv_ensureGoalsManagerStyles();
+
+  const hasHeadingAlready = (() => {
+    try{
+      const hs = Array.from(host.querySelectorAll("h1,h2,h3,h4"));
+      return hs.some(h => String(h.textContent||"").trim() === "Aktuella delmål och delbitar");
+    }catch{ return false; }
+  })();
 
   let box = _fv_getEl("fvGoalsManagerBox");
   if (!box){
@@ -4139,9 +4125,11 @@ function _fv_renderGoalsManager(){
     box.id = "fvGoalsManagerBox";
     box.className = "card";
     box.style.marginTop = "10px";
+
+    // Om teacherModal redan har H3-rubrik: undvik dubbel rubrik
     box.innerHTML = `
-      <div class="q-text">Aktuella delmål och delbitar</div>
-      <div class="mini">Varje delmål/delbit visas som egna rutor. Du kan ta bort sådant du inte vill behålla.</div>
+      ${hasHeadingAlready ? "" : `<div class="q-text">Aktuella delmål och delbitar</div>`}
+      <div class="mini">${hasHeadingAlready ? "" : "Varje delmål/delbit visas som egna rutor. Du kan ta bort sådant du inte vill behålla."}</div>
       <div class="fv-goals-actions">
         <button class="btn btn-sm" type="button" id="fvGoalsConvertLegacy">🧹 Konvertera gamla delbit-ID</button>
         <button class="btn btn-sm btn-primary" type="button" id="fvGoalsHintSave">💾 Påminn: spara till molnet</button>
@@ -4243,7 +4231,7 @@ function _fv_renderGoalsManager(){
 }
 
 function fvRefreshTeacherBankUI(){
-  try{ _fv_sanitizeGoalsMapText(); }catch{}
+  try{ _fv_removeLegacyGoalsEditorUI(); }catch{}
   try{ _fv_refreshGoalSelects(); }catch{}
   try{ _fv3h_renderAllQuestionLists(); }catch{}
   try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch{}
@@ -4251,6 +4239,21 @@ function fvRefreshTeacherBankUI(){
 }
 
 try{ window.fvRefreshTeacherBankUI = fvRefreshTeacherBankUI; }catch{}
+
+/* FIX: Peka legacy-funktionerna till nya 3F så de inte kan skapa rutan på body igen */
+try{
+  if (typeof window._fv_getGoalsEditorHost === "function"){
+    window._fv_getGoalsEditorHost = function(){ return _fv_findGoalsSettingsHost(); };
+  }
+}catch{}
+try{
+  if (typeof window._fv_renderTeacherGoalsEditor === "function"){
+    window._fv_renderTeacherGoalsEditor = function(){
+      try{ _fv_removeLegacyGoalsEditorUI(); }catch{}
+      try{ _fv_renderGoalsManager(); }catch{}
+    };
+  }
+}catch{}
 
 try{
   if (!window.__fv_bank_changed_listener){
@@ -4273,60 +4276,8 @@ try{
   }
 }catch{}
 
-/* FIX: Late-boot (kör om teacher-boot efter att 3E-funktionerna finns) */
-(function FV_LateBootTeacher(){
-  try{
-    if (window.__fv_late_boot_bound) return;
-    window.__fv_late_boot_bound = true;
-
-    const depsReady = ()=>{
-      return (
-        typeof window.loadState === "function" &&
-        typeof window._fv_bootTeacherUI === "function" &&
-        typeof window.tryRefreshRosterTabs === "function" &&
-        typeof window.trySelectStudentToken === "function" &&
-        typeof window.tryUpdateProgressUI === "function"
-      );
-    };
-
-    const syncActiveCloudBankId = ()=>{
-      try{
-        const s = window.loadState();
-        const bid = s && s.activeBank && s.activeBank.bankId ? String(s.activeBank.bankId).trim() : "";
-        const w = String(window.activeCloudBankId || "").trim();
-        if (bid && !w) window.activeCloudBankId = bid;
-      }catch{}
-    };
-
-    const runOnce = async ()=>{
-      if (window.__fv_late_boot_done) return true;
-      if (!depsReady()) return false;
-
-      window.__fv_late_boot_done = true;
-
-      syncActiveCloudBankId();
-
-      try{ await window._fv_bootTeacherUI(); }catch(e){ console.warn("[FV] late-boot: _fv_bootTeacherUI failed (ignoreras):", e); }
-      try{ await window.tryRefreshRosterTabs(true); }catch(e){ console.warn("[FV] late-boot: tryRefreshRosterTabs failed (ignoreras):", e); }
-      try{ window.tryUpdateProgressUI(); }catch(e){ console.warn("[FV] late-boot: tryUpdateProgressUI failed (ignoreras):", e); }
-
-      return true;
-    };
-
-    const tick = async (n)=>{
-      try{
-        if (window.__fv_late_boot_done) return;
-        const ok = await runOnce();
-        if (ok) return;
-        if (n >= 80) return;
-        setTimeout(()=>{ tick(n+1); }, 50);
-      }catch{}
-    };
-
-    setTimeout(()=>{ tick(0); }, 0);
-    window.addEventListener("load", ()=>{ tick(0); }, { once:true });
-  }catch{}
-})();
+/* Extra: rensa legacy direkt vid load (om den redan skapats) */
+try{ _fv_removeLegacyGoalsEditorUI(); }catch{}
 
 /* slut Sektion 3F: UI refresh (goals-select + bankstatus hook + lärarinställningar: rutor + delete + konvertera gamla IDs) */
 
