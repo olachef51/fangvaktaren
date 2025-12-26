@@ -3906,6 +3906,49 @@ function _fv_refreshGoalSelects(){
   }
 }
 
+/* FIX: Sanera goalsMap-text (tar bort ev. HTML-taggar som råkat hamna i delbit-text) */
+function _fv_stripHtml(s){
+  return String(s||"")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function _fv_sanitizeGoalsMapText(){
+  try{
+    const s = loadState();
+    const gm = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+    if (!gm.length) return;
+
+    let changed = 0;
+    const ngm = gm.map((g)=>{
+      const o = g || {};
+      const id = String(o.id||"").trim();
+      const goal0 = String(o.goal||"");
+      const parts0 = String(o.parts||o.part||"");
+
+      const goal = _fv_stripHtml(goal0);
+      const parts = _fv_stripHtml(parts0);
+
+      const out = Object.assign({}, o);
+      if (goal !== goal0){ out.goal = goal; changed++; }
+      if (parts !== parts0){
+        out.parts = parts;
+        if (Object.prototype.hasOwnProperty.call(out,"part")) delete out.part;
+        changed++;
+      }
+      if (!out.id && id) out.id = id;
+      return out;
+    });
+
+    if (changed > 0){
+      s.goalsMap = ngm;
+      saveState(s);
+      try{ if (typeof window.fvToast === "function") window.fvToast(`🧹 Rensade text i delmål/delbitar (${changed} ändringar).`); }catch{}
+    }
+  }catch{}
+}
+
 /* --- Lärarinställningar: hitta host + render “Aktuella delmål och delbitar” som rutor --- */
 function _fv_findGoalsSettingsHost(){
   const ids = [
@@ -4072,8 +4115,21 @@ function _fv_convertLegacyLinkIds(){
 }
 
 function _fv_renderGoalsManager(){
+  /* FIX: Om legacy-goals-editor redan finns, skapa INTE en extra (och rensa ev. gammal "fvGoalsManagerBox") */
+  const legacyExists = !!(
+    _fv_getEl("fvTeacherGoalsEditorHost") ||
+    _fv_getEl("fvTeacherGoalsEditorList") ||
+    _fv_getEl("fvGoalsRebuildFromLinks") ||
+    _fv_getEl("fvGoalsClearAll")
+  );
+  if (legacyExists){
+    const mine = _fv_getEl("fvGoalsManagerBox");
+    if (mine && mine.parentNode) mine.parentNode.removeChild(mine);
+    return;
+  }
+
   const host = _fv_findGoalsSettingsHost();
-  if (!host) return; // om du vill: säg till så bygger vi ett säkert host-id i SEKTION 2
+  if (!host) return;
 
   _fv_ensureGoalsManagerStyles();
 
@@ -4187,6 +4243,7 @@ function _fv_renderGoalsManager(){
 }
 
 function fvRefreshTeacherBankUI(){
+  try{ _fv_sanitizeGoalsMapText(); }catch{}
   try{ _fv_refreshGoalSelects(); }catch{}
   try{ _fv3h_renderAllQuestionLists(); }catch{}
   try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch{}
@@ -4261,12 +4318,11 @@ try{
         if (window.__fv_late_boot_done) return;
         const ok = await runOnce();
         if (ok) return;
-        if (n >= 80) return; // ~4s max @50ms
+        if (n >= 80) return;
         setTimeout(()=>{ tick(n+1); }, 50);
       }catch{}
     };
 
-    // Kör direkt (om sent laddad), samt på load som säkerhet
     setTimeout(()=>{ tick(0); }, 0);
     window.addEventListener("load", ()=>{ tick(0); }, { once:true });
   }catch{}
