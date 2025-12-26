@@ -2342,6 +2342,84 @@ function _fv_ensureCloudStyles(){
   document.head.appendChild(st);
 }
 
+/* FIX: normalisera bankens delbit-ID (stabilt goalsMap.id) så vi inte blandar in links.id-timestamps */
+function _fv_buildGoalPartsToIdMap(goalsMap){
+  const out = Object.create(null);
+  const gm = Array.isArray(goalsMap) ? goalsMap : [];
+  for (let i=0;i<gm.length;i++){
+    const g = gm[i] || {};
+    const goal = String(g.goal||"").trim();
+    const parts = String(g.parts||g.part||"").trim();
+    const id = String(g.id||"").trim();
+    if (!goal || !parts || !id) continue;
+    out[goal + "||" + parts] = id;
+  }
+  return out;
+}
+
+function _fv_normalizeBankGoalLinks(bank, goalsMap){
+  const b = _fv_ensureBankShape(bank || {});
+  const gp2id = _fv_buildGoalPartsToIdMap(goalsMap);
+
+  const lists = [
+    { k:"mcq", arr: Array.isArray(b.mcq) ? b.mcq : [] },
+    { k:"img", arr: Array.isArray(b.img) ? b.img : [] },
+    { k:"drag", arr: Array.isArray(b.drag) ? b.drag : [] }
+  ];
+
+  for (let li=0; li<lists.length; li++){
+    const arr = lists[li].arr;
+    for (let i=0;i<arr.length;i++){
+      const q = arr[i] || {};
+      const goal = String(q.goal||"").trim();
+      const parts = String(q.parts||q.part||"").trim();
+
+      let stableId = "";
+      if (goal && parts){
+        stableId = String(gp2id[goal + "||" + parts] || "").trim();
+      }
+
+      // fallback: ta första länken med goal+parts
+      if (!stableId && Array.isArray(q.links) && q.links.length){
+        for (let j=0;j<q.links.length;j++){
+          const l = q.links[j] || {};
+          const lg = String(l.goal||"").trim();
+          const lp = String(l.parts||l.part||"").trim();
+          const hit = (lg && lp) ? String(gp2id[lg + "||" + lp] || "").trim() : "";
+          if (hit){
+            stableId = hit;
+            break;
+          }
+        }
+      }
+
+      // Sätt en stabil “goalPart” på frågan (det spelet kan använda direkt)
+      if (stableId){
+        q.goalPart = stableId;
+      }
+
+      // Normalisera links[].id till stableId (så vi inte får timestamps i progression keys)
+      if (Array.isArray(q.links) && q.links.length){
+        for (let j=0;j<q.links.length;j++){
+          const l = q.links[j] || {};
+          const lg = String(l.goal||goal||"").trim();
+          const lp = String(l.parts||l.part||parts||"").trim();
+          const hit = (lg && lp) ? String(gp2id[lg + "||" + lp] || "").trim() : "";
+          if (hit){
+            l.id = hit; // <-- viktig fix
+          }else if (stableId){
+            l.id = stableId; // fallback: använd frågans stableId
+          }
+        }
+      }
+
+      arr[i] = q;
+    }
+  }
+
+  return b;
+}
+
 async function loadCloudBankToLocal(bankId){
   await initFirebase();
   if (!_fv_hasDb() || !_fv_hasTeacher()) throw new Error("Firebase ej redo eller ej inloggad");
@@ -2362,8 +2440,8 @@ async function loadCloudBankToLocal(bankId){
   const goalsMap = Array.isArray(d.goalsMap) ? d.goalsMap : [];
 
   const s = loadState();
-  s.bank = _fv_ensureBankShape(bank);
   s.goalsMap = goalsMap;
+  s.bank = _fv_normalizeBankGoalLinks(_fv_ensureBankShape(bank), goalsMap); // FIX
   saveState(s);
 
   setActiveBankMeta({
@@ -2380,13 +2458,7 @@ async function loadCloudBankToLocal(bankId){
     window.dispatchEvent(new CustomEvent("fv-bank-changed", { detail: { source:"cloud", bankId: bid } }));
   }catch{}
 
-  /* FIX: tvinga refresh direkt efter aktivering (frågor + rosterTabs + vald elev) */
   try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
-  try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
-  try{
-    const t = (typeof window._fv_getSelectedToken === "function") ? window._fv_getSelectedToken() : "";
-    if (t && typeof window.trySelectStudentToken === "function") window.trySelectStudentToken(t);
-  }catch{}
 }
 
 async function updateActiveCloudBankFromLocalV5(bankId){
@@ -2403,9 +2475,14 @@ async function updateActiveCloudBankFromLocalV5(bankId){
 
   const desiredName = _fv_getCloudBankNameFromUI() || String(s.activeBank.name || "").trim() || "Moln-bank";
 
+  // FIX: spara alltid normaliserad bank (stabila delbit-id)
+  const bankNorm = _fv_normalizeBankGoalLinks(_fv_ensureBankShape(s.bank || {}), s.goalsMap || []);
+  s.bank = bankNorm;
+  saveState(s);
+
   const payload = {
     name: desiredName || "Moln-bank",
-    bank: _fv_ensureBankShape(s.bank || {}),
+    bank: _fv_ensureBankShape(bankNorm),
     goalsMap: Array.isArray(s.goalsMap) ? s.goalsMap : [],
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   };
@@ -2520,6 +2597,7 @@ async function loadCloudBanksListV5(){
       try{
         await loadCloudBankToLocal(bankId);
         await loadCloudBanksListV5();
+        try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
       }catch(e){
         console.error("Kunde inte aktivera bank:", e);
         alert("Kunde inte aktivera bank. Se konsolen.");
@@ -2577,9 +2655,14 @@ async function handleSaveToCloudV5(){
   const activeName = String(s.activeBank && s.activeBank.name ? s.activeBank.name : "").trim();
   const shouldCreateNew = !!(desiredName && (!hasActive || desiredName !== activeName));
 
+  // FIX: spara alltid normaliserad bank (stabila delbit-id)
+  const bankNorm = _fv_normalizeBankGoalLinks(_fv_ensureBankShape(s.bank || {}), s.goalsMap || []);
+  s.bank = bankNorm;
+  saveState(s);
+
   const bankPayload = {
     name: desiredName || "Moln-bank",
-    bank: _fv_ensureBankShape(s.bank || {}),
+    bank: _fv_ensureBankShape(bankNorm),
     goalsMap: Array.isArray(s.goalsMap) ? s.goalsMap : [],
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   };
@@ -2612,8 +2695,6 @@ async function handleSaveToCloudV5(){
     }
 
     try{ await loadCloudBanksListV5(); }catch{}
-    try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
-    try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
   }catch(e){
     console.error("handleSaveToCloudV5 error:", e);
     alert("Kunde inte spara till molnet. Se konsolen.");
@@ -2654,7 +2735,6 @@ async function deleteCloudBankV5(bankId){
 }
 
 /* slut Sektion 3C: MOLN-BANKER (lista + aktivera + uppdatera aktiv + spara + delete) */
-
 
 
 /* start Sektion 3D: ROSTER (overlay + e-post + spara rosterRows/rosterTokens) */
@@ -3027,15 +3107,13 @@ async function openRosterInline(bankId){
 /* slut Sektion 3D: ROSTER (overlay + e-post + spara rosterRows/rosterTokens) */
 
 
-
 /* start Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) */
 
 const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-v17";
 const _fvTeacherStudentCache = Object.create(null);
-const _fvTeacherStudentCacheTtlMs = 15000;
+const _fvTeacherStudentCacheTtlMs = 15000; // 15s – så byte elev inte “tappar” uppdateringar men hämtar om ofta
 
 let _fvUnsubSelectedStudent = null;
-let _fvListeningToken = "";
 
 function _fv_getSelectedToken(){
   try{ return String(localStorage.getItem(_fvTeacherSelectedTokenKey)||""); }catch{ return ""; }
@@ -3192,6 +3270,7 @@ function _fv_readDottedKeyNum(d, key, fallback=0){
     return fallback;
   }
 }
+
 function _fv_normalizeDottedProgressionIntoObject(d){
   try{
     if (!d || typeof d !== "object") return d;
@@ -3204,56 +3283,105 @@ function _fv_normalizeDottedProgressionIntoObject(d){
 
     if ((e+c+a) > 0){
       if (!p.attemptsByLevel || typeof p.attemptsByLevel !== "object") p.attemptsByLevel = { E:0, C:0, A:0 };
+      p.attemptsByLevel.E = _fv_safeNum(p.attemptsByLevel.E, 0) || 0;
+      p.attemptsByLevel.C = _fv_safeNum(p.attemptsByLevel.C, 0) || 0;
+      p.attemptsByLevel.A = _fv_safeNum(p.attemptsByLevel.A, 0) || 0;
+
       p.attemptsByLevel.E = Math.max(_fv_safeNum(p.attemptsByLevel.E,0), e);
       p.attemptsByLevel.C = Math.max(_fv_safeNum(p.attemptsByLevel.C,0), c);
       p.attemptsByLevel.A = Math.max(_fv_safeNum(p.attemptsByLevel.A,0), a);
+
       if (typeof p.attemptsTotal !== "number") p.attemptsTotal = (p.attemptsByLevel.E + p.attemptsByLevel.C + p.attemptsByLevel.A);
     }
 
     const t = _fv_readDottedKeyNum(d, "progression.attemptsTotal", NaN);
     if (isFinite(t) && t >= 0) p.attemptsTotal = t;
+
   }catch{}
   return d;
 }
 
-function _fv_stopSelectedStudentListener(){
-  try{ if (typeof _fvUnsubSelectedStudent === "function") _fvUnsubSelectedStudent(); }catch{}
-  _fvUnsubSelectedStudent = null;
-  _fvListeningToken = "";
+/* FIX: slå ihop timestamp-keys i progression (från links.id) till stabila goalsMap.id */
+function _fv_buildLinkIdToStableIdMap(bank, goalsMap){
+  const gp2id = _fv_buildGoalPartsToIdMap(goalsMap);
+  const out = Object.create(null);
+
+  // lägg in alla “riktiga” id som självmappning
+  Object.keys(gp2id).forEach(k=>{
+    const id = String(gp2id[k]||"").trim();
+    if (id) out[id] = id;
+  });
+
+  const b = bank || {};
+  const lists = [
+    Array.isArray(b.mcq) ? b.mcq : [],
+    Array.isArray(b.img) ? b.img : [],
+    Array.isArray(b.drag) ? b.drag : []
+  ];
+
+  for (let li=0; li<lists.length; li++){
+    const arr = lists[li];
+    for (let i=0;i<arr.length;i++){
+      const q = arr[i] || {};
+
+      // fråga goal+parts
+      const qGoal = String(q.goal||"").trim();
+      const qParts = String(q.parts||q.part||"").trim();
+      const qStable = (qGoal && qParts) ? String(gp2id[qGoal + "||" + qParts] || "").trim() : "";
+
+      // fråga.goalPart (om redan stabil)
+      const qGp = String(q.goalPart||"").trim();
+      if (qGp && qStable) out[qGp] = qStable;
+      if (qGp && !qStable) out[qGp] = qGp;
+
+      // links
+      const links = Array.isArray(q.links) ? q.links : [];
+      for (let j=0;j<links.length;j++){
+        const l = links[j] || {};
+        const lid = String(l.id||"").trim();
+        if (!lid) continue;
+
+        const lg = String(l.goal||qGoal||"").trim();
+        const lp = String(l.parts||l.part||qParts||"").trim();
+        const stable = (lg && lp) ? String(gp2id[lg + "||" + lp] || "").trim() : "";
+
+        if (stable){
+          out[lid] = stable;
+          out[stable] = stable;
+        }else if (qStable){
+          out[lid] = qStable;
+          out[qStable] = qStable;
+        }
+      }
+    }
+  }
+
+  return out;
 }
 
-function _fv_startSelectedStudentListener(token){
-  const ref = _fv_getActiveStudentsCollectionRef();
-  const t = String(token||"").trim();
-  if (!ref || !t) return;
+function _fv_mergeCountsByStableId(obj, idMap){
+  const src = (obj && typeof obj === "object") ? obj : {};
+  const out = Object.create(null);
+  const keys = Object.keys(src);
 
-  if (_fvListeningToken === t && typeof _fvUnsubSelectedStudent === "function") return;
-
-  _fv_stopSelectedStudentListener();
-  _fvListeningToken = t;
-
-  try{
-    _fvUnsubSelectedStudent = ref.doc(t).onSnapshot((snap)=>{
-      if (!snap || !snap.exists){
-        delete _fvTeacherStudentCache[t];
-        tryUpdateProgressUI();
-        return;
-      }
-      const d0 = snap.data() || {};
-      const d = _fv_normalizeDottedProgressionIntoObject(d0) || d0;
-      d._token = t;
-      d._fetchedAt = Date.now();
-      d._live = true;
-      _fvTeacherStudentCache[t] = d;
-      tryUpdateProgressUI();
-    }, (err)=>{
-      console.warn("onSnapshot elevdoc error:", err);
-      _fvTeacherStudentCache[t] = { _token:t, _error:"permissions", _fetchedAt: Date.now(), _live:true };
-      tryUpdateProgressUI();
-    });
-  }catch(e){
-    console.warn("Kunde inte starta live-lyssning:", e);
+  for (let i=0;i<keys.length;i++){
+    const k0 = String(keys[i]);
+    const v = _fv_safeNum(src[k0], 0);
+    const stable = (idMap && idMap[k0]) ? String(idMap[k0]) : k0;
+    if (!stable) continue;
+    out[stable] = _fv_safeNum(out[stable], 0) + v;
   }
+  return out;
+}
+
+function _fv_normalizeProgressionIds(prog, bank, goalsMap){
+  const p = (prog && typeof prog === "object") ? prog : {};
+  const idMap = _fv_buildLinkIdToStableIdMap(bank || {}, goalsMap || []);
+  return {
+    totalPoints: _fv_safeNum(p.totalPoints, 0),
+    correctByGoalId: _fv_mergeCountsByStableId(p.correctByGoalId || {}, idMap),
+    wrongByGoalId: _fv_mergeCountsByStableId(p.wrongByGoalId || {}, idMap)
+  };
 }
 
 async function _fv_fetchStudentDoc(token){
@@ -3273,6 +3401,36 @@ async function _fv_fetchStudentDoc(token){
   }catch(e){
     console.warn("Kunde inte läsa elevdoc:", e);
     return { _token: t, _error: "permissions", _fetchedAt: Date.now() };
+  }
+}
+
+function _fv_stopSelectedStudentListener(){
+  try{
+    if (typeof _fvUnsubSelectedStudent === "function") _fvUnsubSelectedStudent();
+  }catch{}
+  _fvUnsubSelectedStudent = null;
+}
+
+function _fv_startSelectedStudentListener(token){
+  try{
+    _fv_stopSelectedStudentListener();
+    const ref = _fv_getActiveStudentsCollectionRef();
+    const t = String(token||"").trim();
+    if (!ref || !t) return;
+
+    _fvUnsubSelectedStudent = ref.doc(t).onSnapshot((snap)=>{
+      if (!snap || !snap.exists) return;
+      const d0 = snap.data() || {};
+      const d = _fv_normalizeDottedProgressionIntoObject(d0) || d0;
+      d._token = t;
+      d._fetchedAt = Date.now();
+      _fvTeacherStudentCache[t] = d;
+      tryUpdateProgressUI(); // LIVE update när eleven spelar
+    }, (err)=>{
+      console.warn("onSnapshot elevdoc fel:", err);
+    });
+  }catch(e){
+    console.warn("Kunde inte starta elev-lyssnare:", e);
   }
 }
 
@@ -3310,7 +3468,12 @@ function _fv_getAttemptsFromRemote(d){
     return out;
   }
 
-  const candABL = (prog.attemptsByLevel && typeof prog.attemptsByLevel==="object") ? prog.attemptsByLevel : null;
+  const candABL =
+    (prog.attemptsByLevel && typeof prog.attemptsByLevel==="object") ? prog.attemptsByLevel :
+    (d && d.attemptsByLevel && typeof d.attemptsByLevel==="object") ? d.attemptsByLevel :
+    (d && d.stats && d.stats.attemptsByLevel && typeof d.stats.attemptsByLevel==="object") ? d.stats.attemptsByLevel :
+    null;
+
   if (candABL){
     out.E = _fv_safeNum(candABL.E, 0);
     out.C = _fv_safeNum(candABL.C, 0);
@@ -3320,10 +3483,35 @@ function _fv_getAttemptsFromRemote(d){
     return out;
   }
 
-  const totalCand = (prog.attemptsTotal != null) ? prog.attemptsTotal : (prog.attempts != null) ? prog.attempts : null;
+  const totalCand =
+    (prog.attemptsTotal != null) ? prog.attemptsTotal :
+    (d && d.attemptsTotal != null) ? d.attemptsTotal :
+    (d && d.attempts != null) ? d.attempts :
+    (d && d.playCount != null) ? d.playCount :
+    (d && d.gamesPlayed != null) ? d.gamesPlayed :
+    null;
+
   if (totalCand != null){
     out.total = _fv_safeNum(totalCand, 0);
     out.has = (out.total > 0);
+    return out;
+  }
+
+  const subs =
+    (d && Array.isArray(d.submissions)) ? d.submissions :
+    (d && Array.isArray(d.results)) ? d.results :
+    (prog && Array.isArray(prog.submissions)) ? prog.submissions :
+    null;
+
+  if (subs && subs.length){
+    let e=0,c=0,a=0;
+    for (let i=0;i<subs.length;i++){
+      const lv = String((subs[i] && (subs[i].level || subs[i].lvl || subs[i].niva)) || "").toUpperCase();
+      if (lv==="A") a++;
+      else if (lv==="C") c++;
+      else if (lv==="E") e++;
+    }
+    out.E=e; out.C=c; out.A=a; out.total=e+c+a; out.has=(out.total>0);
     return out;
   }
 
@@ -3347,43 +3535,8 @@ function _fv_renderUl(ul, items, emptyText){
   }
 }
 
-/* FIX: Vi mappar delbit-id via q.links (inte q.goalPart) + bygger fallback-label från (goal/parts) om id saknas i goalsMap */
-function _fv_extractLinkIds(q){
-  const out = [];
-  const push = (v)=>{
-    const s = String(v||"").trim();
-    if (!s) return;
-    if (!out.includes(s)) out.push(s);
-  };
-
-  try{
-    const links = q && q.links;
-    if (Array.isArray(links)){
-      for (let i=0;i<links.length;i++){
-        const ln = links[i];
-        if (ln == null) continue;
-        if (typeof ln === "string" || typeof ln === "number") push(ln);
-        else if (typeof ln === "object"){
-          if (ln.id != null) push(ln.id);
-          else if (ln.goalPart != null) push(ln.goalPart);
-          else if (ln.goalPartId != null) push(ln.goalPartId);
-          else if (ln.del != null) push(ln.del);
-          else if (ln.key != null) push(ln.key);
-        }
-      }
-    }
-  }catch{}
-
-  try{
-    const fallback = (q && (q.goalPart || q.goalPartId || q.goalPartKey || q.goalId));
-    if (fallback != null) push(fallback);
-  }catch{}
-
-  return out;
-}
-
-function _fv_buildGoalMetaFromBank(bank){
-  const meta = Object.create(null);
+function _fv_goalIdLevelsMapFromBank(bank){
+  const out = Object.create(null);
   const b = bank || {};
   const lists = [
     Array.isArray(b.mcq) ? b.mcq : [],
@@ -3395,32 +3548,29 @@ function _fv_buildGoalMetaFromBank(bank){
     const arr = lists[li];
     for (let i=0;i<arr.length;i++){
       const q = arr[i] || {};
-      const lvl = String(q.level || q.lv || q.niva || q.grade || "").toUpperCase().trim() || "E";
-      const ids = _fv_extractLinkIds(q);
-      if (!ids.length) continue;
-
-      const goal = String(q.goal || q.delmal || "").trim();
-      const parts = String(q.parts || q.part || q.delbit || "").trim();
-
-      for (let k=0;k<ids.length;k++){
-        const id = String(ids[k]);
-        if (!meta[id]) meta[id] = { goal:"", parts:"", levels: new Set() };
-        meta[id].levels.add(lvl);
-        if (!meta[id].goal && goal) meta[id].goal = goal;
-        if (!meta[id].parts && parts) meta[id].parts = parts;
-      }
+      const lvl = String(q.level || q.lvl || "").toUpperCase() || "E";
+      const gid = String(
+        q.goalPart != null ? q.goalPart :
+        q.goalPartId != null ? q.goalPartId :
+        q.goalPartKey != null ? q.goalPartKey :
+        q.goal != null ? q.goal :
+        ""
+      ).trim();
+      if (!gid) continue;
+      if (!out[gid]) out[gid] = new Set();
+      out[gid].add(lvl);
     }
   }
-  return meta;
+  return out;
 }
 
-function _fv_pickThresholdForGoalId(goalId, metaMap){
+function _fv_pickThresholdForGoalId(goalId, levelsMap){
   try{
-    const m = metaMap && metaMap[String(goalId)] ? metaMap[String(goalId)] : null;
-    if (!m || !m.levels || !m.levels.size) return 0.50;
-    if (m.levels.has("E")) return 0.50;
-    if (m.levels.has("C")) return 0.30;
-    if (m.levels.has("A")) return 0.20;
+    const set = levelsMap && levelsMap[String(goalId)] ? levelsMap[String(goalId)] : null;
+    if (!set || !set.size) return 0.50;
+    if (set.has("E")) return 0.50;
+    if (set.has("C")) return 0.30;
+    if (set.has("A")) return 0.20;
   }catch{}
   return 0.50;
 }
@@ -3436,7 +3586,7 @@ function _fv_computeStrongWeak(goalsMap, prog, bank){
     gmIndex[String(g.id)] = g;
   }
 
-  const metaMap = _fv_buildGoalMetaFromBank(bank);
+  const levelsMap = _fv_goalIdLevelsMapFromBank(bank);
 
   const keys = new Set();
   Object.keys(corr||{}).forEach(k=>keys.add(String(k)));
@@ -3450,21 +3600,19 @@ function _fv_computeStrongWeak(goalsMap, prog, bank){
     if (a<=0) return;
 
     const g = gmIndex[k] || null;
-    const meta = metaMap[k] || null;
-
-    const goal = g ? String(g.goal||"").trim() : (meta ? String(meta.goal||"").trim() : "");
-    const part = g ? String(g.parts||g.part||"").trim() : (meta ? String(meta.parts||"").trim() : "");
+    const goal = g ? String(g.goal||"").trim() : "";
+    const part = g ? String(g.parts||g.part||"").trim() : "";
 
     let label = "";
-    if (goal || part){
+    if (g && (goal || part)){
       if (goal && part) label = `Delbit ${_fv_escapeHtml(k)}: ${_fv_escapeHtml(goal)} — ${_fv_escapeHtml(part)}`;
       else label = `Delbit ${_fv_escapeHtml(k)}: ${_fv_escapeHtml(goal || part)}`;
     }else{
-      label = `Okänd delbit (id ${_fv_escapeHtml(k)}) <span class="mini">– saknar match i goalsMap och saknar goal/parts i banken</span>`;
+      label = `Okänd delbit (id ${_fv_escapeHtml(k)}) <span class="mini">– kontrollera kopplingen i frågebanken</span>`;
     }
 
     const acc = a ? (c/a) : 0;
-    const th = _fv_pickThresholdForGoalId(k, metaMap);
+    const th = _fv_pickThresholdForGoalId(k, levelsMap);
 
     rows.push({ key:k, label, c, w, a, acc, th });
   });
@@ -3514,7 +3662,12 @@ function tryUpdateProgressUI(){
   }
 
   const sTeacher = loadState();
-  const prog = _fv_getProgressionFromRemote(remote);
+  const gm = Array.isArray(sTeacher.goalsMap) ? sTeacher.goalsMap : [];
+  const bank = sTeacher.bank || {};
+
+  const progRaw = _fv_getProgressionFromRemote(remote);
+  const prog = _fv_normalizeProgressionIds(progRaw, bank, gm); // FIX: inga timestamp-dubletter
+
   const total = _fv_safeNum(prog.totalPoints, 0);
 
   const attempts = _fv_getAttemptsFromRemote(remote);
@@ -3524,8 +3677,6 @@ function tryUpdateProgressUI(){
 
   if (pEl) pEl.innerHTML = `Totalt: <strong>${_fv_escapeHtml(total)} p</strong>.${attemptsHtml}`;
 
-  const gm = Array.isArray(sTeacher.goalsMap) ? sTeacher.goalsMap : [];
-  const bank = sTeacher.bank || {};
   const { strong, weak } = _fv_computeStrongWeak(gm, prog, bank);
 
   _fv_renderUl(strongUl, strong, "För lite data för tydliga styrkor ännu – låt eleven spela mer på nivån.");
@@ -3547,6 +3698,9 @@ async function trySelectStudentToken(token){
     }
   }catch{}
 
+  // LIVE: starta snapshot-lyssnare så UI uppdateras direkt när eleven spelar
+  _fv_startSelectedStudentListener(t);
+
   const cached = _fvTeacherStudentCache[t] || null;
   const now = Date.now();
   const isFresh = !!(cached && cached._fetchedAt && (now - Number(cached._fetchedAt) <= _fvTeacherStudentCacheTtlMs));
@@ -3561,16 +3715,11 @@ async function trySelectStudentToken(token){
     }
   }
 
-  /* FIX: starta live-lyssning så UI uppdateras direkt när eleven spelar */
-  try{ _fv_startSelectedStudentListener(t); }catch{}
-
   tryUpdateProgressUI();
 }
 
 async function tryRefreshRosterTabs(){
   try{
-    _fv_stopSelectedStudentListener();
-
     const roster = await _fv_fetchRosterFromActiveBank();
 
     if (roster && roster.publicId){
@@ -3596,9 +3745,10 @@ async function tryRefreshRosterTabs(){
 try{ window._fvTeacherStudentCache = _fvTeacherStudentCache; }catch{}
 try{ window._fv_getSelectedToken = _fv_getSelectedToken; }catch{}
 try{ window._fv_getAttemptsFromRemote = _fv_getAttemptsFromRemote; }catch{}
+try{ window._fv_stopSelectedStudentListener = _fv_stopSelectedStudentListener; }catch{}
+try{ window._fv_startSelectedStudentListener = _fv_startSelectedStudentListener; }catch{}
 
 /* slut Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) */
-
 
 
 /* start Sektion 3F: UI refresh (goals-select + bankstatus hook) */
@@ -3638,7 +3788,8 @@ function fvRefreshTeacherBankUI(){
   try{ _fv_refreshGoalSelects(); }catch{}
   try{ _fv3h_renderAllQuestionLists(); }catch{}
   try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch{}
-  try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
+  // extra: om vi redan har en vald elev, uppdatera UI direkt
+  try{ tryUpdateProgressUI(); }catch{}
 }
 
 try{ window.fvRefreshTeacherBankUI = fvRefreshTeacherBankUI; }catch{}
@@ -3648,16 +3799,10 @@ try{
     window.__fv_bank_changed_listener = true;
     window.addEventListener("fv-bank-changed", ()=>{
       try{ fvRefreshTeacherBankUI(); }catch{}
-    });
-  }
-}catch{}
-
-/* FIX: om firebase blir redo och läraren är inloggad, försök bygga rosterTabs direkt */
-try{
-  if (!window.__fv_roster_boot){
-    window.__fv_roster_boot = true;
-    window.addEventListener("fv-firebase-ready", ()=>{
-      try{ setTimeout(()=>{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }, 220); }catch{}
+      try{
+        // roster + progressionsflikar efter bankbyte (med liten defer för att state ska hinna sparas)
+        setTimeout(()=>{ try{ tryRefreshRosterTabs(true); }catch{} }, 30);
+      }catch{}
     });
   }
 }catch{}
