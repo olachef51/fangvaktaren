@@ -4348,206 +4348,67 @@ async function _fv_bootTeacherUI(){
 
 
 
-/* start Sektion 3H: LIVE-UPPDATERING (onSnapshot) + FIX: slå ihop “legacy link-id” till riktiga goalsMap-id */
+/* start SEKTION 3H: BOOT-GUARD (timing-fix för trySelectStudentToken/tryUpdateProgressUI) */
+(function FV_BOOT_GUARD(){
+  "use strict";
 
-let _fvLiveUnsubStudent = null;
-
-function _fv_stopLiveStudent(){
-  try{
-    if (typeof _fvLiveUnsubStudent === "function") _fvLiveUnsubStudent();
-  }catch{}
-  _fvLiveUnsubStudent = null;
-}
-
-function _fv_startLiveStudent(token){
-  try{
-    _fv_stopLiveStudent();
-
-    const t = String(token||"").trim();
-    if (!t) return;
-
-    const ref = _fv_getActiveStudentsCollectionRef();
-    if (!ref) return;
-
-    _fvLiveUnsubStudent = ref.doc(t).onSnapshot((snap)=>{
-      try{
-        if (!snap || !snap.exists){
-          delete _fvTeacherStudentCache[t];
-          tryUpdateProgressUI();
-          return;
-        }
-        const d0 = snap.data() || {};
-        const d = _fv_normalizeDottedProgressionIntoObject(d0) || d0;
-
-        d._token = t;
-        d._fetchedAt = Date.now();
-
-        _fvTeacherStudentCache[t] = d;
-
-        tryUpdateProgressUI();
-      }catch(e){
-        console.warn("Live snapshot parse error:", e);
-      }
-    }, (err)=>{
-      console.warn("Live snapshot error:", err);
-      _fvTeacherStudentCache[t] = { _token:t, _error:"permissions", _fetchedAt: Date.now() };
-      tryUpdateProgressUI();
-    });
-  }catch(e){
-    console.warn("Kunde inte starta live-lyssnare:", e);
-  }
-}
-
-/* FIX: mappa/merge “legacy link-id” (från question.links[].id) till goalsMap-id via (goal+parts) */
-function _fv_buildLegacyLinkIdMap(goalsMap, bank){
-  const gm = Array.isArray(goalsMap) ? goalsMap : [];
-  const b = bank || {};
-
-  const byGoalParts = Object.create(null);
-  for (let i=0;i<gm.length;i++){
-    const g = gm[i] || {};
-    const goal = String(g.goal||"").trim();
-    const parts = String(g.parts||g.part||"").trim();
-    const id = String(g.id||"").trim();
-    if (!id || !goal || !parts) continue;
-    byGoalParts[goal + "||" + parts] = id;
-  }
-
-  const map = Object.create(null);
-  const lists = [
-    Array.isArray(b.mcq) ? b.mcq : [],
-    Array.isArray(b.img) ? b.img : [],
-    Array.isArray(b.drag) ? b.drag : []
+  const REQUIRED_FNS = [
+    "trySelectStudentToken",
+    "tryUpdateProgressUI",
+    "tryRefreshRosterTabs"
   ];
 
-  for (let li=0; li<lists.length; li++){
-    const arr = lists[li];
-    for (let i=0;i<arr.length;i++){
-      const q = arr[i] || {};
-      const links = Array.isArray(q.links) ? q.links : [];
-      for (let k=0;k<links.length;k++){
-        const L = links[k] || {};
-        const legacyId = String(L.id||"").trim();
-        const goal = String(L.goal||"").trim();
-        const parts = String(L.parts||"").trim();
-        if (!legacyId || !goal || !parts) continue;
-
-        const key = goal + "||" + parts;
-        const realId = byGoalParts[key];
-        if (realId) map[legacyId] = realId;
-      }
+  function _fv_allRequiredFnsExist(){
+    for (let i=0; i<REQUIRED_FNS.length; i++){
+      const n = REQUIRED_FNS[i];
+      if (typeof window[n] !== "function") return false;
     }
-  }
-
-  return map;
-}
-
-function _fv_mergeLegacyIdsIntoMaps(goalsMap, bank, corr, wrong){
-  const c0 = (corr && typeof corr==="object") ? corr : {};
-  const w0 = (wrong && typeof wrong==="object") ? wrong : {};
-
-  const legacyToReal = _fv_buildLegacyLinkIdMap(goalsMap, bank);
-
-  // kopiera så vi inte muterar input
-  const c = Object.assign({}, c0);
-  const w = Object.assign({}, w0);
-
-  const keys = new Set();
-  Object.keys(c).forEach(k=>keys.add(String(k)));
-  Object.keys(w).forEach(k=>keys.add(String(k)));
-
-  keys.forEach((k)=>{
-    const real = legacyToReal[String(k)] || "";
-    if (!real || real === String(k)) return;
-
-    const cc = _fv_safeNum(c[k],0);
-    const ww = _fv_safeNum(w[k],0);
-
-    c[real] = _fv_safeNum(c[real],0) + cc;
-    w[real] = _fv_safeNum(w[real],0) + ww;
-
-    // ta bort legacy-nyckeln så dubletter försvinner i UI
-    delete c[k];
-    delete w[k];
-  });
-
-  return { corr: c, wrong: w };
-}
-
-/* PATCH: använd merge i computeStrongWeak så UI inte visar dubletter (1 + 176...) */
-(function FV3H_PatchStrongWeak(){
-  if (typeof _fv_computeStrongWeak !== "function") return;
-  if (_fv_computeStrongWeak.__fvPatchedLegacy) return;
-  _fv_computeStrongWeak.__fvPatchedLegacy = true;
-
-  const _orig = _fv_computeStrongWeak;
-  _fv_computeStrongWeak = function(goalsMap, prog, bank){
-    try{
-      const corr0 = (prog && prog.correctByGoalId) ? prog.correctByGoalId : {};
-      const wrong0 = (prog && prog.wrongByGoalId) ? prog.wrongByGoalId : {};
-      const merged = _fv_mergeLegacyIdsIntoMaps(goalsMap, bank, corr0, wrong0);
-
-      const p2 = Object.assign({}, prog || {});
-      p2.correctByGoalId = merged.corr;
-      p2.wrongByGoalId = merged.wrong;
-
-      return _orig(goalsMap, p2, bank);
-    }catch(e){
-      console.warn("Legacy-merge patch fail:", e);
-      return _orig(goalsMap, prog, bank);
-    }
-  };
-})();
-
-/* PATCH: starta live-lyssnare när man väljer elev + vid refresh roster */
-(function FV3H_PatchSelectToken(){
-  if (typeof trySelectStudentToken !== "function") return;
-  if (trySelectStudentToken.__fvPatchedLive) return;
-  trySelectStudentToken.__fvPatchedLive = true;
-
-  const _orig = trySelectStudentToken;
-  window.trySelectStudentToken = async function(token){
-    const res = await _orig.apply(this, arguments);
-    try{
-      const t = _fv_getSelectedToken();
-      if (t) _fv_startLiveStudent(t);
-    }catch{}
-    return res;
-  };
-})();
-
-(function FV3H_PatchRefreshRoster(){
-  if (typeof tryRefreshRosterTabs !== "function") return;
-  if (tryRefreshRosterTabs.__fvPatchedLive) return;
-  tryRefreshRosterTabs.__fvPatchedLive = true;
-
-  const _orig = tryRefreshRosterTabs;
-  window.tryRefreshRosterTabs = async function(){
-    const res = await _orig.apply(this, arguments);
-    try{
-      const t = _fv_getSelectedToken();
-      if (t) _fv_startLiveStudent(t);
-    }catch{}
-    return res;
-  };
-})();
-
-/* Exponera tvingad refresh (används av 3G) */
-async function _fvTeacherForceLiveRefresh(){
-  try{
-    const t = _fv_getSelectedToken();
-    if (!t) return false;
-    const d = await _fv_fetchStudentDoc(t);
-    if (d) _fvTeacherStudentCache[t] = d;
-    tryUpdateProgressUI();
     return true;
-  }catch{
-    return false;
   }
-}
-try{ window._fvTeacherForceLiveRefresh = _fvTeacherForceLiveRefresh; }catch{}
 
-/* slut Sektion 3H: LIVE-UPPDATERING (onSnapshot) + FIX: slå ihop “legacy link-id” till riktiga goalsMap-id */
+  function _fv_waitForRequiredFns(timeoutMs = 2000, pollMs = 25){
+    const start = Date.now();
+    return new Promise((resolve)=>{
+      const tick = ()=>{
+        if (_fv_allRequiredFnsExist()) return resolve(true);
+        if ((Date.now() - start) >= timeoutMs) return resolve(false);
+        setTimeout(tick, pollMs);
+      };
+      tick();
+    });
+  }
+
+  async function _fv_safeBootTeacherUI(trigger){
+    try{
+      if (window.__fv_teacher_boot_done) return;
+      if (typeof window._fv_bootTeacherUI !== "function") return;
+
+      const ok = await _fv_waitForRequiredFns(2000, 25);
+      if (!ok){
+        console.warn("[FV] Boot-guard: Required functions not ready in time:", REQUIRED_FNS);
+        return;
+      }
+
+      await window._fv_bootTeacherUI();
+      window.__fv_teacher_boot_done = true;
+      console.log("[FV] Boot-guard: teacher boot OK (" + String(trigger||"auto") + ")");
+    }catch(e){
+      console.warn("[FV] Boot-guard: teacher boot failed (will allow manual run):", e);
+    }
+  }
+
+  if (!window.__fv_boot_guard_bound){
+    window.__fv_boot_guard_bound = true;
+
+    // Kör direkt + en sen retry (löser “fastnar på framsidan” efter tidigt crash)
+    setTimeout(()=>{ _fv_safeBootTeacherUI("auto@0ms"); }, 0);
+    setTimeout(()=>{ _fv_safeBootTeacherUI("auto@250ms"); }, 250);
+
+    // Om fliken får fokus igen: försök boota om det inte lyckades tidigare
+    window.addEventListener("focus", ()=>{ _fv_safeBootTeacherUI("focus"); }, true);
+  }
+})();
+/*  slut SEKTION 3H: BOOT-GUARD (timing-fix för trySelectStudentToken/tryUpdateProgressUI) */
 
 
 /* start Sektion 3I: LÄRARINSTÄLLNINGAR (bekräftelser + “Aktuella delmål/delbitar” rutor + delete + rebuild) */
