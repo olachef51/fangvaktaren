@@ -2254,6 +2254,7 @@ async function handleGoogleLogout(){
 
 
 
+
 /* start Sektion 3C: MOLN-BANKER (lista + aktivera + uppdatera aktiv + spara + delete) */
 
 function _fv_fmtUpdatedAt(v){
@@ -2379,7 +2380,13 @@ async function loadCloudBankToLocal(bankId){
     window.dispatchEvent(new CustomEvent("fv-bank-changed", { detail: { source:"cloud", bankId: bid } }));
   }catch{}
 
+  /* FIX: tvinga refresh direkt efter aktivering (frågor + rosterTabs + vald elev) */
   try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
+  try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
+  try{
+    const t = (typeof window._fv_getSelectedToken === "function") ? window._fv_getSelectedToken() : "";
+    if (t && typeof window.trySelectStudentToken === "function") window.trySelectStudentToken(t);
+  }catch{}
 }
 
 async function updateActiveCloudBankFromLocalV5(bankId){
@@ -2513,10 +2520,6 @@ async function loadCloudBanksListV5(){
       try{
         await loadCloudBankToLocal(bankId);
         await loadCloudBanksListV5();
-
-        /* STABIL REFRESH: rendera alltid frågor + roster + progression efter bankbyte */
-        try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
-        try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
       }catch(e){
         console.error("Kunde inte aktivera bank:", e);
         alert("Kunde inte aktivera bank. Se konsolen.");
@@ -2528,9 +2531,6 @@ async function loadCloudBanksListV5(){
         await updateActiveCloudBankFromLocalV5(bankId);
         await loadCloudBanksListV5();
         alert("✅ Aktiv bank uppdaterad i molnet.");
-
-        try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
-        try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
       }catch(e){
         console.error("Kunde inte uppdatera aktiv bank:", e);
         alert("Kunde inte uppdatera aktiv bank. Se konsolen.");
@@ -2612,9 +2612,8 @@ async function handleSaveToCloudV5(){
     }
 
     try{ await loadCloudBanksListV5(); }catch{}
-
-    try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
     try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
+    try{ if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI(); }catch{}
   }catch(e){
     console.error("handleSaveToCloudV5 error:", e);
     alert("Kunde inte spara till molnet. Se konsolen.");
@@ -2655,6 +2654,7 @@ async function deleteCloudBankV5(bankId){
 }
 
 /* slut Sektion 3C: MOLN-BANKER (lista + aktivera + uppdatera aktiv + spara + delete) */
+
 
 
 /* start Sektion 3D: ROSTER (overlay + e-post + spara rosterRows/rosterTokens) */
@@ -3027,14 +3027,15 @@ async function openRosterInline(bankId){
 /* slut Sektion 3D: ROSTER (overlay + e-post + spara rosterRows/rosterTokens) */
 
 
-/* start Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs + REALTIME) */
+
+/* start Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) */
 
 const _fvTeacherSelectedTokenKey = "fangvaktaren-teacher-selected-student-token-v17";
 const _fvTeacherStudentCache = Object.create(null);
-const _fvTeacherStudentCacheTtlMs = 15000; // fallback om realtime ej finns
+const _fvTeacherStudentCacheTtlMs = 15000;
 
-let _fvStudentRealtimeUnsub = null;
-let _fvStudentRealtimeToken = "";
+let _fvUnsubSelectedStudent = null;
+let _fvListeningToken = "";
 
 function _fv_getSelectedToken(){
   try{ return String(localStorage.getItem(_fvTeacherSelectedTokenKey)||""); }catch{ return ""; }
@@ -3046,10 +3047,13 @@ function _fv_setSelectedToken(t){
 function _fv_getRosterTabsHost(){
   const ul = _fv_getEl("rosterTabs");
   if (ul) return ul;
+
   const div = _fv_getEl("playedStudentsTabs");
   if (div) return div;
+
   const list = _fv_getEl("playedStudentsList");
   if (list) return list;
+
   return null;
 }
 
@@ -3178,7 +3182,7 @@ function _fv_safeNum(n, fallback=0){
   return isFinite(x) ? x : fallback;
 }
 
-/* dotted-keys helper */
+/* FIX: stöd för “dotted keys” som råkar sparas som top-level keys i elevdoc (t.ex. "progression.attemptsByLevel.E") */
 function _fv_readDottedKeyNum(d, key, fallback=0){
   try{
     if (!d || typeof d !== "object") return fallback;
@@ -3212,42 +3216,44 @@ function _fv_normalizeDottedProgressionIntoObject(d){
   return d;
 }
 
-function _fv_stopStudentRealtime(){
-  try{ if (_fvStudentRealtimeUnsub) _fvStudentRealtimeUnsub(); }catch{}
-  _fvStudentRealtimeUnsub = null;
-  _fvStudentRealtimeToken = "";
+function _fv_stopSelectedStudentListener(){
+  try{ if (typeof _fvUnsubSelectedStudent === "function") _fvUnsubSelectedStudent(); }catch{}
+  _fvUnsubSelectedStudent = null;
+  _fvListeningToken = "";
 }
 
-async function _fv_startStudentRealtime(token){
-  const t = String(token||"").trim();
-  if (!t) { _fv_stopStudentRealtime(); return; }
-
-  await initFirebase();
+function _fv_startSelectedStudentListener(token){
   const ref = _fv_getActiveStudentsCollectionRef();
-  if (!ref || typeof ref.doc !== "function" || typeof ref.doc(t).onSnapshot !== "function"){
-    return; // fallback: cache/poll via trySelectStudentToken TTL
-  }
+  const t = String(token||"").trim();
+  if (!ref || !t) return;
 
-  if (_fvStudentRealtimeUnsub && _fvStudentRealtimeToken === t) return;
+  if (_fvListeningToken === t && typeof _fvUnsubSelectedStudent === "function") return;
 
-  _fv_stopStudentRealtime();
-  _fvStudentRealtimeToken = t;
+  _fv_stopSelectedStudentListener();
+  _fvListeningToken = t;
 
-  _fvStudentRealtimeUnsub = ref.doc(t).onSnapshot((snap)=>{
-    try{
-      if (!snap || !snap.exists) return;
+  try{
+    _fvUnsubSelectedStudent = ref.doc(t).onSnapshot((snap)=>{
+      if (!snap || !snap.exists){
+        delete _fvTeacherStudentCache[t];
+        tryUpdateProgressUI();
+        return;
+      }
       const d0 = snap.data() || {};
       const d = _fv_normalizeDottedProgressionIntoObject(d0) || d0;
       d._token = t;
       d._fetchedAt = Date.now();
+      d._live = true;
       _fvTeacherStudentCache[t] = d;
       tryUpdateProgressUI();
-    }catch(e){
-      console.warn("Realtime parse fail:", e);
-    }
-  }, (err)=>{
-    console.warn("Realtime elevdoc error:", err);
-  });
+    }, (err)=>{
+      console.warn("onSnapshot elevdoc error:", err);
+      _fvTeacherStudentCache[t] = { _token:t, _error:"permissions", _fetchedAt: Date.now(), _live:true };
+      tryUpdateProgressUI();
+    });
+  }catch(e){
+    console.warn("Kunde inte starta live-lyssning:", e);
+  }
 }
 
 async function _fv_fetchStudentDoc(token){
@@ -3304,12 +3310,7 @@ function _fv_getAttemptsFromRemote(d){
     return out;
   }
 
-  const candABL =
-    (prog.attemptsByLevel && typeof prog.attemptsByLevel==="object") ? prog.attemptsByLevel :
-    (d && d.attemptsByLevel && typeof d.attemptsByLevel==="object") ? d.attemptsByLevel :
-    (d && d.stats && d.stats.attemptsByLevel && typeof d.stats.attemptsByLevel==="object") ? d.stats.attemptsByLevel :
-    null;
-
+  const candABL = (prog.attemptsByLevel && typeof prog.attemptsByLevel==="object") ? prog.attemptsByLevel : null;
   if (candABL){
     out.E = _fv_safeNum(candABL.E, 0);
     out.C = _fv_safeNum(candABL.C, 0);
@@ -3319,35 +3320,10 @@ function _fv_getAttemptsFromRemote(d){
     return out;
   }
 
-  const totalCand =
-    (prog.attemptsTotal != null) ? prog.attemptsTotal :
-    (d && d.attemptsTotal != null) ? d.attemptsTotal :
-    (d && d.attempts != null) ? d.attempts :
-    (d && d.playCount != null) ? d.playCount :
-    (d && d.gamesPlayed != null) ? d.gamesPlayed :
-    null;
-
+  const totalCand = (prog.attemptsTotal != null) ? prog.attemptsTotal : (prog.attempts != null) ? prog.attempts : null;
   if (totalCand != null){
     out.total = _fv_safeNum(totalCand, 0);
     out.has = (out.total > 0);
-    return out;
-  }
-
-  const subs =
-    (d && Array.isArray(d.submissions)) ? d.submissions :
-    (d && Array.isArray(d.results)) ? d.results :
-    (prog && Array.isArray(prog.submissions)) ? prog.submissions :
-    null;
-
-  if (subs && subs.length){
-    let e=0,c=0,a=0;
-    for (let i=0;i<subs.length;i++){
-      const lv = String((subs[i] && (subs[i].level || subs[i].lvl || subs[i].niva)) || "").toUpperCase();
-      if (lv==="A") a++;
-      else if (lv==="C") c++;
-      else if (lv==="E") e++;
-    }
-    out.E=e; out.C=c; out.A=a; out.total=e+c+a; out.has=(out.total>0);
     return out;
   }
 
@@ -3371,8 +3347,43 @@ function _fv_renderUl(ul, items, emptyText){
   }
 }
 
-function _fv_goalIdLevelsMapFromBank(bank){
-  const out = Object.create(null);
+/* FIX: Vi mappar delbit-id via q.links (inte q.goalPart) + bygger fallback-label från (goal/parts) om id saknas i goalsMap */
+function _fv_extractLinkIds(q){
+  const out = [];
+  const push = (v)=>{
+    const s = String(v||"").trim();
+    if (!s) return;
+    if (!out.includes(s)) out.push(s);
+  };
+
+  try{
+    const links = q && q.links;
+    if (Array.isArray(links)){
+      for (let i=0;i<links.length;i++){
+        const ln = links[i];
+        if (ln == null) continue;
+        if (typeof ln === "string" || typeof ln === "number") push(ln);
+        else if (typeof ln === "object"){
+          if (ln.id != null) push(ln.id);
+          else if (ln.goalPart != null) push(ln.goalPart);
+          else if (ln.goalPartId != null) push(ln.goalPartId);
+          else if (ln.del != null) push(ln.del);
+          else if (ln.key != null) push(ln.key);
+        }
+      }
+    }
+  }catch{}
+
+  try{
+    const fallback = (q && (q.goalPart || q.goalPartId || q.goalPartKey || q.goalId));
+    if (fallback != null) push(fallback);
+  }catch{}
+
+  return out;
+}
+
+function _fv_buildGoalMetaFromBank(bank){
+  const meta = Object.create(null);
   const b = bank || {};
   const lists = [
     Array.isArray(b.mcq) ? b.mcq : [],
@@ -3384,29 +3395,32 @@ function _fv_goalIdLevelsMapFromBank(bank){
     const arr = lists[li];
     for (let i=0;i<arr.length;i++){
       const q = arr[i] || {};
-      const lvl = String(q.level || q.lv || "").toUpperCase() || "E";
-      const gid = String(
-        q.goalPart != null ? q.goalPart :
-        q.goalPartId != null ? q.goalPartId :
-        q.goalPartKey != null ? q.goalPartKey :
-        q.goal != null ? q.goal :
-        ""
-      ).trim();
-      if (!gid) continue;
-      if (!out[gid]) out[gid] = new Set();
-      out[gid].add(lvl);
+      const lvl = String(q.level || q.lv || q.niva || q.grade || "").toUpperCase().trim() || "E";
+      const ids = _fv_extractLinkIds(q);
+      if (!ids.length) continue;
+
+      const goal = String(q.goal || q.delmal || "").trim();
+      const parts = String(q.parts || q.part || q.delbit || "").trim();
+
+      for (let k=0;k<ids.length;k++){
+        const id = String(ids[k]);
+        if (!meta[id]) meta[id] = { goal:"", parts:"", levels: new Set() };
+        meta[id].levels.add(lvl);
+        if (!meta[id].goal && goal) meta[id].goal = goal;
+        if (!meta[id].parts && parts) meta[id].parts = parts;
+      }
     }
   }
-  return out;
+  return meta;
 }
 
-function _fv_pickThresholdForGoalId(goalId, levelsMap){
+function _fv_pickThresholdForGoalId(goalId, metaMap){
   try{
-    const set = levelsMap && levelsMap[String(goalId)] ? levelsMap[String(goalId)] : null;
-    if (!set || !set.size) return 0.50;
-    if (set.has("E")) return 0.50;
-    if (set.has("C")) return 0.30;
-    if (set.has("A")) return 0.20;
+    const m = metaMap && metaMap[String(goalId)] ? metaMap[String(goalId)] : null;
+    if (!m || !m.levels || !m.levels.size) return 0.50;
+    if (m.levels.has("E")) return 0.50;
+    if (m.levels.has("C")) return 0.30;
+    if (m.levels.has("A")) return 0.20;
   }catch{}
   return 0.50;
 }
@@ -3422,7 +3436,7 @@ function _fv_computeStrongWeak(goalsMap, prog, bank){
     gmIndex[String(g.id)] = g;
   }
 
-  const levelsMap = _fv_goalIdLevelsMapFromBank(bank);
+  const metaMap = _fv_buildGoalMetaFromBank(bank);
 
   const keys = new Set();
   Object.keys(corr||{}).forEach(k=>keys.add(String(k)));
@@ -3436,19 +3450,21 @@ function _fv_computeStrongWeak(goalsMap, prog, bank){
     if (a<=0) return;
 
     const g = gmIndex[k] || null;
-    const goal = g ? String(g.goal||"").trim() : "";
-    const part = g ? String(g.parts||g.part||"").trim() : "";
+    const meta = metaMap[k] || null;
+
+    const goal = g ? String(g.goal||"").trim() : (meta ? String(meta.goal||"").trim() : "");
+    const part = g ? String(g.parts||g.part||"").trim() : (meta ? String(meta.parts||"").trim() : "");
 
     let label = "";
-    if (g && (goal || part)){
+    if (goal || part){
       if (goal && part) label = `Delbit ${_fv_escapeHtml(k)}: ${_fv_escapeHtml(goal)} — ${_fv_escapeHtml(part)}`;
       else label = `Delbit ${_fv_escapeHtml(k)}: ${_fv_escapeHtml(goal || part)}`;
     }else{
-      label = `Okänd delbit (id ${_fv_escapeHtml(k)}) <span class="mini">– kontrollera kopplingen i frågebanken</span>`;
+      label = `Okänd delbit (id ${_fv_escapeHtml(k)}) <span class="mini">– saknar match i goalsMap och saknar goal/parts i banken</span>`;
     }
 
     const acc = a ? (c/a) : 0;
-    const th = _fv_pickThresholdForGoalId(k, levelsMap);
+    const th = _fv_pickThresholdForGoalId(k, metaMap);
 
     rows.push({ key:k, label, c, w, a, acc, th });
   });
@@ -3531,9 +3547,6 @@ async function trySelectStudentToken(token){
     }
   }catch{}
 
-  /* REALTIME: starta lyssnare direkt (UI uppdateras live när eleven spelar) */
-  try{ await _fv_startStudentRealtime(t); }catch{}
-
   const cached = _fvTeacherStudentCache[t] || null;
   const now = Date.now();
   const isFresh = !!(cached && cached._fetchedAt && (now - Number(cached._fetchedAt) <= _fvTeacherStudentCacheTtlMs));
@@ -3548,11 +3561,16 @@ async function trySelectStudentToken(token){
     }
   }
 
+  /* FIX: starta live-lyssning så UI uppdateras direkt när eleven spelar */
+  try{ _fv_startSelectedStudentListener(t); }catch{}
+
   tryUpdateProgressUI();
 }
 
-async function tryRefreshRosterTabs(force){
+async function tryRefreshRosterTabs(){
   try{
+    _fv_stopSelectedStudentListener();
+
     const roster = await _fv_fetchRosterFromActiveBank();
 
     if (roster && roster.publicId){
@@ -3566,30 +3584,24 @@ async function tryRefreshRosterTabs(force){
     _fv_renderRosterTabs(tabs);
 
     const sel = _fv_getSelectedToken();
-
     if (!sel && tabs.length) await trySelectStudentToken(tabs[0].token);
     if (sel && tabs.length && !tabs.find(x=>x.token===sel)) await trySelectStudentToken(tabs[0].token);
     if (sel && tabs.length) tryUpdateProgressUI();
-
-    if (!tabs.length){
-      _fv_stopStudentRealtime();
-    }
   }catch(e){
     console.warn("Kunde inte läsa roster för flikar:", e);
   }
 }
 
-/* debug */
+/* debug: gör cache synlig i konsolen (påverkar inte UI) */
 try{ window._fvTeacherStudentCache = _fvTeacherStudentCache; }catch{}
 try{ window._fv_getSelectedToken = _fv_getSelectedToken; }catch{}
 try{ window._fv_getAttemptsFromRemote = _fv_getAttemptsFromRemote; }catch{}
-try{ window._fv_startStudentRealtime = _fv_startStudentRealtime; }catch{}
-try{ window._fv_stopStudentRealtime = _fv_stopStudentRealtime; }catch{}
 
-/* slut Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs + REALTIME) */
+/* slut Sektion 3E: PROGRESSIONSFLIK (rosterTabs + elevdocs) */
 
 
-/* start Sektion 3F: UI refresh (goals-select + bankstatus hook + stabil refresh) */
+
+/* start Sektion 3F: UI refresh (goals-select + bankstatus hook) */
 
 function _fv_refreshGoalSelects(){
   const ids = ["mcqGoalPart","mcqJsonGoalPart","imgGoalPart","dragGoalPart"];
@@ -3622,19 +3634,11 @@ function _fv_refreshGoalSelects(){
   }
 }
 
-function _fv_refreshTeacherUIAll(){
+function fvRefreshTeacherBankUI(){
   try{ _fv_refreshGoalSelects(); }catch{}
-  try{ if (typeof window.__fv3h_renderAllQuestionLists === "function") window.__fv3h_renderAllQuestionLists(); }catch{}
+  try{ _fv3h_renderAllQuestionLists(); }catch{}
   try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch{}
   try{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }catch{}
-  try{
-    const sel = (typeof window._fv_getSelectedToken === "function") ? window._fv_getSelectedToken() : "";
-    if (sel && typeof window._fv_startStudentRealtime === "function") window._fv_startStudentRealtime(sel);
-  }catch{}
-}
-
-function fvRefreshTeacherBankUI(){
-  _fv_refreshTeacherUIAll();
 }
 
 try{ window.fvRefreshTeacherBankUI = fvRefreshTeacherBankUI; }catch{}
@@ -3643,14 +3647,23 @@ try{
   if (!window.__fv_bank_changed_listener){
     window.__fv_bank_changed_listener = true;
     window.addEventListener("fv-bank-changed", ()=>{
-      try{ _fv_refreshTeacherUIAll(); }catch{}
-      /* extra stabilitet: kör igen efter kort delay (bank/state/render-timing) */
-      try{ setTimeout(_fv_refreshTeacherUIAll, 120); }catch{}
+      try{ fvRefreshTeacherBankUI(); }catch{}
     });
   }
 }catch{}
 
-/* slut Sektion 3F: UI refresh (goals-select + bankstatus hook + stabil refresh) */
+/* FIX: om firebase blir redo och läraren är inloggad, försök bygga rosterTabs direkt */
+try{
+  if (!window.__fv_roster_boot){
+    window.__fv_roster_boot = true;
+    window.addEventListener("fv-firebase-ready", ()=>{
+      try{ setTimeout(()=>{ if (typeof window.tryRefreshRosterTabs === "function") window.tryRefreshRosterTabs(true); }, 220); }catch{}
+    });
+  }
+}catch{}
+
+/* slut Sektion 3F: UI refresh (goals-select + bankstatus hook) */
+
 
 
 
