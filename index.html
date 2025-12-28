@@ -2257,6 +2257,9 @@ async function handleGoogleLogout(){
 
 /* start Sektion 3C: MOLN-BANKER (lista + aktivera + uppdatera aktiv + spara + delete) */
 
+let _fvCloudBanksRenderSeq = 0;
+let _fvCloudBanksLatestSeq = 0;
+
 function _fv_fmtUpdatedAt(v){
   try{
     if (!v) return "-";
@@ -2426,16 +2429,22 @@ async function loadCloudBanksListV5(){
   const host = _fv_getCloudListHost();
   if (!host) return;
 
-  host.innerHTML = "";
-  _fv_setCloudStatus("");
+  const mySeq = ++_fvCloudBanksRenderSeq;
+  _fvCloudBanksLatestSeq = mySeq;
+
+  _fv_setCloudStatus("Laddar moln-banker...");
 
   await initFirebase();
 
   if (!_fv_hasDb()){
+    if (_fvCloudBanksLatestSeq !== mySeq) return;
+    host.innerHTML = "";
     _fv_setCloudStatus("⚠️ Firebase DB saknas.");
     return;
   }
   if (!_fv_hasTeacher()){
+    if (_fvCloudBanksLatestSeq !== mySeq) return;
+    host.innerHTML = "";
     _fv_setCloudStatus("☁️ Logga in med Google för att se dina moln-banker.");
     return;
   }
@@ -2449,8 +2458,11 @@ async function loadCloudBanksListV5(){
   try{ snap = await ref.orderBy("updatedAt","desc").get(); }
   catch{ snap = await ref.get(); }
 
+  if (_fvCloudBanksLatestSeq !== mySeq) return;
+
   const docs = snap && snap.docs ? snap.docs : [];
   if (!docs.length){
+    host.innerHTML = "";
     _fv_setCloudStatus("Inga moln-banker hittades.");
     return;
   }
@@ -2458,7 +2470,9 @@ async function loadCloudBanksListV5(){
   const s = loadState();
   const activeId = String(s.activeBank && s.activeBank.bankId ? s.activeBank.bankId : (window.activeCloudBankId||""));
 
+  const frag = document.createDocumentFragment();
   const seen = new Set();
+
   for (let i=0;i<docs.length;i++){
     const doc = docs[i];
     const bankId = String(doc.id);
@@ -2515,14 +2529,9 @@ async function loadCloudBanksListV5(){
         await loadCloudBankToLocal(bankId);
         await loadCloudBanksListV5();
 
-        // Viktigt: bygg flikar + starta live-uppdatering direkt utan att du behöver byta elev två gånger
         try{ if (typeof window.tryRefreshRosterTabs === "function") await window.tryRefreshRosterTabs(true); }catch{}
-        try{
-          if (typeof window._fvTeacherForceLiveRefresh === "function") await window._fvTeacherForceLiveRefresh();
-        }catch{}
-        try{
-          if (typeof window.fvToast === "function") window.fvToast("✅ Bank aktiverad. Elevflikar/progression uppdateras.");
-        }catch{}
+        try{ if (typeof window._fvTeacherForceLiveRefresh === "function") await window._fvTeacherForceLiveRefresh(); }catch{}
+        try{ if (typeof window.fvToast === "function") window.fvToast("✅ Bank aktiverad. Elevflikar/progression uppdateras."); }catch{}
       }catch(e){
         console.error("Kunde inte aktivera bank:", e);
         alert("Kunde inte aktivera bank. Se konsolen.");
@@ -2557,9 +2566,13 @@ async function loadCloudBanksListV5(){
       }
     });
 
-    host.appendChild(li);
+    frag.appendChild(li);
   }
 
+  if (_fvCloudBanksLatestSeq !== mySeq) return;
+
+  host.innerHTML = "";
+  host.appendChild(frag);
   _fv_setCloudStatus("");
 }
 
@@ -5150,7 +5163,7 @@ function ensureStudentSet(){
 
 
 
-/* start Sektion 4C: Delmål/delbitar (goalsMap) – spara + rendera rubrik/underrubrik */
+/* start Sektion 4C: Delmål/delbitar (goalsMap) – rutor + delete per delmål & delbit */
 function normalizeGoalsMap(s){
   if (!s) return [];
   const raw =
@@ -5204,37 +5217,145 @@ function _fv4_groupGoals(goals){
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(g);
   }
-  // stabil ordning: som inmatat
   return Array.from(groups.entries()).map(([goalTitle, items]) => ({ goalTitle, items }));
+}
+
+function _fv4_deleteGoalGroup(goalTitle){
+  const title = String(goalTitle || "").trim();
+  if (!title) return;
+
+  const s = _fv4_loadState();
+  if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
+
+  const before = normalizeGoalsMap(s);
+  const keep = [];
+  for (let i=0;i<before.length;i++){
+    const g = before[i];
+    const gt = String(g.goal || "").trim() || "Delmål";
+    if (gt !== title) keep.push(g);
+  }
+
+  s.goalsMap = keep.map((g)=>({ id:g.id, goal:g.goal, part:g.part }));
+  _fv4_saveState(s);
+
+  renderGoalsListAndSelects();
+  try{ if (typeof window.populateGoalSelect === "function"){ window.populateGoalSelect(); } }catch(e){}
+  try{ if (typeof window.__fv3h_renderAllQuestionLists === "function"){ window.__fv3h_renderAllQuestionLists(); } }catch(e){}
+}
+
+function _fv4_deleteGoalItemById(id){
+  const key = String(id || "").trim();
+  if (!key) return;
+
+  const s = _fv4_loadState();
+  if (!Array.isArray(s.goalsMap)) s.goalsMap = [];
+
+  const before = normalizeGoalsMap(s);
+  const keep = [];
+  for (let i=0;i<before.length;i++){
+    const g = before[i];
+    if (String(g.id) !== key) keep.push(g);
+  }
+
+  s.goalsMap = keep.map((g)=>({ id:g.id, goal:g.goal, part:g.part }));
+  _fv4_saveState(s);
+
+  renderGoalsListAndSelects();
+  try{ if (typeof window.populateGoalSelect === "function"){ window.populateGoalSelect(); } }catch(e){}
+  try{ if (typeof window.__fv3h_renderAllQuestionLists === "function"){ window.__fv3h_renderAllQuestionLists(); } }catch(e){}
 }
 
 function renderGoalsListAndSelects(){
   const s = _fv4_loadState();
   const goals = normalizeGoalsMap(s);
 
-  // Lista i Inställningar (rubrik=delmål, underrubrik=delbit)
+  // Lista i Inställningar: delmål = rubrikruta, delbitar = underrutor (alla med delete)
   const listEl = _fv4_getEl("goalsList");
   if (listEl){
     listEl.innerHTML = "";
+
     if (!goals.length){
       const li = document.createElement("li");
       li.textContent = "Inga delmål/delbitar sparade ännu.";
       listEl.appendChild(li);
     }else{
       const grouped = _fv4_groupGoals(goals);
-      grouped.forEach((grp) => {
-        // rubrik
-        const liH = document.createElement("li");
-        liH.innerHTML = `<div style="font-weight:700;">${_fv4_escapeHtml(grp.goalTitle)}</div>`;
-        listEl.appendChild(liH);
 
-        // underrubriker
-        grp.items.forEach((it) => {
-          const li = document.createElement("li");
-          const partTxt = it.part ? it.part : "(ingen delbit-text)";
-          li.innerHTML = `<div class="mini" style="opacity:.95;">Delbit ${_fv4_escapeHtml(it.id)}: ${_fv4_escapeHtml(partTxt)}</div>`;
-          listEl.appendChild(li);
+      grouped.forEach((grp) => {
+        const li = document.createElement("li");
+        li.style.listStyle = "none";
+        li.style.margin = "8px 0";
+
+        const card = document.createElement("div");
+        card.style.border = "1px solid #1f2937";
+        card.style.borderRadius = "12px";
+        card.style.padding = "10px";
+        card.style.display = "flex";
+        card.style.flexDirection = "column";
+        card.style.gap = "8px";
+
+        // Rubrikrad (delmål) + delete
+        const head = document.createElement("div");
+        head.style.display = "flex";
+        head.style.alignItems = "center";
+        head.style.justifyContent = "space-between";
+        head.style.gap = "10px";
+
+        const title = document.createElement("div");
+        title.style.fontWeight = "800";
+        title.textContent = grp.goalTitle || "Delmål";
+
+        const btnDelGoal = document.createElement("button");
+        btnDelGoal.type = "button";
+        btnDelGoal.className = "btn btn-sm";
+        btnDelGoal.textContent = "Ta bort delmål";
+        btnDelGoal.addEventListener("click", () => {
+          if (!confirm(`Ta bort hela delmålet "${grp.goalTitle}" och alla delbitar under?`)) return;
+          _fv4_deleteGoalGroup(grp.goalTitle);
         });
+
+        head.appendChild(title);
+        head.appendChild(btnDelGoal);
+        card.appendChild(head);
+
+        // Delbitar: individuella rutor + delete
+        const partsWrap = document.createElement("div");
+        partsWrap.style.display = "flex";
+        partsWrap.style.flexDirection = "column";
+        partsWrap.style.gap = "6px";
+
+        grp.items.forEach((it) => {
+          const row = document.createElement("div");
+          row.style.border = "1px solid #1f2937";
+          row.style.borderRadius = "10px";
+          row.style.padding = "8px";
+          row.style.display = "flex";
+          row.style.alignItems = "center";
+          row.style.justifyContent = "space-between";
+          row.style.gap = "10px";
+
+          const txt = document.createElement("div");
+          txt.className = "mini";
+          const partTxt = it.part ? it.part : "(ingen delbit-text)";
+          txt.textContent = `Delbit ${it.id}: ${partTxt}`;
+
+          const btnDelPart = document.createElement("button");
+          btnDelPart.type = "button";
+          btnDelPart.className = "btn btn-sm";
+          btnDelPart.textContent = "Ta bort";
+          btnDelPart.addEventListener("click", () => {
+            if (!confirm(`Ta bort delbit ${it.id}?`)) return;
+            _fv4_deleteGoalItemById(it.id);
+          });
+
+          row.appendChild(txt);
+          row.appendChild(btnDelPart);
+          partsWrap.appendChild(row);
+        });
+
+        card.appendChild(partsWrap);
+        li.appendChild(card);
+        listEl.appendChild(li);
       });
     }
   }
@@ -5304,7 +5425,15 @@ function handleAddGoalPart(){
   try{ if (typeof window.populateGoalSelect === "function"){ window.populateGoalSelect(); } }catch(e){}
   try{ if (typeof window.__fv3h_renderAllQuestionLists === "function"){ window.__fv3h_renderAllQuestionLists(); } }catch(e){}
 }
-/* slut Sektion 4C: Delmål/delbitar (goalsMap) – spara + rendera rubrik/underrubrik */
+/* slut Sektion 4C: Delmål/delbitar (goalsMap) – rutor + delete per delmål & delbit */
+
+
+
+
+
+
+
+
 
 /* start Sektion 4D: Progression – stark/svag enligt nivåtrösklar + rubrik/underrubrik */
 function updateStudentStatsUI(){
@@ -5565,7 +5694,14 @@ function handleResetGameData(){
 }
 /* slut Sektion 4D: Progression – stark/svag enligt nivåtrösklar + rubrik/underrubrik */
 
+
+
+
+
+
+
 /* start Sektion 4E: UI-sync (nivåkort + elevinfo) */
+// Ändrat: studentCard göms nu bara vid aktivt spel (inte vid resultat) så Poäng/Highscore syns efter inlämning. (1 rad ändrad)
 function handleSaveStudent(){
   const nameInput = _fv4_getEl("studentName");
   const classInput = _fv4_getEl("studentClass");
@@ -5682,22 +5818,11 @@ function syncUI(){
   const studentCard = _fv4_getEl("studentCard");
 
   const isPlaying = !!currentLevel;
-  const isResultVisible = resultSection && !resultSection.classList.contains("hidden");
-  if (studentCard) studentCard.classList.toggle("hidden", isPlaying || isResultVisible);
+  if (studentCard) studentCard.classList.toggle("hidden", isPlaying);
 
   updateAllProgressionUI();
 }
 /* slut Sektion 4E: UI-sync (nivåkort + elevinfo) */
-
-/* start Sektion 4F: Länka fråga → delbit */
-function getLinksForQuestion(q, goals){
-  const id = _fv4_getGoalPartIdFromQuestion(q);
-  if (!id) return [];
-  const list = Array.isArray(goals) ? goals : [];
-  const hit = list.find((g)=> String(g.id) === String(id));
-  return hit ? [hit] : [{ id: String(id) }];
-}
-/* slut Sektion 4F: Länka fråga → delbit */
 
 
 
@@ -6453,6 +6578,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 })();
 
 /* slut Sektion 4I: FIREBASE – elevinlämning (attemptsByLevel + attemptsTotal) */
+
 
 
 
