@@ -4322,6 +4322,7 @@ try{
 
 
 /* start Sektion 3G: INIT & KNAPP-KOPPLINGAR (bind molnknappar + auto-refresh teacher UI) */
+// ÄNDRAT (Sektion 3G): Capture-binder + save-lock för “Spara till moln” som stoppar dublett-spar + blockerar legacy click-handlers. (Omskrivna/nya rader: 145)
 
 function _fv_bindOnce(el, key){
   try{
@@ -4341,11 +4342,34 @@ function _fv_getBtnByIds(ids){
   return null;
 }
 
+/* --- Save-lock (hindrar dubbel-klick/dublett-spar) --- */
+const _fvSaveLock = { inFlight:false };
+
+async function _fv_runSaveToCloudLocked(){
+  if (_fvSaveLock.inFlight){
+    console.log("⏳ Save blocked (already in flight)");
+    try{ if (typeof window.fvToast==="function") window.fvToast("⏳ Sparar redan…"); }catch{}
+    return;
+  }
+  _fvSaveLock.inFlight = true;
+  try{
+    if (typeof window.handleSaveToCloudV5 === "function"){
+      return await window.handleSaveToCloudV5.apply(this, arguments);
+    }
+    if (typeof window.handleSaveToCloud === "function"){
+      return await window.handleSaveToCloud.apply(this, arguments);
+    }
+    throw new Error("Saknar save-funktion (handleSaveToCloudV5/handleSaveToCloud).");
+  } finally {
+    setTimeout(()=>{ _fvSaveLock.inFlight = false; }, 900);
+  }
+}
+
 function _fv_bindCloudButtonsV5(){
   // ☁️ Ladda moln-bankar
   const btnLoad = _fv_getBtnByIds(["btnLoadCloudBanks","btnLoadCloudBanksV4","btnLoadCloudBanksV5"]);
   if (btnLoad && _fv_bindOnce(btnLoad, "loadCloudBanks")){
-    btnLoad.addEventListener("click", async ()=>{
+    btnLoad.addEventListener("click", async ()=>{ // bubble OK
       try{
         await loadCloudBanksListV5();
         try{ if (typeof window.fvToast==="function") window.fvToast("☁️ Moln-bankar laddade."); }catch{}
@@ -4356,23 +4380,28 @@ function _fv_bindCloudButtonsV5(){
     });
   }
 
-  // 💾 Spara till moln (skapa ny/uppdatera)
+  // 💾 Spara till moln (capture: blockerar legacy handlers + save-lock)
   const btnSave = _fv_getBtnByIds(["btnSaveToCloud","btnSaveCloudBank","btnCloudSave","btnSaveToCloudV5"]);
-  if (btnSave && _fv_bindOnce(btnSave, "saveToCloud")){
-    btnSave.addEventListener("click", async ()=>{
+  if (btnSave && _fv_bindOnce(btnSave, "saveToCloudCapture")){
+    btnSave.addEventListener("click", async (ev)=>{
       try{
-        await handleSaveToCloudV5();
+        // Viktigt: stoppa ALLA andra click-handlers (som kan trigga dublett / fel “handleSaveToCloud saknas”)
+        try{ ev.preventDefault(); }catch{}
+        try{ ev.stopImmediatePropagation(); }catch{}
+        try{ ev.stopPropagation(); }catch{}
+
+        await _fv_runSaveToCloudLocked();
       }catch(e){
-        console.error("handleSaveToCloudV5 error:", e);
+        console.error("Save-to-cloud error:", e);
         alert("Kunde inte spara till molnet. Se konsolen.");
       }
-    });
+    }, true); // <-- capture
   }
 
   // 🔄 Refresh lärar-UI (om du har en knapp – valfritt)
   const btnRefresh = _fv_getBtnByIds(["btnTeacherRefresh","btnRefreshTeacher","btnRefreshUI"]);
   if (btnRefresh && _fv_bindOnce(btnRefresh, "teacherRefresh")){
-    btnRefresh.addEventListener("click", async ()=>{
+    btnRefresh.addEventListener("click", async ()=>{ // bubble OK
       try{
         fvRefreshTeacherBankUI();
         await tryRefreshRosterTabs(true);
