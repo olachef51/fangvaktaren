@@ -3885,7 +3885,7 @@ try{ window._fvTeacherForceLiveRefresh = _fvTeacherForceLiveRefresh; }catch{}
 
 
 /* start Sektion 3F: UI refresh (goals-select + bankstatus hook + lärarinställningar: rutor + delete + konvertera gamla IDs) */
-/* ÄNDRAT: Delbit-text (parts) blir tydligast. Döljer “Delbit {id}” i rutan men behåller id för logik. */
+/* ÄNDRING (3F): Delmål=tydlig rubrik, delbit=underrubrik (mindre/lättare), döljer "Delbit 176...", samt auto-refresh när goalsMap ändras via saveState. */
 
 (function FV_Toasts(){
   if (_fv_getEl("fvToast")) return;
@@ -3957,6 +3957,7 @@ function _fv_refreshGoalSelects(){
 /* --- HJÄLP: ta bort/hidden överflödiga introtexter/legacy-rutor om de ligger kvar --- */
 function _fv_cleanupGoalsUI(){
   try{
+    // 1) Dölj “Nedan visas…” om den finns någonstans i lärarvyn
     const needles = [
       "Nedan visas de delmål och delbitar som är sparade i spelet just nu.",
       "Nedan visas de delmål och delbitar som är sparade i spelet just nu"
@@ -3966,11 +3967,20 @@ function _fv_cleanupGoalsUI(){
       const el = paras[i];
       const t = String(el.textContent||"").trim();
       if (!t) continue;
+
       if (needles.includes(t)){
+        el.style.display = "none";
+        continue;
+      }
+
+      // 1b) Dölj legacy-feedback som hamnar i “skaparrutan”, t.ex. "Tillagd: Delbit 176..."
+      if (/^Tillagd:\s*Delbit\s+\d+/.test(t)){
         el.style.display = "none";
       }
     }
 
+    // 2) Om det finns ett extra “Aktuella delmål…”-kort i teacherModal (h3),
+    //    dölj det för att undvika dubbel info.
     const h3s = Array.from(document.querySelectorAll("h3"));
     for (let i=0;i<h3s.length;i++){
       const h = h3s[i];
@@ -3978,121 +3988,38 @@ function _fv_cleanupGoalsUI(){
       if (t !== "Aktuella delmål och delbitar") continue;
       const card = h.closest(".card");
       if (!card) continue;
+      // Dölj endast “kortet med h3” (inte vår box)
       if (card.id === "fvGoalsManagerBox" || card.id === "fvTeacherGoalsEditorHost") continue;
       card.style.display = "none";
     }
 
+    // 3) Om legacy-host råkar ligga kvar i body (som din diag visade),
+    //    ta bort den helt när vi använder nya managern.
     const legacy = _fv_getEl("fvTeacherGoalsEditorHost");
     if (legacy) legacy.remove();
   }catch{}
 }
 
+/* --- Lärarinställningar: hitta host --- */
 function _fv_findGoalsSettingsHost(){
-  try{
-    const email =
-      _fv_getEl("teacherEmail") ||
-      _fv_getEl("inputTeacherEmail") ||
-      _fv_getEl("txtTeacherEmail") ||
-      _fv_getEl("emailTeacher") ||
-      _fv_getEl("teacherMail") ||
-      (document.querySelector ? document.querySelector('input[type="email"]') : null);
-
-    if (email){
-      const root =
-        email.closest("#teacherModal") ||
-        email.closest("#teacherPanel") ||
-        email.closest("#teacherSettings") ||
-        email.closest("[data-tab='teacher']") ||
-        email.closest("section") ||
-        email.closest("div") ||
-        null;
-      if (root) return root;
-    }
-
-    const th =
-      _fv_getEl("thresE") || _fv_getEl("thresholdE") ||
-      _fv_getEl("thresC") || _fv_getEl("thresholdC") ||
-      _fv_getEl("thresA") || _fv_getEl("thresholdA") ||
-      null;
-
-    if (th && th.closest){
-      const root =
-        th.closest("#teacherModal") ||
-        th.closest("#teacherPanel") ||
-        th.closest("#teacherSettings") ||
-        th.closest("[data-tab='teacher']") ||
-        th.closest("section") ||
-        th.closest("div") ||
-        null;
-      if (root) return root;
-    }
-
-    const ids = [
-      "teacherModalContent",
-      "teacherModal",
-      "teacherSettings",
-      "teacherPanel",
-      "teacherTab",
-      "tabTeacher",
-      "teacherTabContent",
-      "teacherView",
-      "teacher-mode"
-    ];
-    for (let i=0;i<ids.length;i++){
-      const el = _fv_getEl(ids[i]);
-      if (!el) continue;
-      const tag = String(el.tagName||"").toLowerCase();
-      if (tag === "ul" || tag === "nav") continue;
-      if (el.getAttribute && el.getAttribute("role")==="tablist") continue;
-      return el;
-    }
-  }catch{}
-  return null;
-}
-
-function _fv_forceNormalFlowBox(el){
-  try{
-    if (!el || !el.style) return;
-    el.style.position = "static";
-    el.style.left = "auto";
-    el.style.right = "auto";
-    el.style.top = "auto";
-    el.style.bottom = "auto";
-    el.style.inset = "auto";
-    el.style.transform = "none";
-    el.style.width = "100%";
-    el.style.maxWidth = "none";
-    el.style.float = "none";
-    el.style.zIndex = "auto";
-    el.style.marginLeft = "";
-    el.style.marginRight = "";
-  }catch{}
-}
-
-function _fv_pickSafeInsertHost(base){
-  try{
-    if (!base) return null;
-
-    const content =
-      (base.querySelector && (base.querySelector(".modal-content") || base.querySelector(".modal-body"))) ||
-      null;
-
-    const root = content || base;
-
-    if (root.classList && root.classList.contains("card")){
-      if (root.parentElement) return root.parentElement;
-      return root;
-    }
-
-    const cards = root.querySelectorAll ? root.querySelectorAll(":scope > .card") : null;
-    if (cards && cards.length){
-      return root;
-    }
-
-    return root;
-  }catch{
-    return base || null;
+  const ids = [
+    "teacherGoalsSettings",
+    "teacherGoalsBox",
+    "currentGoalsBox",
+    "goalsMapBox",
+    "goalsMapPreview",
+    "goalsPreview",
+    "teacherSettingsGoals",
+    "teacherSettings",
+    "teacherPanel",
+    "tabTeacher",
+    "teacherTab"
+  ];
+  for (let i=0;i<ids.length;i++){
+    const el = _fv_getEl(ids[i]);
+    if (el) return el;
   }
+  return null;
 }
 
 function _fv_ensureGoalsManagerStyles(){
@@ -4102,12 +4029,15 @@ function _fv_ensureGoalsManagerStyles(){
   st.textContent = `
     .fv-goals-wrap{ display:grid; gap:10px; margin-top:10px; }
     .fv-goal-card{ border:1px solid rgba(75,85,99,.75); border-radius:16px; padding:10px; background:rgba(2,6,23,.35); }
+
+    /* Delmål = rubrik (tydligast) */
+    .fv-goal-title{ font-weight:800; line-height:1.2; font-size:1.02rem; }
     .fv-goal-head{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
-    .fv-goal-title{ font-weight:700; line-height:1.2; }
 
     /* Viktigt: stapla ALLA delbitar vertikalt */
     .fv-goal-items{ display:flex; flex-direction:column; gap:8px; margin-top:10px; }
 
+    /* Delbit-ruta */
     .fv-goal-item{
       border:1px solid rgba(75,85,99,.65);
       border-radius:14px;
@@ -4119,17 +4049,18 @@ function _fv_ensureGoalsManagerStyles(){
       justify-content:space-between;
     }
 
-    /* NYTT: gör delbit-texten tydligast */
-    .fv-goal-item .fv-part-main{
-      font-weight:800;
+    /* Delbit-text = underrubrik (mindre/lättare än delmål) */
+    .fv-goal-part{
+      font-size:.92rem;
+      font-weight:500;
       line-height:1.25;
-      font-size:1rem;
-      letter-spacing:.1px;
-      margin-top:1px;
-      word-break:break-word;
+      margin-top:2px;
     }
 
-    .fv-goal-item .mini{ opacity:.88; }
+    /* Vi visar inte ID som text (oviktigt för läraren), men behåller i title */
+    .fv-goal-id{ display:none; }
+
+    .fv-goal-item .mini{ opacity:.9; }
     .fv-goals-actions{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; justify-content:flex-end; }
 
     /* Safety override om något gammalt grid (auto-fit) råkar ligga kvar */
@@ -4206,6 +4137,7 @@ function _fv_deleteGoalGroup(goalTitle){
   try{ window.fvToast(`🗑 Delmål borttaget (${toRemove.length} delbitar). (Spara till molnet)`); }catch{}
 }
 
+/* Konvertera gamla links[].id (17649...) -> goalsMap.id ("1","2",...) via (goal+parts) */
 function _fv_convertLegacyLinkIds(){
   const s = loadState();
   const gm = Array.isArray(s.goalsMap)?s.goalsMap:[];
@@ -4264,9 +4196,8 @@ function _fv_convertLegacyLinkIds(){
 }
 
 function _fv_renderGoalsManager(){
-  const baseHost = _fv_findGoalsSettingsHost();
-  const insertHost = _fv_pickSafeInsertHost(baseHost);
-  if (!insertHost) return;
+  const host = _fv_findGoalsSettingsHost();
+  if (!host) return;
 
   _fv_ensureGoalsManagerStyles();
   _fv_cleanupGoalsUI();
@@ -4286,37 +4217,18 @@ function _fv_renderGoalsManager(){
       <div class="fv-goals-wrap" id="fvGoalsWrap"></div>
       <div class="mini" id="fvGoalsStatus"></div>
     `;
+
+    host.appendChild(box);
+
+    _fv_getEl("fvGoalsConvertLegacy")?.addEventListener("click", ()=>{
+      if (!confirm("Konvertera gamla delbit-ID (t.ex. 17649...) till goalsMap-id (1,2,3...)?\nDetta ändrar frågornas links. (Glöm inte spara banken till molnet efteråt)")) return;
+      _fv_convertLegacyLinkIds();
+      _fv_renderGoalsManager();
+    });
+    _fv_getEl("fvGoalsHintSave")?.addEventListener("click", ()=>{
+      try{ window.fvToast("💾 Kom ihåg: klicka “Spara till moln” för att göra ändringarna permanenta."); }catch{}
+    });
   }
-
-  try{
-    if (box.parentElement !== insertHost) insertHost.appendChild(box);
-  }catch{
-    try{ insertHost.appendChild(box); }catch{}
-  }
-
-  _fv_forceNormalFlowBox(box);
-
-  try{
-    const btnConv = _fv_getEl("fvGoalsConvertLegacy");
-    if (btnConv && !btnConv.__fvBound){
-      btnConv.__fvBound = true;
-      btnConv.addEventListener("click", ()=>{
-        if (!confirm("Konvertera gamla delbit-ID (t.ex. 17649...) till goalsMap-id (1,2,3...)?\nDetta ändrar frågornas links. (Glöm inte spara banken till molnet efteråt)")) return;
-        _fv_convertLegacyLinkIds();
-        _fv_renderGoalsManager();
-      });
-    }
-  }catch{}
-
-  try{
-    const btnHint = _fv_getEl("fvGoalsHintSave");
-    if (btnHint && !btnHint.__fvBound){
-      btnHint.__fvBound = true;
-      btnHint.addEventListener("click", ()=>{
-        try{ window.fvToast("💾 Kom ihåg: klicka “Spara till moln” för att göra ändringarna permanenta."); }catch{}
-      });
-    }
-  }catch{}
 
   const wrap = _fv_getEl("fvGoalsWrap");
   const status = _fv_getEl("fvGoalsStatus");
@@ -4356,21 +4268,28 @@ function _fv_renderGoalsManager(){
     for (let ii=0; ii<g.items.length; ii++){
       const it = g.items[ii];
       itemsCount++;
+
       const row = document.createElement("div");
       row.className = "fv-goal-item";
 
-      // NYTT: parts är huvudtexten. ID visas inte, men behålls i attribut för logik/debug.
-      const partMain = it.parts ? String(it.parts) : "";
+      // Behåll ID för spelet (data-id + title), men visa inte "Delbit 176..." som text för läraren
       row.setAttribute("data-goal-id", String(it.id||""));
+      row.title = `Delbit-id: ${String(it.id||"")}`;
+
+      // Delbit-text (parts) = underrubrik, tydlig men mindre än delmål
+      const partsText = String(it.parts||"").trim();
+      const partsLine = partsText ? `<div class="fv-goal-part">${_fv_escapeHtml(partsText)}</div>` : `<div class="mini">—</div>`;
 
       row.innerHTML = `
         <div style="min-width:0">
-          ${partMain ? `<div class="fv-part-main">${_fv_escapeHtml(partMain)}</div>` : ``}
+          ${partsLine}
+          <div class="fv-goal-id mini">Delbit ${_fv_escapeHtml(it.id)}</div>
         </div>
         <div class="fv3-actions">
           <button class="btn fv3-btn-xs btn-danger" type="button" data-act="del-item" data-id="${_fv_escapeHtml(it.id)}">Ta bort</button>
         </div>
       `;
+
       itemsHost?.appendChild(row);
     }
 
@@ -4382,7 +4301,7 @@ function _fv_renderGoalsManager(){
       if (act === "del-item"){
         const id = String(btn.getAttribute("data-id")||"").trim();
         if (!id) return;
-        if (!confirm(`Ta bort delbit? Detta rensar även kopplingar i frågor.\n(Spara till molnet efteråt)`)) return;
+        if (!confirm(`Ta bort delbit?\nDetta rensar även kopplingar i frågor.\n(Spara till molnet efteråt)`)) return;
         _fv_deleteGoalItem(id);
         _fv_renderGoalsManager();
       } else if (act === "del-goal"){
@@ -4423,6 +4342,7 @@ try{
   }
 }catch{}
 
+/* Auto: när fliken får fokus – hämta senaste elevdata */
 try{
   if (!window.__fv_focus_refresh_bound){
     window.__fv_focus_refresh_bound = true;
@@ -4431,6 +4351,50 @@ try{
     }, true);
   }
 }catch{}
+
+/* ✅ Auto-refresh: om goalsMap uppdateras via saveState (t.ex. “Tillagd: Delbit …”), bygg om rutor direkt */
+(function FV3F_SaveStateGoalsHook(){
+  try{
+    if (typeof window.saveState !== "function") return;
+    if (window.saveState.__fvWrapped3F) return;
+
+    const orig = window.saveState;
+
+    const sigOf = (st)=>{
+      try{
+        const s = st || {};
+        const gm = Array.isArray(s.goalsMap) ? s.goalsMap : [];
+        const last = gm.length ? (gm[gm.length-1] || {}) : {};
+        return `${gm.length}||${String(last.id||"")}||${String(last.goal||"")}||${String(last.parts||last.part||"")}`;
+      }catch{
+        return "";
+      }
+    };
+
+    let lastSig = "";
+    let tmr = null;
+
+    window.saveState = function(){
+      const before = (()=>{ try{ return sigOf(arguments[0]); }catch{ return ""; } })();
+      const res = orig.apply(this, arguments);
+      const after = (()=>{ try{ return sigOf(arguments[0]); }catch{ return ""; } })();
+
+      if (before !== after && after !== lastSig){
+        lastSig = after;
+        try{ if (tmr) clearTimeout(tmr); }catch{}
+        tmr = setTimeout(()=>{
+          try{ _fv_renderGoalsManager(); }catch{}
+          try{ _fv_refreshGoalSelects(); }catch{}
+          try{ _fv_cleanupGoalsUI(); }catch{}
+        }, 80);
+      }
+      return res;
+    };
+
+    window.saveState.__fvWrapped3F = true;
+  }catch{}
+})();
+
 /* slut Sektion 3F: UI refresh (goals-select + bankstatus hook + lärarinställningar: rutor + delete + konvertera gamla IDs) */
 
 
