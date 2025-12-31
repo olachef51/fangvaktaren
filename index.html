@@ -3885,7 +3885,10 @@ try{ window._fvTeacherForceLiveRefresh = _fvTeacherForceLiveRefresh; }catch{}
 
 
 /* start Sektion 3F: UI refresh (goals-select + bankstatus hook + lärarinställningar: rutor + delete + konvertera gamla IDs) */
+/* Ändrat: Stabil host-fallback via btnAddGoalPart + auto-render/cleanup efter “Lägg till delbit”; döljer delbit-ID visuellt. */
+/* Omskrivna/nya rader: 558 */
 
+/* start Sektion 3F-A: Toast */
 (function FV_Toasts(){
   if (_fv_getEl("fvToast")) return;
   const st = document.createElement("style");
@@ -3921,7 +3924,9 @@ try{ window._fvTeacherForceLiveRefresh = _fvTeacherForceLiveRefresh; }catch{}
     tmr = setTimeout(()=>{ try{ el.style.display="none"; }catch{} }, 2400);
   };
 })();
+ /* slut Sektion 3F-A: Toast */
 
+/* start Sektion 3F-B: Goal selects */
 function _fv_refreshGoalSelects(){
   const ids = ["mcqGoalPart","mcqJsonGoalPart","imgGoalPart","dragGoalPart"];
   const s = loadState();
@@ -3952,6 +3957,9 @@ function _fv_refreshGoalSelects(){
     try{ sel.value = prev; }catch{}
   }
 }
+/* slut Sektion 3F-B: Goal selects */
+
+/* start Sektion 3F-C: Cleanup helpers */
 
 /* --- HJÄLP: ta bort/hidden överflödiga introtexter/legacy-rutor om de ligger kvar --- */
 function _fv_cleanupGoalsUI(){
@@ -4000,6 +4008,7 @@ function _fv_cleanupAddedGoalPartMessages(){
 
     const re = /^Tillagd:\s*Delbit\s*\d+\.?\s*$/i;
 
+    // A) Rensa element som bara innehåller texten
     const cands = Array.from(scope.querySelectorAll("div, p, span, li"));
     for (let i=0;i<cands.length;i++){
       const el = cands[i];
@@ -4010,11 +4019,52 @@ function _fv_cleanupAddedGoalPartMessages(){
         try{ el.remove(); }catch{ try{ el.style.display="none"; }catch{} }
       }
     }
+
+    // B) Rensa “nakna” textnoder som matchar (ifall den injiceras utan wrapper)
+    try{
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null);
+      const toNuke = [];
+      while(walker.nextNode()){
+        const n = walker.currentNode;
+        const t = String(n && n.nodeValue ? n.nodeValue : "").trim();
+        if (!t) continue;
+        if (re.test(t) || t.startsWith("Tillagd: Delbit")){
+          toNuke.push(n);
+        }
+      }
+      for (let i=0;i<toNuke.length;i++){
+        const n = toNuke[i];
+        const p = n.parentElement;
+        if (p){
+          // om föräldern bara är en “text-holder” → ta bort hela
+          const onlyTxt = (String(p.textContent||"").trim() === String(n.nodeValue||"").trim()) && (p.children.length === 0);
+          if (onlyTxt){
+            try{ p.remove(); continue; }catch{}
+          }
+        }
+        try{ n.nodeValue = ""; }catch{}
+      }
+    }catch{}
   }catch{}
 }
+/* slut Sektion 3F-C: Cleanup helpers */
+
+/* start Sektion 3F-D: Host + styles + grouping */
 
 /* --- Lärarinställningar: hitta host --- */
 function _fv_findGoalsSettingsHost(){
+  // 0) Om knappen finns: använd samma logik som konsoltestet (mest robust)
+  try{
+    const btn = _fv_getEl("btnAddGoalPart");
+    if (btn){
+      const card = btn.closest(".card");
+      if (card) return card;
+      const p = btn.parentElement;
+      if (p) return p;
+    }
+  }catch{}
+
+  // 1) Fallback: försök kända id:n
   const ids = [
     "teacherGoalsSettings",
     "teacherGoalsBox",
@@ -4032,6 +4082,13 @@ function _fv_findGoalsSettingsHost(){
     const el = _fv_getEl(ids[i]);
     if (el) return el;
   }
+
+  // 2) Sista utväg: om teacherModal finns (vanligt), använd den
+  try{
+    const modal = _fv_getEl("teacherModal") || document.querySelector(".modal") || null;
+    if (modal) return modal;
+  }catch{}
+
   return null;
 }
 
@@ -4053,6 +4110,9 @@ function _fv_ensureGoalsManagerStyles(){
 
     /* Delbit-text (underrubrik) ska vara mindre än delmålet och inte fet */
     .fv-goal-part{ font-size:.86rem; font-weight:500; line-height:1.25; opacity:.96; margin-top:2px; }
+
+    /* Safety: om någon legacy-markup visar “Delbit 176...” i strong, dölj den visuellt */
+    #fvGoalsManagerBox .fv-goal-item strong{ display:none !important; }
 
     .fv-goals-actions{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; justify-content:flex-end; }
 
@@ -4077,7 +4137,9 @@ function _fv_groupGoalsMap(goalsMap){
   });
   return out;
 }
+/* slut Sektion 3F-D: Host + styles + grouping */
 
+/* start Sektion 3F-E: CRUD + legacy conversion */
 function _fv_removeLinksByGoalId(bank, goalId){
   const gid = String(goalId||"").trim();
   if (!gid) return bank;
@@ -4187,7 +4249,9 @@ function _fv_convertLegacyLinkIds(){
 
   try{ window.fvToast(`✅ Konvertering klar. Ändrade länkar i ${conv} frågor. (Spara banken till molnet)`); }catch{}
 }
+/* slut Sektion 3F-E: CRUD + legacy conversion */
 
+/* start Sektion 3F-F: Render manager + UI refresh */
 function _fv_renderGoalsManager(){
   const host = _fv_findGoalsSettingsHost();
   if (!host) return;
@@ -4234,6 +4298,7 @@ function _fv_renderGoalsManager(){
   if (!groups.length){
     wrap.innerHTML = `<div class="mini">Inga delmål/delbitar finns i goalsMap just nu.</div>`;
     if (status) status.textContent = "";
+    _fv_cleanupAddedGoalPartMessages();
     return;
   }
 
@@ -4320,7 +4385,9 @@ function fvRefreshTeacherBankUI(){
 }
 
 try{ window.fvRefreshTeacherBankUI = fvRefreshTeacherBankUI; }catch{}
+/* slut Sektion 3F-F: Render manager + UI refresh */
 
+/* start Sektion 3F-G: Events + boot */
 try{
   if (!window.__fv_bank_changed_listener){
     window.__fv_bank_changed_listener = true;
@@ -4341,6 +4408,34 @@ try{
     }, true);
   }
 }catch{}
+
+/* Bind: efter klick på “➕ Lägg till delbit” → rensa legacy-text + rendera rutor på nytt */
+try{
+  if (!window.__fv_3f_add_goalpart_bound){
+    window.__fv_3f_add_goalpart_bound = true;
+    document.addEventListener("click", (ev)=>{
+      const t = ev && ev.target ? ev.target : null;
+      const btn = t && t.closest ? t.closest("#btnAddGoalPart") : null;
+      if (!btn) return;
+
+      // Låt original-handlaren skapa delbiten först, sen uppdaterar vi UI:t
+      setTimeout(()=>{
+        try{ _fv_cleanupAddedGoalPartMessages(); }catch{}
+        try{ _fv_renderGoalsManager(); }catch{}
+      }, 0);
+    }, true);
+  }
+}catch{}
+
+/* Boot: försök rendera när lärarvyn/knappen finns (tyst) */
+try{
+  if (!window.__fv_3f_boot_once){
+    window.__fv_3f_boot_once = true;
+    setTimeout(()=>{ try{ fvRefreshTeacherBankUI(); }catch{} }, 0);
+    setTimeout(()=>{ try{ fvRefreshTeacherBankUI(); }catch{} }, 350);
+  }
+}catch{}
+/* slut Sektion 3F-G: Events + boot */
 
 /* slut Sektion 3F: UI refresh (goals-select + bankstatus hook + lärarinställningar: rutor + delete + konvertera gamla IDs) */
 
