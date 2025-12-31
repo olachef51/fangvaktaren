@@ -4404,7 +4404,8 @@ async function _fv_bootTeacherUI(){
 /*  slut SEKTION 3H: BOOT-GUARD (timing-fix för trySelectStudentToken/tryUpdateProgressUI) */
 
 
-/* start Sektion 3I: LÄRARINSTÄLLNINGAR (bekräftelser + “Aktuella delmål/delbitar” rutor + delete + rebuild) */
+/* start Sektion 3I: LÄRARINSTÄLLNINGAR (bekräftelser + statusrad) */
+/* ÄNDRING: Stänger av legacy “Aktuella delmål/delbitar”-render i 3I och låter Sektion 3F vara enda UI-källa. (Omskrivna/nya rader: 172) */
 
 function _fv_findTeacherSettingsHost(){
   const ids = [
@@ -4538,298 +4539,43 @@ function _fv_bindThresholdConfirm(){
   bindOne("E"); bindOne("C"); bindOne("A");
 }
 
-/* --------- AKTUELLA DELMÅL/DELBITAR: RUTOR + DELETE --------- */
-
-function _fv_getGoalsEditorHost(){
-  // Prioritet: om du redan har en yta i “Inställningar”
-  const ids = [
-    "currentGoalsBox",
-    "currentGoalsList",
-    "goalsMapBox",
-    "goalsMapView",
-    "teacherGoalsMap",
-    "teacherGoals"
-  ];
-  for (let i=0;i<ids.length;i++){
-    const el = _fv_getEl(ids[i]);
-    if (el) return el;
-  }
-
-  // annars skapar vi en egen box i teacher-host
-  let host = _fv_getEl("fvTeacherGoalsEditorHost");
-  if (host) return host;
-
-  const teacherHost = _fv_findTeacherSettingsHost() || document.body;
-  host = document.createElement("div");
-  host.id = "fvTeacherGoalsEditorHost";
-  host.className = "card";
-  host.style.marginTop = "10px";
-  host.innerHTML = `
-    <div class="q-text">Aktuella delmål och delbitar</div>
-    <div class="mini" style="margin-top:4px; opacity:.9">
-      Varje delmål visas i en egen ruta. Varje delbit har egen ruta och kan tas bort.
-    </div>
-    <div id="fvTeacherGoalsEditorActions" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px">
-      <button class="btn btn-sm" type="button" id="fvGoalsRebuildFromLinks">🧩 Bygg om från banken (links)</button>
-      <button class="btn btn-sm btn-danger" type="button" id="fvGoalsClearAll">🗑️ Rensa alla delbitar</button>
-    </div>
-    <div id="fvTeacherGoalsEditorList" style="margin-top:10px"></div>
-  `;
-  teacherHost.appendChild(host);
-  return host;
+/* --------- CLEANUP: ta bort legacy goals-editor från tidigare försök --------- */
+function _fv_removeLegacyGoalsEditorBox(){
+  try{
+    const legacy = _fv_getEl("fvTeacherGoalsEditorHost");
+    if (legacy) legacy.remove();
+  }catch{}
 }
 
-function _fv_groupGoalsMap(goalsMap){
-  const gm = Array.isArray(goalsMap) ? goalsMap : [];
-  const groups = Object.create(null);
+/* --------- INIT: använd endast Sektion 3F för “Aktuella delmål/delbitar” --------- */
+function _fv_initTeacherSettingsUI(){
+  try{ _fv_bindTeacherEmailConfirm(); }catch{}
+  try{ _fv_bindThresholdConfirm(); }catch{}
+  try{ _fv_removeLegacyGoalsEditorBox(); }catch{}
 
-  for (let i=0;i<gm.length;i++){
-    const g = gm[i] || {};
-    const goal = String(g.goal||"").trim() || "(saknar delmål)";
-    const id = String(g.id||"").trim();
-    const parts = String(g.parts||g.part||"").trim() || "(saknar delbit-text)";
-
-    if (!groups[goal]) groups[goal] = [];
-    groups[goal].push({ id, goal, parts });
-  }
-
-  // sortera delbitar numeriskt om möjligt
-  Object.keys(groups).forEach((k)=>{
-    groups[k].sort((a,b)=>{
-      const ai = Number(a.id), bi = Number(b.id);
-      const an = isFinite(ai), bn = isFinite(bi);
-      if (an && bn) return ai-bi;
-      return String(a.id).localeCompare(String(b.id));
-    });
-  });
-
-  return groups;
-}
-
-function _fv_removeGoalPartById(id){
-  const s = loadState();
-  s.goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-  const before = s.goalsMap.length;
-  s.goalsMap = s.goalsMap.filter(x=> String((x && x.id)||"") !== String(id));
-  saveState(s);
-  const after = s.goalsMap.length;
-  _fv_teacherToast(`✅ Delbit borttagen. (${before-after} st)`);
-}
-
-function _fv_removeWholeGoal(goalTitle){
-  const g = String(goalTitle||"").trim();
-  const s = loadState();
-  s.goalsMap = Array.isArray(s.goalsMap) ? s.goalsMap : [];
-  const before = s.goalsMap.length;
-  s.goalsMap = s.goalsMap.filter(x=> String((x && x.goal)||"").trim() !== g);
-  saveState(s);
-  const after = s.goalsMap.length;
-  _fv_teacherToast(`✅ Delmål borttaget. (${before-after} delbitar)`);
-}
-
-function _fv_clearAllGoalsMap(){
-  const s = loadState();
-  s.goalsMap = [];
-  saveState(s);
-  _fv_teacherToast("✅ Alla delbitar rensade.");
-}
-
-/* Bygger ny goalsMap från bankens links (unik goal+parts). Ger nya id:n 1..N. */
-function _fv_rebuildGoalsMapFromBankLinks(){
-  const s = loadState();
-  const b = _fv_ensureBankShape(s.bank || {});
-  const lists = [b.mcq||[], b.img||[], b.drag||[]];
-
-  const seen = new Set();
-  const out = [];
-
-  for (let li=0; li<lists.length; li++){
-    const arr = lists[li];
-    for (let i=0;i<arr.length;i++){
-      const q = arr[i] || {};
-      const links = Array.isArray(q.links) ? q.links : [];
-      for (let k=0;k<links.length;k++){
-        const L = links[k] || {};
-        const goal = String(L.goal||"").trim();
-        const parts = String(L.parts||"").trim();
-        if (!goal || !parts) continue;
-        const key = goal + "||" + parts;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ goal, parts });
-      }
-    }
-  }
-
-  // sortera stabilt
-  out.sort((a,b)=> (String(a.goal).localeCompare(String(b.goal)) || String(a.parts).localeCompare(String(b.parts))));
-
-  // tilldela id 1..N
-  const gm = out.map((x, idx)=>({ id: String(idx+1), goal: x.goal, parts: x.parts }));
-
-  s.goalsMap = gm;
-  saveState(s);
-
-  _fv_teacherToast(`✅ goalsMap ombyggd från bankens links: ${gm.length} delbitar.`);
-}
-
-function _fv_renderTeacherGoalsEditor(){
-  const host = _fv_getGoalsEditorHost();
-  if (!host) return;
-
-  const listHost =
-    _fv_getEl("fvTeacherGoalsEditorList") ||
-    _fv_getEl("fvTeacherGoalsList") ||
-    host.querySelector("#fvTeacherGoalsEditorList");
-
-  if (!listHost) return;
-
-  const s = loadState();
-  const groups = _fv_groupGoalsMap(s.goalsMap || []);
-  const goals = Object.keys(groups);
-
-  listHost.innerHTML = "";
-
-  if (!goals.length){
-    const empty = document.createElement("div");
-    empty.className = "mini";
-    empty.textContent = "Inga delmål/delbitar sparade ännu.";
-    listHost.appendChild(empty);
-    return;
-  }
-
-  for (let gi=0; gi<goals.length; gi++){
-    const goalTitle = goals[gi];
-    const box = document.createElement("div");
-    box.className = "card";
-    box.style.marginTop = "10px";
-
-    const header = document.createElement("div");
-    header.style.display = "flex";
-    header.style.gap = "10px";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.flexWrap = "wrap";
-
-    header.innerHTML = `
-      <div>
-        <div class="q-text">${_fv_escapeHtml(goalTitle)}</div>
-        <div class="mini">${groups[goalTitle].length} delbitar</div>
-      </div>
-      <div class="fv3-actions">
-        <button class="btn btn-sm btn-danger" type="button" data-fv-goal-del="${_fv_escapeHtml(goalTitle)}">Ta bort delmål</button>
-      </div>
-    `;
-
-    box.appendChild(header);
-
-    const grid = document.createElement("div");
-    grid.style.display = "grid";
-    grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(260px, 1fr))";
-    grid.style.gap = "8px";
-    grid.style.marginTop = "10px";
-
-    const bits = groups[goalTitle] || [];
-    for (let bi=0; bi<bits.length; bi++){
-      const it = bits[bi];
-      const bit = document.createElement("div");
-      bit.className = "card";
-      bit.style.padding = "10px";
-      bit.innerHTML = `
-        <div style="display:flex; gap:10px; align-items:flex-start; justify-content:space-between;">
-          <div style="min-width:0">
-            <div class="mini" style="opacity:.85">Delbit ${_fv_escapeHtml(it.id || "?")}</div>
-            <div style="margin-top:4px; line-height:1.25">${_fv_escapeHtml(it.parts)}</div>
-          </div>
-          <div style="flex:0 0 auto">
-            <button class="btn btn-sm btn-danger" type="button" data-fv-part-del="${_fv_escapeHtml(it.id)}">Delete</button>
-          </div>
-        </div>
-      `;
-      grid.appendChild(bit);
-    }
-
-    box.appendChild(grid);
-    listHost.appendChild(box);
-  }
-
-  // bind delete (delegation)
-  if (!listHost.__fvGoalsBound){
-    listHost.__fvGoalsBound = true;
-
-    listHost.addEventListener("click", (ev)=>{
-      const t = ev.target;
-      if (!t || !t.closest) return;
-
-      const partBtn = t.closest("button[data-fv-part-del]");
-      if (partBtn){
-        const id = String(partBtn.getAttribute("data-fv-part-del")||"").trim();
-        if (!id) return;
-        if (!confirm(`Ta bort delbit ${id}?`)) return;
-        _fv_removeGoalPartById(id);
-        _fv_renderTeacherGoalsEditor();
-        try{ fvRefreshTeacherBankUI(); }catch{}
-        return;
-      }
-
-      const goalBtn = t.closest("button[data-fv-goal-del]");
-      if (goalBtn){
-        const goal = String(goalBtn.getAttribute("data-fv-goal-del")||"").trim();
-        if (!goal) return;
-        if (!confirm(`Ta bort hela delmålet?\n\n${goal}`)) return;
-        _fv_removeWholeGoal(goal);
-        _fv_renderTeacherGoalsEditor();
-        try{ fvRefreshTeacherBankUI(); }catch{}
-        return;
-      }
-    }, true);
-  }
-
-  // bind actions
-  const btnRebuild = _fv_getEl("fvGoalsRebuildFromLinks");
-  const btnClear = _fv_getEl("fvGoalsClearAll");
-
-  if (btnRebuild && !btnRebuild.__fvBound){
-    btnRebuild.__fvBound = true;
-    btnRebuild.addEventListener("click", ()=>{
-      if (!confirm("Bygg om goalsMap från bankens links?\nDetta rensar nuvarande delbitar och skapar en ny lista.")) return;
-      _fv_rebuildGoalsMapFromBankLinks();
-      _fv_renderTeacherGoalsEditor();
-      try{ fvRefreshTeacherBankUI(); }catch{}
-    });
-  }
-
-  if (btnClear && !btnClear.__fvBound){
-    btnClear.__fvBound = true;
-    btnClear.addEventListener("click", ()=>{
-      if (!confirm("Rensa ALLA delbitar? (Kan inte ångras)")) return;
-      _fv_clearAllGoalsMap();
-      _fv_renderTeacherGoalsEditor();
-      try{ fvRefreshTeacherBankUI(); }catch{}
-    });
-  }
+  // Rendera “Aktuella delmål/delbitar” via 3F (om den finns)
+  try{
+    if (typeof window.fvRefreshTeacherBankUI === "function") window.fvRefreshTeacherBankUI();
+    else if (typeof window._fv_renderGoalsManager === "function") window._fv_renderGoalsManager();
+  }catch{}
 }
 
 /* Auto-init när appen är igång */
 (function FV3I_InitTeacherSettings(){
-  try{ _fv_bindTeacherEmailConfirm(); }catch{}
-  try{ _fv_bindThresholdConfirm(); }catch{}
-  try{ _fv_renderTeacherGoalsEditor(); }catch{}
+  _fv_initTeacherSettingsUI();
 
   // uppdatera när bank byts / laddas
   try{
-    if (!window.__fvTeacherGoalsHooks){
-      window.__fvTeacherGoalsHooks = true;
+    if (!window.__fvTeacherSettingsHooks){
+      window.__fvTeacherSettingsHooks = true;
       window.addEventListener("fv-bank-changed", ()=>{
-        try{ _fv_bindTeacherEmailConfirm(); }catch{}
-        try{ _fv_bindThresholdConfirm(); }catch{}
-        try{ _fv_renderTeacherGoalsEditor(); }catch{}
+        _fv_initTeacherSettingsUI();
       });
     }
   }catch{}
 })();
 
-/* slut Sektion 3I: LÄRARINSTÄLLNINGAR (bekräftelser + “Aktuella delmål/delbitar” rutor + delete + rebuild) */
+/* slut Sektion 3I: LÄRARINSTÄLLNINGAR (bekräftelser + statusrad) */
 
 
 
