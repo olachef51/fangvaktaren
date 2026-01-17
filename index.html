@@ -6739,23 +6739,30 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 
 
-<!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering, exit-ticket & UI-refresh) -->
+<!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering & knappar) -->
 <script>
 "use strict";
 
-/* ÄNDRING: Fixar att befintliga frågor inte syns i MCQ/IMG/DRAG genom state-bridge + tvingad UI-refresh efter exit-bank och moln-laddning/sparning. (Omskrivna/nya rader: ca 310) */
-
 (function FV5(){
-  /* =========================================================
-     5A – Bas-hjälpare (utan $) + säker rebind
-     ========================================================= */
+  /* start Sektion 5A: Bas-hjalpare + safe wrappers */
+  if (typeof window.getEl !== "function") {
+    window.getEl = function getEl(id){ return document.getElementById(id); };
+  }
+  const getEl = window.getEl;
 
-  function getEl(id){ return document.getElementById(id); }
-  window.getEl = window.getEl || getEl;
+  function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
 
   function _fv5_safeCall(fn, ...args){
     try{ if (typeof fn === "function") return fn(...args); }catch(e){}
     return undefined;
+  }
+
+  function _fv5_loadStateSafe(){
+    try{ return (typeof window.loadState === "function") ? window.loadState() : null; }catch(e){ return null; }
+  }
+
+  function _fv5_saveStateSafe(s){
+    try{ if (typeof window.saveState === "function") window.saveState(s); }catch(e){}
   }
 
   function _fv5_rebindButton(id, binder){
@@ -6767,117 +6774,41 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     return clone;
   }
 
-  function _fv5_nextTick(fn){
-    try{ setTimeout(()=>{ try{ fn(); }catch(e){} }, 0); }catch(e){}
+  function _fv5_setText(id, txt){
+    const el = getEl(id);
+    if (el) el.textContent = String(txt ?? "");
   }
 
-  /* =========================================================
-     5B – STATE-BRIDGE (kritisk): en enda load/save-källa
-     ========================================================= */
+  function _fv5_clampInt(v, min, max){
+    const n = parseInt(v, 10);
+    if (Number.isNaN(n)) return min;
+    return Math.max(min, Math.min(max, n));
+  }
+  /* slut Sektion 5A: Bas-hjalpare + safe wrappers */
 
-  function _fv5_pickStateFns(){
-    const candidates = [
-      { load: window._fv4_loadState, save: window._fv4_saveState },
-      { load: window.loadState,      save: window.saveState }
-    ];
-    for (let i=0;i<candidates.length;i++){
-      const c = candidates[i];
-      if (typeof c.load === "function" && typeof c.save === "function"){
-        return c;
-      }
-    }
-    return null;
+  /* start Sektion 5B: State-shape + bankstatus */
+  function _fv5_ensureBankShape(s){
+    if (!s || typeof s !== "object") s = {};
+    if (!s.bank || typeof s.bank !== "object") s.bank = {};
+    if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
+    if (!Array.isArray(s.bank.img)) s.bank.img = [];
+    if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
+    if (!s.activeBank || typeof s.activeBank !== "object") s.activeBank = {};
+    return s;
   }
 
-  function _fv5_installStateBridge(){
-    const picked = _fv5_pickStateFns();
-
-    // Fallback (ska helst inte behövas – men gör sidan robust)
-    const fallbackLoad = function(){
-      try{
-        const raw = localStorage.getItem("fangvaktaren-v17") || localStorage.getItem("fangvaktaren") || "";
-        return raw ? JSON.parse(raw) : {};
-      }catch(e){
-        return {};
-      }
+  function _fv5_countBank(s){
+    s = _fv5_ensureBankShape(s || {});
+    return {
+      mcq: s.bank.mcq.length,
+      img: s.bank.img.length,
+      drag: s.bank.drag.length,
+      total: s.bank.mcq.length + s.bank.img.length + s.bank.drag.length
     };
-    const fallbackSave = function(s){
-      try{
-        const key = localStorage.getItem("fangvaktaren-v17") ? "fangvaktaren-v17" : "fangvaktaren";
-        localStorage.setItem(key, JSON.stringify(s || {}));
-      }catch(e){}
-    };
-
-    const load = (picked && picked.load) ? picked.load : fallbackLoad;
-    const save = (picked && picked.save) ? picked.save : fallbackSave;
-
-    // Tvinga alla namn att peka på samma wrappers
-    const loadW = function(){ return load(); };
-    const saveW = function(s){ return save(s); };
-
-    window.loadState = loadW;
-    window.saveState = saveW;
-    window._fv4_loadState = loadW;
-    window._fv4_saveState = saveW;
-
-    // getEl-bridge också (för blandade sektioner)
-    if (typeof window._fv4_getEl !== "function"){
-      window._fv4_getEl = function(id){ return getEl(id); };
-    }
-    if (typeof window.getEl !== "function"){
-      window.getEl = function(id){ return getEl(id); };
-    }
   }
-
-  function _fv5_getStateSafe(){
-    try{ return (typeof window.loadState === "function") ? window.loadState() : null; }catch(e){}
-    return null;
-  }
-
-  _fv5_installStateBridge();
-
-  /* =========================================================
-     5C – UI-REFRESH: tvinga MCQ/IMG/DRAG att rendera om
-     ========================================================= */
-
-  function _fv5_refreshQuestionEditors(reason){
-    // 1) säkerställ state-bridge (om andra sektioner laddats om)
-    try{ _fv5_installStateBridge(); }catch(e){}
-
-    // 2) uppdatera delbit-selects + listor
-    _fv5_safeCall(window.renderGoalsListAndSelects);
-
-    // Editor-init brukar även rendera listor i din kodbas
-    _fv5_safeCall(window.initQuestionForms);
-    _fv5_safeCall(window.initImageQuestionsEditor);
-    _fv5_safeCall(window.initDragDropQuestionsEditor);
-
-    // Extra “om de finns” render-funktioner (olika versioner)
-    _fv5_safeCall(window.renderMcqList);
-    _fv5_safeCall(window.renderImgList);
-    _fv5_safeCall(window.renderDragList);
-
-    // 3) counts/status
-    _fv5_safeCall(window.updateBankStatusUI);
-    _fv5_safeCall(window.syncUI);
-
-    // 4) debug (tyst)
-    try{
-      const s = _fv5_getStateSafe() || {};
-      const b = (s && s.bank) ? s.bank : {};
-      const mcq = Array.isArray(b.mcq) ? b.mcq.length : 0;
-      const img = Array.isArray(b.img) ? b.img.length : 0;
-      const drag = Array.isArray(b.drag) ? b.drag.length : 0;
-      // console.log("[FV5 refresh]", reason || "-", { mcq, img, drag });
-    }catch(e){}
-  }
-
-  /* =========================================================
-     5D – ID-bridge (molnlista) + bankstatus
-     ========================================================= */
 
   function _fv5_bridgeCloudListIds(){
-    // ändrar INTE layout – bara ser till att SEKTION 3 hittar list-host
+    // Vi ändrar INTE layout – bara ser till att det finns en list-host som SEKTION 3 hittar.
     try{
       const existing = getEl("cloudBankList");
       const v4 = getEl("cloudBanksListV4");
@@ -6886,15 +6817,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         existing.id = "cloudBanksListV4";
       }
     }catch(e){}
-  }
-
-  function _fv5_countLocalBank(){
-    const s = _fv5_getStateSafe() || {};
-    const b = s.bank || {};
-    const mcq = Array.isArray(b.mcq) ? b.mcq.length : 0;
-    const img = Array.isArray(b.img) ? b.img.length : 0;
-    const drag = Array.isArray(b.drag) ? b.drag.length : 0;
-    return { mcq, img, drag, total: mcq + img + drag };
   }
 
   function updateBankStatusUI(){
@@ -6917,6 +6839,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       statusEl.style.marginTop = "6px";
     }
 
+    // Placera status precis före listan
     if (statusEl.parentNode !== hostCard){
       try{ if (statusEl.parentNode) statusEl.parentNode.removeChild(statusEl); }catch(e){}
       hostCard.insertBefore(statusEl, hostList);
@@ -6924,9 +6847,9 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       hostCard.insertBefore(statusEl, hostList);
     }
 
-    const s = _fv5_getStateSafe() || {};
+    const s = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
     const a = s.activeBank || {};
-    const counts = _fv5_countLocalBank();
+    const counts = _fv5_countBank(s);
 
     if (!counts.total){
       statusEl.textContent = "Status: Ingen bank laddad (0 frågor).";
@@ -6946,13 +6869,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         `(MCQ: ${counts.mcq}, bild: ${counts.img}, drag & drop: ${counts.drag}).`;
     }
   }
+  /* slut Sektion 5B: State-shape + bankstatus */
 
-  /* =========================================================
-     5E – Lärarläge (gate + modal) + flikar
-     ========================================================= */
-
+  /* start Sektion 5C: Lararlage gate + modal */
   function showTeacherPasswordInStatus(){
-    const s = _fv5_getStateSafe() || {};
+    const s = _fv5_loadStateSafe() || {};
     const statusEl = getEl("passwordStatus");
     if (!statusEl) return;
     statusEl.textContent = (s.teacherPassword ? `Aktuellt lärarlösenord: ${s.teacherPassword}` : "");
@@ -6962,7 +6883,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const gate = getEl("teacherGate");
     const input = getEl("teacherPasswordInput");
     const text = getEl("teacherGateText");
-    const s = _fv5_getStateSafe() || {};
+    const s = _fv5_loadStateSafe() || {};
 
     if (gate) gate.classList.remove("hidden");
     if (input){
@@ -6986,7 +6907,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const modal = getEl("teacherModal");
     if (modal) modal.classList.remove("hidden");
     _fv5_safeCall(window.tryRefreshRosterTabs, true);
-    _fv5_nextTick(()=>_fv5_refreshQuestionEditors("openTeacherModal"));
+    _fv5_safeCall(window.fv5_refreshAllQuestionLists);
   }
 
   function closeTeacherModal(){
@@ -7002,12 +6923,12 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const entered = input.value.trim();
     if (!entered){ alert("Skriv in ett lösenord."); return; }
 
-    const s = _fv5_getStateSafe();
+    const s = _fv5_ensureBankShape(_fv5_loadStateSafe());
     if (!s){ alert("Tekniskt fel: state saknas."); return; }
 
     if (!s.teacherPassword){
       s.teacherPassword = entered;
-      _fv5_safeCall(window.saveState, s);
+      _fv5_saveStateSafe(s);
       showTeacherPasswordInStatus();
       if (text) text.textContent = "Lösenord sparat. Öppnar lärarläge.";
       closeTeacherGate();
@@ -7025,50 +6946,461 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       input.focus();
     }
   }
+  /* slut Sektion 5C: Lararlage gate + modal */
 
-  function setupTabNavigation(){
-    const tabButtons = document.querySelectorAll(".tab-btn");
-    const panels = document.querySelectorAll(".tab-panel");
+  /* start Sektion 5D: Flikar (teacher modal) */
+  function _fv5_activateTab(tabId){
+    const tabButtons = qsa(".tab-btn");
+    const panels = qsa(".tab-panel");
     if (!tabButtons.length || !panels.length) return;
 
-    function activateTab(tabId){
-      tabButtons.forEach((btn)=>{
-        const isActive = btn.getAttribute("data-tab") === tabId;
-        btn.classList.toggle("active", isActive);
-      });
+    tabButtons.forEach((btn)=>{
+      const isActive = btn.getAttribute("data-tab") === tabId;
+      btn.classList.toggle("active", isActive);
+    });
 
-      panels.forEach((panel)=>{
-        const panelId = panel.getAttribute("data-panel");
-        panel.classList.toggle("hidden", panelId !== tabId);
-      });
+    panels.forEach((panel)=>{
+      const panelId = panel.getAttribute("data-panel");
+      panel.classList.toggle("hidden", panelId !== tabId);
+    });
 
-      // När du går till progress: roster refresh
-      if (tabId === "progress"){
-        _fv5_safeCall(window.tryRefreshRosterTabs, true);
-      }
-
-      // Tvinga refresh när du går till editflikarna (fixar “bank finns men listor tomma”)
-      if (tabId === "questions" || tabId === "images" || tabId === "dragdrop" || tabId === "exit" || tabId === "bank"){
-        _fv5_nextTick(()=>_fv5_refreshQuestionEditors("tab:" + tabId));
-      }
+    if (tabId === "progress"){
+      _fv5_safeCall(window.tryRefreshRosterTabs, true);
     }
+
+    // Säker render av aktuella listor när man byter flik
+    if (tabId === "questions" || tabId === "images" || tabId === "dragdrop" || tabId === "bank" || tabId === "exit"){
+      _fv5_safeCall(window.fv5_refreshAllQuestionLists);
+      updateBankStatusUI();
+    }
+  }
+
+  function setupTabNavigation(){
+    const tabButtons = qsa(".tab-btn");
+    const panels = qsa(".tab-panel");
+    if (!tabButtons.length || !panels.length) return;
 
     tabButtons.forEach((btn)=>{
       btn.addEventListener("click", ()=>{
         const tabId = btn.getAttribute("data-tab");
         if (!tabId) return;
-        activateTab(tabId);
+        _fv5_activateTab(tabId);
       });
     });
 
     // Default
-    if (document.querySelector('.tab-btn[data-tab="settings"]')) activateTab("settings");
+    if (document.querySelector('.tab-btn[data-tab="settings"]')) _fv5_activateTab("settings");
+  }
+  /* slut Sektion 5D: Flikar (teacher modal) */
+
+  /* start Sektion 5E: Fallback – render + add for MCQ/IMG/DRAG */
+  function _fv5_renderMcqList(){
+    const s = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+    const ul = getEl("mcqList");
+    if (!ul) return;
+
+    const arr = Array.isArray(s.bank.mcq) ? s.bank.mcq : [];
+    _fv5_setText("mcqCount", arr.length);
+
+    ul.innerHTML = "";
+    if (!arr.length){
+      const li = document.createElement("li");
+      li.className = "question-item";
+      li.textContent = "Inga flervalsfrågor ännu.";
+      ul.appendChild(li);
+      return;
+    }
+
+    arr.forEach((q, idx)=>{
+      const li = document.createElement("li");
+      li.className = "question-item";
+      const title = document.createElement("div");
+      title.className = "mini";
+      title.textContent = `${idx+1}. [${q.level || "?"}] ${q.q || "(saknar text)"}`;
+
+      const actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.gap = "8px";
+      actions.style.marginTop = "6px";
+
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "btn btn-sm btn-danger";
+      btnDel.textContent = "🗑️ Ta bort";
+      btnDel.addEventListener("click", ()=>{
+        const s2 = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+        s2.bank.mcq.splice(idx, 1);
+        _fv5_saveStateSafe(s2);
+        _fv5_renderMcqList();
+        updateBankStatusUI();
+      });
+
+      actions.appendChild(btnDel);
+      li.appendChild(title);
+      li.appendChild(actions);
+      ul.appendChild(li);
+    });
   }
 
-  /* =========================================================
-     5F – Molnknappar (ladda/spara/login/logout)
-     ========================================================= */
+  function _fv5_renderImgList(){
+    const s = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+    const ul = getEl("imgList");
+    if (!ul) return;
 
+    const arr = Array.isArray(s.bank.img) ? s.bank.img : [];
+    _fv5_setText("imgCount", arr.length);
+
+    ul.innerHTML = "";
+    if (!arr.length){
+      const li = document.createElement("li");
+      li.className = "question-item";
+      li.textContent = "Inga bildfrågor ännu.";
+      ul.appendChild(li);
+      return;
+    }
+
+    arr.forEach((q, idx)=>{
+      const li = document.createElement("li");
+      li.className = "question-item";
+      const title = document.createElement("div");
+      title.className = "mini";
+      title.textContent = `${idx+1}. [${q.level || "?"}] ${q.q || "(saknar text)"}`;
+
+      const actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.gap = "8px";
+      actions.style.marginTop = "6px";
+
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "btn btn-sm btn-danger";
+      btnDel.textContent = "🗑️ Ta bort";
+      btnDel.addEventListener("click", ()=>{
+        const s2 = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+        s2.bank.img.splice(idx, 1);
+        _fv5_saveStateSafe(s2);
+        _fv5_renderImgList();
+        updateBankStatusUI();
+      });
+
+      actions.appendChild(btnDel);
+      li.appendChild(title);
+      li.appendChild(actions);
+      ul.appendChild(li);
+    });
+  }
+
+  function _fv5_renderDragList(){
+    const s = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+    const ul = getEl("dragList");
+    if (!ul) return;
+
+    const arr = Array.isArray(s.bank.drag) ? s.bank.drag : [];
+    _fv5_setText("dragCount", arr.length);
+
+    ul.innerHTML = "";
+    if (!arr.length){
+      const li = document.createElement("li");
+      li.className = "question-item";
+      li.textContent = "Inga drag & drop-frågor ännu.";
+      ul.appendChild(li);
+      return;
+    }
+
+    arr.forEach((q, idx)=>{
+      const li = document.createElement("li");
+      li.className = "question-item";
+      const title = document.createElement("div");
+      title.className = "mini";
+      title.textContent = `${idx+1}. [${q.level || "?"}] ${q.q || "(saknar text)"}`;
+
+      const actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.gap = "8px";
+      actions.style.marginTop = "6px";
+
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "btn btn-sm btn-danger";
+      btnDel.textContent = "🗑️ Ta bort";
+      btnDel.addEventListener("click", ()=>{
+        const s2 = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+        s2.bank.drag.splice(idx, 1);
+        _fv5_saveStateSafe(s2);
+        _fv5_renderDragList();
+        updateBankStatusUI();
+      });
+
+      actions.appendChild(btnDel);
+      li.appendChild(title);
+      li.appendChild(actions);
+      ul.appendChild(li);
+    });
+  }
+
+  function _fv5_refreshAllQuestionLists(){
+    _fv5_renderMcqList();
+    _fv5_renderImgList();
+    _fv5_renderDragList();
+  }
+
+  // ====== ADD MCQ (fallback) ======
+  function _fv5_bindMcqFallback(){
+    const btnAdd = getEl("btnMcqAdd");
+    const btnClear = getEl("btnMcqClear");
+    if (!btnAdd || btnAdd.__fv5Bound) return;
+    btnAdd.__fv5Bound = true;
+
+    btnAdd.addEventListener("click", ()=>{
+      const s = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+      const level = String(getEl("mcqLevel")?.value || "E").trim() || "E";
+      const qText = String(getEl("mcqQuestion")?.value || "").trim();
+      const o0 = String(getEl("mcqOption0")?.value || "").trim();
+      const o1 = String(getEl("mcqOption1")?.value || "").trim();
+      const o2 = String(getEl("mcqOption2")?.value || "").trim();
+      const o3 = String(getEl("mcqOption3")?.value || "").trim();
+
+      // Svar: radio prioriteras, annars mcqAnswer
+      let ans = null;
+      const radios = qsa('input[name="mcqCorrect"]');
+      const checked = radios.find(r=>r && r.checked);
+      if (checked) ans = _fv5_clampInt(checked.value, 0, 3);
+      else ans = _fv5_clampInt(getEl("mcqAnswer")?.value, 0, 3);
+
+      const goalPart = String(getEl("mcqGoalPart")?.value || "").trim();
+
+      if (!qText || !o0 || !o1 || !o2 || !o3){
+        alert("Fyll i frågetext + alla 4 alternativ.");
+        return;
+      }
+
+      const item = {
+        type: "mcq",
+        level,
+        q: qText,
+        options: [o0,o1,o2,o3],
+        answer: ans
+      };
+      if (goalPart) item.goalPart = goalPart;
+
+      s.bank.mcq.push(item);
+      _fv5_saveStateSafe(s);
+
+      _fv5_refreshAllQuestionLists();
+      updateBankStatusUI();
+    });
+
+    if (btnClear){
+      btnClear.addEventListener("click", ()=>{
+        const ids = ["mcqQuestion","mcqOption0","mcqOption1","mcqOption2","mcqOption3","mcqAnswer"];
+        ids.forEach(id=>{ const el = getEl(id); if (el) el.value = ""; });
+        // Avmarkera radio
+        qsa('input[name="mcqCorrect"]').forEach(r=>{ try{ r.checked = false; }catch(e){} });
+      });
+    }
+  }
+
+  // ====== ADD IMG (fallback, enkel) ======
+  function _fv5_bindImgFallback(){
+    const btnAdd = getEl("btnImgAdd");
+    const btnClear = getEl("btnImgClear");
+    if (!btnAdd || btnAdd.__fv5Bound) return;
+    btnAdd.__fv5Bound = true;
+
+    btnAdd.addEventListener("click", async ()=>{
+      const s = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+      const level = String(getEl("imgLevel")?.value || "E").trim() || "E";
+      const qText = String(getEl("imgQuestion")?.value || "").trim();
+      const o0 = String(getEl("imgOption0")?.value || "").trim();
+      const o1 = String(getEl("imgOption1")?.value || "").trim();
+      const o2 = String(getEl("imgOption2")?.value || "").trim();
+      const o3 = String(getEl("imgOption3")?.value || "").trim();
+
+      let ans = null;
+      const radios = qsa('input[name="imgCorrect"]');
+      const checked = radios.find(r=>r && r.checked);
+      if (checked) ans = _fv5_clampInt(checked.value, 0, 3);
+      else ans = _fv5_clampInt(getEl("imgAnswer")?.value, 0, 3);
+
+      const goalPart = String(getEl("imgGoalPart")?.value || "").trim();
+
+      if (!qText || !o0 || !o1 || !o2 || !o3){
+        alert("Fyll i frågetext + alla 4 alternativ.");
+        return;
+      }
+
+      let imageDataUrl = "";
+      const fileInput = getEl("imgFile");
+      const file = fileInput && fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+
+      if (file){
+        imageDataUrl = await new Promise((resolve)=>{
+          try{
+            const fr = new FileReader();
+            fr.onload = ()=> resolve(String(fr.result || ""));
+            fr.onerror = ()=> resolve("");
+            fr.readAsDataURL(file);
+          }catch(e){ resolve(""); }
+        });
+      }
+
+      const item = {
+        type: "img",
+        level,
+        q: qText,
+        options: [o0,o1,o2,o3],
+        answer: ans
+      };
+      if (goalPart) item.goalPart = goalPart;
+      if (imageDataUrl) item.image = imageDataUrl;
+
+      s.bank.img.push(item);
+      _fv5_saveStateSafe(s);
+
+      _fv5_refreshAllQuestionLists();
+      updateBankStatusUI();
+    });
+
+    if (btnClear){
+      btnClear.addEventListener("click", ()=>{
+        const ids = ["imgQuestion","imgOption0","imgOption1","imgOption2","imgOption3","imgAnswer"];
+        ids.forEach(id=>{ const el = getEl(id); if (el) el.value = ""; });
+        qsa('input[name="imgCorrect"]').forEach(r=>{ try{ r.checked = false; }catch(e){} });
+        const file = getEl("imgFile"); if (file) file.value = "";
+        const prev = getEl("imgPreview"); if (prev) prev.textContent = "Ingen bild vald ännu.";
+      });
+    }
+  }
+
+  // ====== ADD DRAG (fallback) ======
+  const _fv5_dragDraft = { items: [] };
+
+  function _fv5_renderDragDraft(){
+    const ul = getEl("dragItemsPreview");
+    if (!ul) return;
+    ul.innerHTML = "";
+    if (!_fv5_dragDraft.items.length){
+      const li = document.createElement("li");
+      li.className = "mini";
+      li.textContent = "Inga objekt tillagda ännu.";
+      ul.appendChild(li);
+      return;
+    }
+    _fv5_dragDraft.items.forEach((it, idx)=>{
+      const li = document.createElement("li");
+      li.className = "mini";
+      li.textContent = `${idx+1}. ${it.text} → Kolumn ${it.correct+1}`;
+      ul.appendChild(li);
+    });
+  }
+
+  function _fv5_bindDragFallback(){
+    const btnAddItem = getEl("btnDragAddItem");
+    const btnSaveQ = getEl("btnDragAddQuestion");
+    const btnClear = getEl("btnDragClearForm");
+
+    if (btnAddItem && !btnAddItem.__fv5Bound){
+      btnAddItem.__fv5Bound = true;
+      btnAddItem.addEventListener("click", ()=>{
+        const text = String(getEl("dragItemText")?.value || "").trim();
+        const correct = _fv5_clampInt(getEl("dragItemCorrect")?.value, 0, 1);
+        if (!text){ alert("Skriv ett objekt att dra."); return; }
+        _fv5_dragDraft.items.push({ text, correct });
+        const inp = getEl("dragItemText"); if (inp) inp.value = "";
+        _fv5_renderDragDraft();
+      });
+    }
+
+    if (btnSaveQ && !btnSaveQ.__fv5Bound){
+      btnSaveQ.__fv5Bound = true;
+      btnSaveQ.addEventListener("click", ()=>{
+        const s = _fv5_ensureBankShape(_fv5_loadStateSafe() || {});
+        const level = String(getEl("dragLevel")?.value || "E").trim() || "E";
+        const qText = String(getEl("dragQuestion")?.value || "").trim();
+        const c1 = String(getEl("dragColumn1")?.value || "").trim();
+        const c2 = String(getEl("dragColumn2")?.value || "").trim();
+        const goalPart = String(getEl("dragGoalPart")?.value || "").trim();
+
+        if (!qText || !c1 || !c2){
+          alert("Fyll i instruktion + båda kolumnerna.");
+          return;
+        }
+        if (!_fv5_dragDraft.items.length){
+          alert("Lägg till minst ett objekt att dra.");
+          return;
+        }
+
+        const item = {
+          type: "drag",
+          level,
+          q: qText,
+          columns: [c1, c2],
+          items: _fv5_dragDraft.items.slice()
+        };
+        if (goalPart) item.goalPart = goalPart;
+
+        s.bank.drag.push(item);
+        _fv5_saveStateSafe(s);
+
+        // reset draft
+        _fv5_dragDraft.items = [];
+        _fv5_renderDragDraft();
+
+        _fv5_refreshAllQuestionLists();
+        updateBankStatusUI();
+      });
+    }
+
+    if (btnClear && !btnClear.__fv5Bound){
+      btnClear.__fv5Bound = true;
+      btnClear.addEventListener("click", ()=>{
+        ["dragQuestion","dragColumn1","dragColumn2","dragItemText"].forEach(id=>{
+          const el = getEl(id); if (el) el.value = "";
+        });
+        _fv5_dragDraft.items = [];
+        _fv5_renderDragDraft();
+      });
+    }
+
+    _fv5_renderDragDraft();
+  }
+
+  function _fv5_bindQuestionEditorsFallback(){
+    // Om SEKTION 4 redan exponerar init/render – använd den, annars fallback
+    if (typeof window.initQuestionForms === "function") {
+      _fv5_safeCall(window.initQuestionForms);
+    } else {
+      _fv5_bindMcqFallback();
+    }
+
+    if (typeof window.initImageQuestionsEditor === "function") {
+      _fv5_safeCall(window.initImageQuestionsEditor);
+    } else {
+      _fv5_bindImgFallback();
+    }
+
+    if (typeof window.initDragDropQuestionsEditor === "function") {
+      _fv5_safeCall(window.initDragDropQuestionsEditor);
+    } else {
+      _fv5_bindDragFallback();
+    }
+
+    // Render-listor: använd om de finns, annars fallback-render
+    if (typeof window.renderMcqList === "function") _fv5_safeCall(window.renderMcqList);
+    else _fv5_renderMcqList();
+
+    if (typeof window.renderImgList === "function") _fv5_safeCall(window.renderImgList);
+    else _fv5_renderImgList();
+
+    if (typeof window.renderDragList === "function") _fv5_safeCall(window.renderDragList);
+    else _fv5_renderDragList();
+  }
+
+  // Exponera en stabil refresh (för flikbyte/modal)
+  window.fv5_refreshAllQuestionLists = _fv5_refreshAllQuestionLists;
+  /* slut Sektion 5E: Fallback – render + add for MCQ/IMG/DRAG */
+
+  /* start Sektion 5F: Molnknappar (ladda/spara/login/logout) */
   async function _fv5_loadCloudBanksNow(){
     try{
       _fv5_bridgeCloudListIds();
@@ -7088,105 +7420,27 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       await fn();
       updateBankStatusUI();
       _fv5_safeCall(window.tryRefreshRosterTabs, true);
-      _fv5_nextTick(()=>_fv5_refreshQuestionEditors("cloudLoaded"));
+      _fv5_safeCall(window.fv5_refreshAllQuestionLists);
     }catch(e){
       console.error("Kunde inte ladda moln-bankar:", e);
       alert("Kunde inte ladda moln-bankar. Se konsolen.");
     }
   }
+  /* slut Sektion 5F: Molnknappar (ladda/spara/login/logout) */
 
-  /* =========================================================
-     5G – Exit ticket: standardfrågor + preview + refresh
-     ========================================================= */
-
-  function _fv5_exitQuestionsPack(){
-    // Endast MCQ (skala + ja/nej) – enkelt och robust
-    const scale = ["1", "2", "3", "4", "5"];
-    const yesno = ["Ja", "Nej"];
-
-    const mkScale = (qText)=>({
-      type: "mcq",
-      level: "E",
-      q: qText,
-      options: scale.map((x)=>String(x)),
-      answer: 2 // neutral default (3)
-    });
-
-    const mkYesNo = (qText)=>({
-      type: "mcq",
-      level: "E",
-      q: qText,
-      options: yesno.slice(),
-      answer: 0
-    });
-
-    return [
-      mkScale("Hur tydlig var lektionen idag? (1–5)"),
-      mkScale("Hur bra gick det för dig idag? (1–5)"),
-      mkScale("Hur lugnt var det i klassrummet? (1–5)"),
-      mkScale("Hur lätt var uppgiften att förstå? (1–5)"),
-      mkScale("Hur mycket ork hade du idag? (1–5)"),
-
-      mkYesNo("Fick du hjälp när du behövde? (Ja/Nej)"),
-      mkYesNo("Visste du vad du skulle göra idag? (Ja/Nej)"),
-      mkYesNo("Kände du dig trygg under lektionen? (Ja/Nej)"),
-      mkYesNo("Vill du göra mer sånt här nästa gång? (Ja/Nej)")
-    ];
-  }
-
-  function _fv5_setExitPreview(text){
-    const ta = getEl("exitBankPreview");
-    if (ta) ta.value = String(text || "");
-  }
-
-  function _fv5_createExitBank(){
-    const s = _fv5_getStateSafe() || {};
-    s.bank = (s.bank && typeof s.bank === "object") ? s.bank : {};
-    s.bank.mcq = _fv5_exitQuestionsPack();
-    s.bank.img = Array.isArray(s.bank.img) ? s.bank.img : [];
-    s.bank.drag = Array.isArray(s.bank.drag) ? s.bank.drag : [];
-
-    _fv5_safeCall(window.saveState, s);
-
-    _fv5_setExitPreview(JSON.stringify({ bank: s.bank }, null, 2));
-    updateBankStatusUI();
-    _fv5_nextTick(()=>_fv5_refreshQuestionEditors("exit:create"));
-    alert("EXIT-bank skapad i din lokala bank. (Spara till molnet om du vill.)");
-  }
-
-  function _fv5_appendExitQuestions(){
-    const s = _fv5_getStateSafe() || {};
-    s.bank = (s.bank && typeof s.bank === "object") ? s.bank : {};
-    s.bank.mcq = Array.isArray(s.bank.mcq) ? s.bank.mcq : [];
-    s.bank.img = Array.isArray(s.bank.img) ? s.bank.img : [];
-    s.bank.drag = Array.isArray(s.bank.drag) ? s.bank.drag : [];
-
-    const pack = _fv5_exitQuestionsPack();
-    pack.forEach((q)=> s.bank.mcq.push(q));
-
-    _fv5_safeCall(window.saveState, s);
-
-    _fv5_setExitPreview(JSON.stringify({ appended: pack.length, bank: s.bank }, null, 2));
-    updateBankStatusUI();
-    _fv5_nextTick(()=>_fv5_refreshQuestionEditors("exit:append"));
-    alert("EXIT-frågor tillagda i din lokala bank. (Spara till molnet om du vill.)");
-  }
-
-  /* =========================================================
-     5H – initApp + DOMContentLoaded (idempotent)
-     ========================================================= */
-
+  /* start Sektion 5G: initApp (idempotent) + bind knappar */
   async function initApp(){
     if (window.__FANGVAKTAREN_INITAPP_DONE){
-      // console.log("initApp: hoppar över (redan initierad)");
+      console.log("initApp: hoppar över (redan initierad)");
       return;
     }
     window.__FANGVAKTAREN_INITAPP_DONE = true;
 
-    // console.log("initApp start");
+    console.log("initApp start");
 
     _fv5_bridgeCloudListIds();
 
+    // Initiera inställningsdelar om de finns
     _fv5_safeCall(window.initTeacherEmailSettings);
     _fv5_safeCall(window.initThresholdSettings);
     _fv5_safeCall(window.initTeacherPasswordSettings);
@@ -7194,19 +7448,32 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
     _fv5_safeCall(window.initGoalsMap);
 
-    // Init editor UI + render
-    _fv5_refreshQuestionEditors("initApp");
-
     setupTabNavigation();
 
+    _fv5_safeCall(window.syncUI);
+    updateBankStatusUI();
+
+    // Fallback: säkra question editors + list-render
+    _fv5_bindQuestionEditorsFallback();
+
     /* ---------- Elevyta ---------- */
-    _fv5_rebindButton("btnSaveStudent", (b)=>{ if (typeof window.handleSaveStudent==="function") b.addEventListener("click", window.handleSaveStudent); });
+    _fv5_rebindButton("btnSaveStudent", (b)=>{
+      if (typeof window.handleSaveStudent === "function") b.addEventListener("click", window.handleSaveStudent);
+    });
 
-    _fv5_rebindButton("start-levelE", (b)=>{ if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("E")); });
-    _fv5_rebindButton("start-levelC", (b)=>{ if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("C")); });
-    _fv5_rebindButton("start-levelA", (b)=>{ if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("A")); });
+    _fv5_rebindButton("start-levelE", (b)=>{
+      if (typeof window.startLevel === "function") b.addEventListener("click", ()=>window.startLevel("E"));
+    });
+    _fv5_rebindButton("start-levelC", (b)=>{
+      if (typeof window.startLevel === "function") b.addEventListener("click", ()=>window.startLevel("C"));
+    });
+    _fv5_rebindButton("start-levelA", (b)=>{
+      if (typeof window.startLevel === "function") b.addEventListener("click", ()=>window.startLevel("A"));
+    });
 
-    _fv5_rebindButton("btnFinish", (b)=>{ if (typeof window.finishLevel==="function") b.addEventListener("click", window.finishLevel); });
+    _fv5_rebindButton("btnFinish", (b)=>{
+      if (typeof window.finishLevel === "function") b.addEventListener("click", window.finishLevel);
+    });
 
     _fv5_rebindButton("btnBack", (b)=>{
       b.addEventListener("click", ()=>{
@@ -7216,13 +7483,23 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         if (play) play.classList.add("hidden");
         const studentCard = getEl("studentCard");
         if (studentCard) studentCard.classList.remove("hidden");
+
+        // session-reset (för säkerhets skull)
+        try{ window.currentLevel = null; }catch(e){}
+        try{ window.currentQuestions = []; }catch(e){}
+        try{ window.currentAnswers = []; }catch(e){}
+
         _fv5_safeCall(window.syncUI);
       });
     });
 
     _fv5_rebindButton("btnCancel", (b)=>{
       b.addEventListener("click", ()=>{
-        // OBS: currentLevel/currentQuestions/currentAnswers ligger i SEKTION 4 (let). Den hanteras där.
+        // session-reset (Avbryt ska verkligen nollställa)
+        try{ window.currentLevel = null; }catch(e){}
+        try{ window.currentQuestions = []; }catch(e){}
+        try{ window.currentAnswers = []; }catch(e){}
+
         const play = getEl("play");
         const result = getEl("result");
         if (play) play.classList.add("hidden");
@@ -7258,12 +7535,13 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         b.addEventListener("click", ()=>{
           window.handleSaveThresholds();
           updateBankStatusUI();
-          _fv5_nextTick(()=>_fv5_refreshQuestionEditors("thresholdsSaved"));
         });
       }
     });
 
-    _fv5_rebindButton("btnSaveTeacherEmail", (b)=>{ if (typeof window.handleSaveTeacherEmail==="function") b.addEventListener("click", window.handleSaveTeacherEmail); });
+    _fv5_rebindButton("btnSaveTeacherEmail", (b)=>{
+      if (typeof window.handleSaveTeacherEmail === "function") b.addEventListener("click", window.handleSaveTeacherEmail);
+    });
 
     _fv5_rebindButton("btnChangeTeacherPassword", (b)=>{
       if (typeof window.handleChangeTeacherPassword === "function"){
@@ -7275,13 +7553,23 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     });
 
     /* ---------- Delmål/delbitar ---------- */
-    _fv5_rebindButton("btnAddGoalPart", (b)=>{ if (typeof window.handleAddGoalPart==="function") b.addEventListener("click", ()=>{ window.handleAddGoalPart(); _fv5_refreshQuestionEditors("goalPartAdded"); }); });
-    _fv5_rebindButton("btnSaveGoalsMap", (b)=>{ if (typeof window.handleSaveGoalsMap==="function") b.addEventListener("click", ()=>{ window.handleSaveGoalsMap(); _fv5_refreshQuestionEditors("goalsSaved"); }); });
-    _fv5_rebindButton("btnClearGoalsMap", (b)=>{ if (typeof window.handleClearGoalsMap==="function") b.addEventListener("click", ()=>{ window.handleClearGoalsMap(); _fv5_refreshQuestionEditors("goalsCleared"); }); });
+    _fv5_rebindButton("btnAddGoalPart", (b)=>{
+      if (typeof window.handleAddGoalPart === "function") b.addEventListener("click", window.handleAddGoalPart);
+    });
+    _fv5_rebindButton("btnSaveGoalsMap", (b)=>{
+      if (typeof window.handleSaveGoalsMap === "function") b.addEventListener("click", window.handleSaveGoalsMap);
+    });
+    _fv5_rebindButton("btnClearGoalsMap", (b)=>{
+      if (typeof window.handleClearGoalsMap === "function") b.addEventListener("click", window.handleClearGoalsMap);
+    });
 
     /* ---------- Rensa ---------- */
-    _fv5_rebindButton("btnClearStudentData", (b)=>{ if (typeof window.handleClearStudentData==="function") b.addEventListener("click", window.handleClearStudentData); });
-    _fv5_rebindButton("btnResetGameData", (b)=>{ if (typeof window.handleResetGameData==="function") b.addEventListener("click", window.handleResetGameData); });
+    _fv5_rebindButton("btnClearStudentData", (b)=>{
+      if (typeof window.handleClearStudentData === "function") b.addEventListener("click", window.handleClearStudentData);
+    });
+    _fv5_rebindButton("btnResetGameData", (b)=>{
+      if (typeof window.handleResetGameData === "function") b.addEventListener("click", window.handleResetGameData);
+    });
 
     /* ---------- Moln / Firebase ---------- */
     _fv5_rebindButton("btnLoadCloudBanks", (b)=> b.addEventListener("click", _fv5_loadCloudBanksNow));
@@ -7292,7 +7580,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
           if (typeof window.handleSaveToCloud !== "function") throw new Error("handleSaveToCloud saknas (SEKTION 3?)");
           await window.handleSaveToCloud();
           await _fv5_loadCloudBanksNow();
-          _fv5_nextTick(()=>_fv5_refreshQuestionEditors("cloudSaved"));
         }catch(err){
           console.error("Spara bank misslyckades:", err);
           alert("Kunde inte spara bank till molnet. Se konsolen.");
@@ -7300,7 +7587,14 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     });
 
-    _fv5_rebindButton("btnExportBank", (b)=>{ if (typeof window.handleExportBank==="function") b.addEventListener("click", ()=>{ window.handleExportBank(); updateBankStatusUI(); }); });
+    _fv5_rebindButton("btnExportBank", (b)=>{
+      if (typeof window.handleExportBank === "function"){
+        b.addEventListener("click", ()=>{
+          window.handleExportBank();
+          updateBankStatusUI();
+        });
+      }
+    });
 
     const fileImport = getEl("fileImport");
     if (fileImport && !fileImport.__fv5Bound){
@@ -7309,21 +7603,23 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         fileImport.addEventListener("change", (evt)=>{
           window.handleImportBank(evt);
           updateBankStatusUI();
-          _fv5_nextTick(()=>_fv5_refreshQuestionEditors("imported"));
+          _fv5_safeCall(window.fv5_refreshAllQuestionLists);
         });
       }
     }
 
-    _fv5_rebindButton("btnGooglePlaceholder", (b)=>{ if (typeof window.handleGoogleLogin==="function") b.addEventListener("click", window.handleGoogleLogin); });
-    _fv5_rebindButton("btnGoogleLogout", (b)=>{ if (typeof window.handleGoogleLogout==="function") b.addEventListener("click", window.handleGoogleLogout); });
+    _fv5_rebindButton("btnGooglePlaceholder", (b)=>{
+      if (typeof window.handleGoogleLogin === "function") b.addEventListener("click", window.handleGoogleLogin);
+    });
+    _fv5_rebindButton("btnGoogleLogout", (b)=>{
+      if (typeof window.handleGoogleLogout === "function") b.addEventListener("click", window.handleGoogleLogout);
+    });
 
-    _fv5_rebindButton("btnPublishSharedBank", (b)=>{ if (typeof window.handlePublishSharedBank==="function") b.addEventListener("click", window.handlePublishSharedBank); });
+    _fv5_rebindButton("btnPublishSharedBank", (b)=>{
+      if (typeof window.handlePublishSharedBank === "function") b.addEventListener("click", window.handlePublishSharedBank);
+    });
 
-    /* ---------- Exit ticket ---------- */
-    _fv5_rebindButton("btnCreateExitBank", (b)=> b.addEventListener("click", _fv5_createExitBank));
-    _fv5_rebindButton("btnAppendExitQuestions", (b)=> b.addEventListener("click", _fv5_appendExitQuestions));
-
-    // console.log("initApp klar – knappar kopplade");
+    console.log("initApp klar – knappar kopplade");
   }
 
   // Exponera (om andra sektioner vill kalla)
@@ -7334,8 +7630,10 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   window.closeTeacherModal = closeTeacherModal;
   window.handleTeacherConfirm = handleTeacherConfirm;
   window.initApp = initApp;
-  window._fv5_refreshQuestionEditors = _fv5_refreshQuestionEditors;
 
+  /* slut Sektion 5G: initApp (idempotent) + bind knappar */
+
+  /* start Sektion 5H: DOMContentLoaded boot (idempotent) */
   document.addEventListener("DOMContentLoaded", function(){
     if (window.__FANGVAKTAREN_DOMREADY_DONE) return;
     window.__FANGVAKTAREN_DOMREADY_DONE = true;
@@ -7355,10 +7653,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     try{ initApp(); }
     catch(e){ console.error("Fel vid initApp:", e); }
   });
+  /* slut Sektion 5H: DOMContentLoaded boot (idempotent) */
 
 })(); // FV5
 </script>
-<!-- slut SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering, exit-ticket & UI-refresh) -->
+<!-- slut SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering & knappar) -->
 
 
 
