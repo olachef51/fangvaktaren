@@ -6729,13 +6729,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 /* slut Sektion 4I: FIREBASE – elevinlämning (attemptsByLevel + attemptsTotal) */
 
-
-
-
-
-
-
-
 </script>
 <!-- slut SEKTION 4: SCRIPT & LOGIK FÅNGVAKTAREN (elev, spel, progression & highscore) -->
 
@@ -6746,777 +6739,626 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 
 
-<!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering & knappar) -->
+<!-- start SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering, exit-ticket & UI-refresh) -->
 <script>
 "use strict";
 
+/* ÄNDRING: Fixar att befintliga frågor inte syns i MCQ/IMG/DRAG genom state-bridge + tvingad UI-refresh efter exit-bank och moln-laddning/sparning. (Omskrivna/nya rader: ca 310) */
+
 (function FV5(){
+  /* =========================================================
+     5A – Bas-hjälpare (utan $) + säker rebind
+     ========================================================= */
 
-/* start Sektion 5A: Bas-hjälpare (utan $) + säker rebind */
-if (typeof window.getEl !== "function") {
-  window.getEl = function getEl(id){ return document.getElementById(id); };
-}
+  function getEl(id){ return document.getElementById(id); }
+  window.getEl = window.getEl || getEl;
 
-function _fv5_rebindButton(id, binder){
-  const el = getEl(id);
-  if (!el || !el.parentNode) return null;
-  const clone = el.cloneNode(true);
-  el.parentNode.replaceChild(clone, el);
-  try{ if (typeof binder === "function") binder(clone); }catch(e){}
-  return clone;
-}
+  function _fv5_safeCall(fn, ...args){
+    try{ if (typeof fn === "function") return fn(...args); }catch(e){}
+    return undefined;
+  }
 
-function _fv5_safeCall(fn, ...args){
-  try{ if (typeof fn === "function") return fn(...args); }catch(e){}
-  return undefined;
-}
+  function _fv5_rebindButton(id, binder){
+    const el = getEl(id);
+    if (!el || !el.parentNode) return null;
+    const clone = el.cloneNode(true);
+    el.parentNode.replaceChild(clone, el);
+    try{ if (typeof binder === "function") binder(clone); }catch(e){}
+    return clone;
+  }
 
-function _fv5_getStateSafe(){
-  try{ if (typeof window.loadState === "function") return window.loadState(); }catch(e){}
-  return null;
-}
-/* slut Sektion 5A: Bas-hjälpare (utan $) + säker rebind */
+  function _fv5_nextTick(fn){
+    try{ setTimeout(()=>{ try{ fn(); }catch(e){} }, 0); }catch(e){}
+  }
 
+  /* =========================================================
+     5B – STATE-BRIDGE (kritisk): en enda load/save-källa
+     ========================================================= */
 
-
-/* start Sektion 5B: ID-bridge (molnlista) + bankstatus */
-function _fv5_bridgeCloudListIds(){
-  // Vi ändrar INTE layout – bara ser till att det finns en list-host som SEKTION 3 hittar.
-  try{
-    const existing = getEl("cloudBankList");
-    const v4 = getEl("cloudBanksListV4");
-    const v5 = getEl("cloudBanksListV5");
-    if (existing && !v4 && !v5){
-      existing.id = "cloudBanksListV4";
+  function _fv5_pickStateFns(){
+    const candidates = [
+      { load: window._fv4_loadState, save: window._fv4_saveState },
+      { load: window.loadState,      save: window.saveState }
+    ];
+    for (let i=0;i<candidates.length;i++){
+      const c = candidates[i];
+      if (typeof c.load === "function" && typeof c.save === "function"){
+        return c;
+      }
     }
-  }catch(e){}
-}
-
-function _fv5_countLocalBank(){
-  const s = _fv5_getStateSafe() || {};
-  const b = s.bank || {};
-  const mcq = Array.isArray(b.mcq) ? b.mcq.length : 0;
-  const img = Array.isArray(b.img) ? b.img.length : 0;
-  const drag = Array.isArray(b.drag) ? b.drag.length : 0;
-  return { mcq, img, drag, total: mcq + img + drag };
-}
-
-function updateBankStatusUI(){
-  const hostList =
-    getEl("cloudBanksListV4") ||
-    getEl("cloudBanksListV5") ||
-    getEl("cloudBanksList") ||
-    getEl("cloudBankList");
-
-  if (!hostList) return;
-
-  const hostCard = hostList.closest(".card") || hostList.parentElement;
-  if (!hostCard) return;
-
-  let statusEl = getEl("bankStatus");
-  if (!statusEl){
-    statusEl = document.createElement("p");
-    statusEl.id = "bankStatus";
-    statusEl.className = "mini";
-    statusEl.style.marginTop = "6px";
+    return null;
   }
 
-  // Placera status precis före listan
-  if (statusEl.parentNode !== hostCard){
-    try{ if (statusEl.parentNode) statusEl.parentNode.removeChild(statusEl); }catch(e){}
-    hostCard.insertBefore(statusEl, hostList);
-  } else if (statusEl.nextSibling !== hostList){
-    hostCard.insertBefore(statusEl, hostList);
-  }
+  function _fv5_installStateBridge(){
+    const picked = _fv5_pickStateFns();
 
-  const s = _fv5_getStateSafe() || {};
-  const a = s.activeBank || {};
-  const counts = _fv5_countLocalBank();
+    // Fallback (ska helst inte behövas – men gör sidan robust)
+    const fallbackLoad = function(){
+      try{
+        const raw = localStorage.getItem("fangvaktaren-v17") || localStorage.getItem("fangvaktaren") || "";
+        return raw ? JSON.parse(raw) : {};
+      }catch(e){
+        return {};
+      }
+    };
+    const fallbackSave = function(s){
+      try{
+        const key = localStorage.getItem("fangvaktaren-v17") ? "fangvaktaren-v17" : "fangvaktaren";
+        localStorage.setItem(key, JSON.stringify(s || {}));
+      }catch(e){}
+    };
 
-  if (!counts.total){
-    statusEl.textContent = "Status: Ingen bank laddad (0 frågor).";
-    return;
-  }
+    const load = (picked && picked.load) ? picked.load : fallbackLoad;
+    const save = (picked && picked.save) ? picked.save : fallbackSave;
 
-  const hasCloudActive = !!String(a.bankId || "").trim();
-  const bankName = String(a.name || a.bankName || "").trim();
+    // Tvinga alla namn att peka på samma wrappers
+    const loadW = function(){ return load(); };
+    const saveW = function(s){ return save(s); };
 
-  if (hasCloudActive){
-    statusEl.textContent =
-      `Status: Moln-bank${bankName ? ` "${bankName}"` : ""} (${String(a.bankId)}) med ${counts.total} frågor ` +
-      `(MCQ: ${counts.mcq}, bild: ${counts.img}, drag & drop: ${counts.drag}).`;
-  } else {
-    statusEl.textContent =
-      `Status: Lokal bank (på denna enhet) med ${counts.total} frågor ` +
-      `(MCQ: ${counts.mcq}, bild: ${counts.img}, drag & drop: ${counts.drag}).`;
-  }
-}
-/* slut Sektion 5B: ID-bridge (molnlista) + bankstatus */
+    window.loadState = loadW;
+    window.saveState = saveW;
+    window._fv4_loadState = loadW;
+    window._fv4_saveState = saveW;
 
-
-
-/* start Sektion 5C: Lärarläge (gate + modal) */
-function showTeacherPasswordInStatus(){
-  const s = _fv5_getStateSafe() || {};
-  const statusEl = getEl("passwordStatus");
-  if (!statusEl) return;
-  statusEl.textContent = (s.teacherPassword ? `Aktuellt lärarlösenord: ${s.teacherPassword}` : "");
-}
-
-function openTeacherGate(){
-  const gate = getEl("teacherGate");
-  const input = getEl("teacherPasswordInput");
-  const text = getEl("teacherGateText");
-  const s = _fv5_getStateSafe() || {};
-
-  if (gate) gate.classList.remove("hidden");
-  if (input){
-    input.value = "";
-    input.type = "password";
-    input.focus();
-  }
-  if (text){
-    text.textContent = s.teacherPassword
-      ? "Ange lärarlösenord för att öppna lärarläget."
-      : "Första gången du loggar in blir lösenordet det du skriver här.";
-  }
-}
-
-function closeTeacherGate(){
-  const gate = getEl("teacherGate");
-  if (gate) gate.classList.add("hidden");
-}
-
-function openTeacherModal(){
-  const modal = getEl("teacherModal");
-  if (modal) modal.classList.remove("hidden");
-  _fv5_safeCall(window.tryRefreshRosterTabs, true);
-}
-
-function closeTeacherModal(){
-  const modal = getEl("teacherModal");
-  if (modal) modal.classList.add("hidden");
-}
-
-function handleTeacherConfirm(){
-  const input = getEl("teacherPasswordInput");
-  const text = getEl("teacherGateText");
-  if (!input) return;
-
-  const entered = input.value.trim();
-  if (!entered){ alert("Skriv in ett lösenord."); return; }
-
-  const s = _fv5_getStateSafe();
-  if (!s){ alert("Tekniskt fel: state saknas."); return; }
-
-  if (!s.teacherPassword){
-    s.teacherPassword = entered;
-    _fv5_safeCall(window.saveState, s);
-    showTeacherPasswordInStatus();
-    if (text) text.textContent = "Lösenord sparat. Öppnar lärarläge.";
-    closeTeacherGate();
-    openTeacherModal();
-    return;
-  }
-
-  if (s.teacherPassword === entered){
-    if (text) text.textContent = "Lösenord OK. Öppnar lärarläge.";
-    closeTeacherGate();
-    openTeacherModal();
-  } else {
-    if (text) text.textContent = "Fel lösenord. Försök igen.";
-    input.value = "";
-    input.focus();
-  }
-}
-/* slut Sektion 5C: Lärarläge (gate + modal) */
-
-
-
-/* start Sektion 5D: Flikar (teacher modal) + progress-trigger */
-function setupTabNavigation(){
-  const tabButtons = document.querySelectorAll(".tab-btn");
-  const panels = document.querySelectorAll(".tab-panel");
-  if (!tabButtons.length || !panels.length) return;
-
-  function activateTab(tabId){
-    tabButtons.forEach((btn)=>{
-      const isActive = btn.getAttribute("data-tab") === tabId;
-      btn.classList.toggle("active", isActive);
-    });
-
-    panels.forEach((panel)=>{
-      const panelId = panel.getAttribute("data-panel");
-      panel.classList.toggle("hidden", panelId !== tabId);
-    });
-
-    if (tabId === "progress"){
-      _fv5_safeCall(window.tryRefreshRosterTabs, true);
+    // getEl-bridge också (för blandade sektioner)
+    if (typeof window._fv4_getEl !== "function"){
+      window._fv4_getEl = function(id){ return getEl(id); };
+    }
+    if (typeof window.getEl !== "function"){
+      window.getEl = function(id){ return getEl(id); };
     }
   }
 
-  tabButtons.forEach((btn)=>{
-    btn.addEventListener("click", ()=>{
-      const tabId = btn.getAttribute("data-tab");
-      if (!tabId) return;
-      activateTab(tabId);
-    });
-  });
+  function _fv5_getStateSafe(){
+    try{ return (typeof window.loadState === "function") ? window.loadState() : null; }catch(e){}
+    return null;
+  }
 
-  // Default
-  if (document.querySelector('.tab-btn[data-tab="settings"]')) activateTab("settings");
-}
-/* slut Sektion 5D: Flikar (teacher modal) + progress-trigger */
+  _fv5_installStateBridge();
 
+  /* =========================================================
+     5C – UI-REFRESH: tvinga MCQ/IMG/DRAG att rendera om
+     ========================================================= */
 
+  function _fv5_refreshQuestionEditors(reason){
+    // 1) säkerställ state-bridge (om andra sektioner laddats om)
+    try{ _fv5_installStateBridge(); }catch(e){}
 
-/* start Sektion 5E: Molnknappar (ladda/spara/login/logout) */
-async function _fv5_loadCloudBanksNow(){
-  try{
-    _fv5_bridgeCloudListIds();
-    if (typeof window.initFirebase === "function"){ try{ await window.initFirebase(); }catch(e){} }
+    // 2) uppdatera delbit-selects + listor
+    _fv5_safeCall(window.renderGoalsListAndSelects);
 
-    const fn =
-      (typeof window.loadCloudBanksListV5 === "function") ? window.loadCloudBanksListV5 :
-      (typeof window.loadCloudBanksListV4 === "function") ? window.loadCloudBanksListV4 :
-      (typeof window.loadCloudBanksList === "function") ? window.loadCloudBanksList :
-      null;
+    // Editor-init brukar även rendera listor i din kodbas
+    _fv5_safeCall(window.initQuestionForms);
+    _fv5_safeCall(window.initImageQuestionsEditor);
+    _fv5_safeCall(window.initDragDropQuestionsEditor);
 
-    if (!fn){
-      alert("Molnlist-funktionen saknas (loadCloudBanksListV5/V4). Kontrollera att SEKTION 3 är laddad.");
+    // Extra “om de finns” render-funktioner (olika versioner)
+    _fv5_safeCall(window.renderMcqList);
+    _fv5_safeCall(window.renderImgList);
+    _fv5_safeCall(window.renderDragList);
+
+    // 3) counts/status
+    _fv5_safeCall(window.updateBankStatusUI);
+    _fv5_safeCall(window.syncUI);
+
+    // 4) debug (tyst)
+    try{
+      const s = _fv5_getStateSafe() || {};
+      const b = (s && s.bank) ? s.bank : {};
+      const mcq = Array.isArray(b.mcq) ? b.mcq.length : 0;
+      const img = Array.isArray(b.img) ? b.img.length : 0;
+      const drag = Array.isArray(b.drag) ? b.drag.length : 0;
+      // console.log("[FV5 refresh]", reason || "-", { mcq, img, drag });
+    }catch(e){}
+  }
+
+  /* =========================================================
+     5D – ID-bridge (molnlista) + bankstatus
+     ========================================================= */
+
+  function _fv5_bridgeCloudListIds(){
+    // ändrar INTE layout – bara ser till att SEKTION 3 hittar list-host
+    try{
+      const existing = getEl("cloudBankList");
+      const v4 = getEl("cloudBanksListV4");
+      const v5 = getEl("cloudBanksListV5");
+      if (existing && !v4 && !v5){
+        existing.id = "cloudBanksListV4";
+      }
+    }catch(e){}
+  }
+
+  function _fv5_countLocalBank(){
+    const s = _fv5_getStateSafe() || {};
+    const b = s.bank || {};
+    const mcq = Array.isArray(b.mcq) ? b.mcq.length : 0;
+    const img = Array.isArray(b.img) ? b.img.length : 0;
+    const drag = Array.isArray(b.drag) ? b.drag.length : 0;
+    return { mcq, img, drag, total: mcq + img + drag };
+  }
+
+  function updateBankStatusUI(){
+    const hostList =
+      getEl("cloudBanksListV4") ||
+      getEl("cloudBanksListV5") ||
+      getEl("cloudBanksList") ||
+      getEl("cloudBankList");
+
+    if (!hostList) return;
+
+    const hostCard = hostList.closest(".card") || hostList.parentElement;
+    if (!hostCard) return;
+
+    let statusEl = getEl("bankStatus");
+    if (!statusEl){
+      statusEl = document.createElement("p");
+      statusEl.id = "bankStatus";
+      statusEl.className = "mini";
+      statusEl.style.marginTop = "6px";
+    }
+
+    if (statusEl.parentNode !== hostCard){
+      try{ if (statusEl.parentNode) statusEl.parentNode.removeChild(statusEl); }catch(e){}
+      hostCard.insertBefore(statusEl, hostList);
+    } else if (statusEl.nextSibling !== hostList){
+      hostCard.insertBefore(statusEl, hostList);
+    }
+
+    const s = _fv5_getStateSafe() || {};
+    const a = s.activeBank || {};
+    const counts = _fv5_countLocalBank();
+
+    if (!counts.total){
+      statusEl.textContent = "Status: Ingen bank laddad (0 frågor).";
       return;
     }
 
-    await fn();
-    updateBankStatusUI();
-    _fv5_safeCall(window.tryRefreshRosterTabs, true);
-  }catch(e){
-    console.error("Kunde inte ladda moln-bankar:", e);
-    alert("Kunde inte ladda moln-bankar. Se konsolen.");
-  }
-}
-/* slut Sektion 5E: Molnknappar (ladda/spara/login/logout) */
+    const hasCloudActive = !!String(a.bankId || "").trim();
+    const bankName = String(a.name || a.bankName || "").trim();
 
-
-
-/* start Sektion 5F: initApp + DOMContentLoaded (idempotent) */
-async function initApp(){
-  if (window.__FANGVAKTAREN_INITAPP_DONE){
-    console.log("initApp: hoppar över (redan initierad)");
-    return;
-  }
-  window.__FANGVAKTAREN_INITAPP_DONE = true;
-
-  console.log("initApp start");
-
-  _fv5_bridgeCloudListIds();
-
-  // Initiera inställningsdelar om de finns
-  _fv5_safeCall(window.initTeacherEmailSettings);
-  _fv5_safeCall(window.initThresholdSettings);
-  _fv5_safeCall(window.initTeacherPasswordSettings);
-  showTeacherPasswordInStatus();
-
-  _fv5_safeCall(window.initGoalsMap);
-  _fv5_safeCall(window.initQuestionForms);
-  _fv5_safeCall(window.initImageQuestionsEditor);
-  _fv5_safeCall(window.initDragDropQuestionsEditor);
-
-  setupTabNavigation();
-
-  _fv5_safeCall(window.syncUI);
-  updateBankStatusUI();
-
-  /* ---------- Elevyta ---------- */
-  _fv5_rebindButton("btnSaveStudent", (b)=>{
-    if (typeof window.handleSaveStudent==="function") b.addEventListener("click", window.handleSaveStudent);
-  });
-
-  _fv5_rebindButton("start-levelE", (b)=>{
-    if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("E"));
-  });
-  _fv5_rebindButton("start-levelC", (b)=>{
-    if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("C"));
-  });
-  _fv5_rebindButton("start-levelA", (b)=>{
-    if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("A"));
-  });
-
-  _fv5_rebindButton("btnFinish", (b)=>{
-    if (typeof window.finishLevel==="function") b.addEventListener("click", window.finishLevel);
-  });
-
-  _fv5_rebindButton("btnBack", (b)=>{
-    b.addEventListener("click", ()=>{
-      const result = getEl("result");
-      const play = getEl("play");
-      if (result) result.classList.add("hidden");
-      if (play) play.classList.add("hidden");
-      const studentCard = getEl("studentCard");
-      if (studentCard) studentCard.classList.remove("hidden");
-      _fv5_safeCall(window.syncUI);
-    });
-  });
-
-  _fv5_rebindButton("btnCancel", (b)=>{
-    b.addEventListener("click", ()=>{
-      try{ window.currentLevel = null; }catch(e){}
-      try{ window.currentQuestions = []; }catch(e){}
-      try{ window.currentAnswers = []; }catch(e){}
-      const play = getEl("play");
-      const result = getEl("result");
-      if (play) play.classList.add("hidden");
-      if (result) result.classList.add("hidden");
-      const studentCard = getEl("studentCard");
-      if (studentCard) studentCard.classList.remove("hidden");
-      _fv5_safeCall(window.syncUI);
-    });
-  });
-
-  _fv5_rebindButton("btnSubmitGame", (b)=>{
-    b.addEventListener("click", async ()=>{
-      try{
-        if (typeof window.saveCurrentResultToFirestore !== "function") throw new Error("saveCurrentResultToFirestore saknas");
-        await window.saveCurrentResultToFirestore();
-        alert("Ditt resultat är inlämnat till läraren.");
-      }catch(err){
-        console.error("Fel vid inlämning:", err);
-        alert("Kunde inte lämna in resultatet. Försök igen eller kontakta läraren.");
-      }
-    });
-  });
-
-  /* ---------- Lärarläge ---------- */
-  _fv5_rebindButton("btnTeacherMode", (b)=> b.addEventListener("click", openTeacherGate));
-  _fv5_rebindButton("btnTeacherCancel", (b)=> b.addEventListener("click", closeTeacherGate));
-  _fv5_rebindButton("btnTeacherConfirm", (b)=> b.addEventListener("click", handleTeacherConfirm));
-  _fv5_rebindButton("btnCloseTeacher", (b)=> b.addEventListener("click", closeTeacherModal));
-
-  /* ---------- Inställningar ---------- */
-  _fv5_rebindButton("btnSaveThresholds", (b)=>{
-    if (typeof window.handleSaveThresholds === "function"){
-      b.addEventListener("click", ()=>{
-        window.handleSaveThresholds();
-        updateBankStatusUI();
-      });
-    }
-  });
-
-  _fv5_rebindButton("btnSaveTeacherEmail", (b)=>{
-    if (typeof window.handleSaveTeacherEmail==="function") b.addEventListener("click", window.handleSaveTeacherEmail);
-  });
-
-  _fv5_rebindButton("btnChangeTeacherPassword", (b)=>{
-    if (typeof window.handleChangeTeacherPassword === "function"){
-      b.addEventListener("click", ()=>{
-        window.handleChangeTeacherPassword();
-        showTeacherPasswordInStatus();
-      });
-    }
-  });
-
-  /* ---------- Delmål/delbitar ---------- */
-  _fv5_rebindButton("btnAddGoalPart", (b)=>{
-    if (typeof window.handleAddGoalPart==="function") b.addEventListener("click", window.handleAddGoalPart);
-  });
-  _fv5_rebindButton("btnSaveGoalsMap", (b)=>{
-    if (typeof window.handleSaveGoalsMap==="function") b.addEventListener("click", window.handleSaveGoalsMap);
-  });
-  _fv5_rebindButton("btnClearGoalsMap", (b)=>{
-    if (typeof window.handleClearGoalsMap==="function") b.addEventListener("click", window.handleClearGoalsMap);
-  });
-
-  /* ---------- Rensa ---------- */
-  _fv5_rebindButton("btnClearStudentData", (b)=>{
-    if (typeof window.handleClearStudentData==="function") b.addEventListener("click", window.handleClearStudentData);
-  });
-  _fv5_rebindButton("btnResetGameData", (b)=>{
-    if (typeof window.handleResetGameData==="function") b.addEventListener("click", window.handleResetGameData);
-  });
-
-  /* ---------- Moln / Firebase ---------- */
-  _fv5_rebindButton("btnLoadCloudBanks", (b)=> b.addEventListener("click", _fv5_loadCloudBanksNow));
-
-  _fv5_rebindButton("btnSaveToCloud", (b)=>{
-    b.addEventListener("click", async ()=>{
-      try{
-        if (typeof window.handleSaveToCloud !== "function") throw new Error("handleSaveToCloud saknas (SEKTION 3?)");
-        await window.handleSaveToCloud();
-        await _fv5_loadCloudBanksNow();
-      }catch(err){
-        console.error("Spara bank misslyckades:", err);
-        alert("Kunde inte spara bank till molnet. Se konsolen.");
-      }
-    });
-  });
-
-  _fv5_rebindButton("btnExportBank", (b)=>{
-    if (typeof window.handleExportBank==="function") b.addEventListener("click", ()=>{
-      window.handleExportBank();
-      updateBankStatusUI();
-    });
-  });
-
-  const fileImport = getEl("fileImport");
-  if (fileImport && !fileImport.__fv5Bound){
-    fileImport.__fv5Bound = true;
-    if (typeof window.handleImportBank === "function"){
-      fileImport.addEventListener("change", (evt)=>{
-        window.handleImportBank(evt);
-        updateBankStatusUI();
-      });
+    if (hasCloudActive){
+      statusEl.textContent =
+        `Status: Moln-bank${bankName ? ` "${bankName}"` : ""} (${String(a.bankId)}) med ${counts.total} frågor ` +
+        `(MCQ: ${counts.mcq}, bild: ${counts.img}, drag & drop: ${counts.drag}).`;
+    } else {
+      statusEl.textContent =
+        `Status: Lokal bank (på denna enhet) med ${counts.total} frågor ` +
+        `(MCQ: ${counts.mcq}, bild: ${counts.img}, drag & drop: ${counts.drag}).`;
     }
   }
 
-  _fv5_rebindButton("btnGooglePlaceholder", (b)=>{
-    if (typeof window.handleGoogleLogin==="function") b.addEventListener("click", window.handleGoogleLogin);
-  });
-  _fv5_rebindButton("btnGoogleLogout", (b)=>{
-    if (typeof window.handleGoogleLogout==="function") b.addEventListener("click", window.handleGoogleLogout);
-  });
+  /* =========================================================
+     5E – Lärarläge (gate + modal) + flikar
+     ========================================================= */
 
-  _fv5_rebindButton("btnPublishSharedBank", (b)=>{
-    if (typeof window.handlePublishSharedBank==="function") b.addEventListener("click", window.handlePublishSharedBank);
-  });
+  function showTeacherPasswordInStatus(){
+    const s = _fv5_getStateSafe() || {};
+    const statusEl = getEl("passwordStatus");
+    if (!statusEl) return;
+    statusEl.textContent = (s.teacherPassword ? `Aktuellt lärarlösenord: ${s.teacherPassword}` : "");
+  }
 
-  console.log("initApp klar – knappar kopplade");
-}
+  function openTeacherGate(){
+    const gate = getEl("teacherGate");
+    const input = getEl("teacherPasswordInput");
+    const text = getEl("teacherGateText");
+    const s = _fv5_getStateSafe() || {};
 
-// Exponera (om andra sektioner vill kalla)
-window.updateBankStatusUI = updateBankStatusUI;
-window.openTeacherGate = openTeacherGate;
-window.closeTeacherGate = closeTeacherGate;
-window.openTeacherModal = openTeacherModal;
-window.closeTeacherModal = closeTeacherModal;
-window.handleTeacherConfirm = handleTeacherConfirm;
-window.initApp = initApp;
-
-document.addEventListener("DOMContentLoaded", function(){
-  if (window.__FANGVAKTAREN_DOMREADY_DONE) return;
-  window.__FANGVAKTAREN_DOMREADY_DONE = true;
-
-  // Init Firebase om SEKTION 3 finns
-  if (typeof window.initFirebase === "function"){
-    try{
-      if (!window.__FANGVAKTAREN_FIREBASE_INIT_DONE){
-        window.__FANGVAKTAREN_FIREBASE_INIT_DONE = true;
-        window.initFirebase();
-      }
-    }catch(e){
-      console.error("Fel vid initFirebase:", e);
+    if (gate) gate.classList.remove("hidden");
+    if (input){
+      input.value = "";
+      input.type = "password";
+      input.focus();
+    }
+    if (text){
+      text.textContent = s.teacherPassword
+        ? "Ange lärarlösenord för att öppna lärarläget."
+        : "Första gången du loggar in blir lösenordet det du skriver här.";
     }
   }
 
-  try{ initApp(); }
-  catch(e){ console.error("Fel vid initApp:", e); }
-});
-/* slut Sektion 5F: initApp + DOMContentLoaded (idempotent) */
+  function closeTeacherGate(){
+    const gate = getEl("teacherGate");
+    if (gate) gate.classList.add("hidden");
+  }
 
-
-
-/* start Sektion 5G: EXIT TICKET (flik + mallfrågor) */
-// Ändrat: Lägger till fliken "Exit ticket" i lärarmodalen + 2 knappar som skapar/append:ar en exit-bank (skala + ja/nej). (Omskrivna/nya rader: 186)
-
-function _fv5_isTeacherModalOpen(){
-  const modal = getEl("teacherModal");
-  return !!(modal && !modal.classList.contains("hidden"));
-}
-
-function _fv5_ensureTeacherExitTabInjected(){
-  try{
-    if (window.__fv5_exit_tab_injected) return true;
-
+  function openTeacherModal(){
     const modal = getEl("teacherModal");
-    if (!modal) return false;
-
-    // hitta tab-knappsrad: första elementet med .tab-btn i modalen -> dess parent
-    const firstBtn = modal.querySelector(".tab-btn");
-    if (!firstBtn || !firstBtn.parentElement) return false;
-
-    const tabsRow = firstBtn.parentElement;
-
-    // hitta panel-wrap: första elementet med .tab-panel i modalen -> dess parent
-    const firstPanel = modal.querySelector(".tab-panel");
-    if (!firstPanel || !firstPanel.parentElement) return false;
-
-    const panelsWrap = firstPanel.parentElement;
-
-    // skapa ny tab-knapp
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "tab-btn";
-    btn.setAttribute("data-tab", "exit");
-    btn.textContent = "Exit ticket";
-
-    // skapa ny panel
-    const panel = document.createElement("div");
-    panel.className = "tab-panel hidden";
-    panel.setAttribute("data-panel", "exit");
-
-    // innehåll: rubrik + instruktion + knappar + status + preview
-    const wrap = document.createElement("div");
-    wrap.style.display = "flex";
-    wrap.style.flexDirection = "column";
-    wrap.style.gap = "10px";
-
-    const h = document.createElement("div");
-    h.style.fontWeight = "800";
-    h.textContent = "Exit ticket – lektionens avslut";
-    wrap.appendChild(h);
-
-    const p = document.createElement("div");
-    p.className = "mini";
-    p.textContent = "Här kan du skapa en enkel EXIT-bank (skala 1–5 + ja/nej). Du kan antingen ersätta aktuell bank eller lägga till frågorna i den bank som redan är laddad.";
-    wrap.appendChild(p);
-
-    const btnRow = document.createElement("div");
-    btnRow.style.display = "flex";
-    btnRow.style.flexWrap = "wrap";
-    btnRow.style.gap = "8px";
-
-    const btnCreate = document.createElement("button");
-    btnCreate.type = "button";
-    btnCreate.className = "btn btn-sm";
-    btnCreate.id = "btnExitCreateBank";
-    btnCreate.textContent = "Skapa EXIT-bank (ersätt aktuell bank)";
-
-    const btnAppend = document.createElement("button");
-    btnAppend.type = "button";
-    btnAppend.className = "btn btn-sm";
-    btnAppend.id = "btnExitAppendToBank";
-    btnAppend.textContent = "Lägg till EXIT-frågor i aktuell bank";
-
-    btnRow.appendChild(btnCreate);
-    btnRow.appendChild(btnAppend);
-    wrap.appendChild(btnRow);
-
-    const status = document.createElement("div");
-    status.className = "mini";
-    status.id = "exitStatus";
-    status.textContent = "";
-    wrap.appendChild(status);
-
-    const preview = document.createElement("textarea");
-    preview.id = "exitPreview";
-    preview.style.width = "100%";
-    preview.style.minHeight = "160px";
-    preview.placeholder = "Förhandsvisning av EXIT-frågor (JSON)...";
-    wrap.appendChild(preview);
-
-    panel.appendChild(wrap);
-
-    // inject
-    tabsRow.appendChild(btn);
-    panelsWrap.appendChild(panel);
-
-    // bind tab click via befintlig setupTabNavigation (den använder querySelectorAll varje gång initApp körs)
-    // men om setupTabNavigation redan kört: vi lägger en enkel click som mimic: aktivera exit
-    btn.addEventListener("click", ()=>{
-      try{
-        // uppdatera alla tab-btn active
-        const allBtns = modal.querySelectorAll(".tab-btn");
-        allBtns.forEach((b)=>{
-          const isActive = b.getAttribute("data-tab") === "exit";
-          b.classList.toggle("active", isActive);
-        });
-        // panels
-        const allPanels = modal.querySelectorAll(".tab-panel");
-        allPanels.forEach((pn)=>{
-          const pid = pn.getAttribute("data-panel");
-          pn.classList.toggle("hidden", pid !== "exit");
-        });
-      }catch(e){}
-    });
-
-    window.__fv5_exit_tab_injected = true;
-    return true;
-  }catch(e){
-    return false;
-  }
-}
-
-function _fv5_buildExitTemplateBank(){
-  const now = new Date();
-  const dateStr = now.toISOString().slice(0,10);
-
-  // Skala 1–5: görs som MCQ med 5 val, answer = null (för “ingen rättning” i exit-läge senare)
-  function scaleQ(text){
-    return {
-      type: "mcq",
-      level: "E",
-      q: text,
-      options: ["1","2","3","4","5"],
-      answer: null,
-      meta: { exit: true, kind: "scale_1_5" }
-    };
+    if (modal) modal.classList.remove("hidden");
+    _fv5_safeCall(window.tryRefreshRosterTabs, true);
+    _fv5_nextTick(()=>_fv5_refreshQuestionEditors("openTeacherModal"));
   }
 
-  function yesNoQ(text){
-    return {
-      type: "mcq",
-      level: "E",
-      q: text,
-      options: ["Ja","Nej"],
-      answer: null,
-      meta: { exit: true, kind: "yes_no" }
-    };
+  function closeTeacherModal(){
+    const modal = getEl("teacherModal");
+    if (modal) modal.classList.add("hidden");
   }
 
-  const bank = {
-    meta: {
-      bankType: "exit",
-      name: `Exit ticket (${dateStr})`,
-      createdAt: now.toISOString()
-    },
-    mcq: [
-      scaleQ("Hur bra gick lektionen idag? (1–5)"),
-      scaleQ("Hur tydliga var instruktionerna? (1–5)"),
-      scaleQ("Hur lugn var arbetsmiljön? (1–5)"),
-      scaleQ("Hur nöjd är du med din insats? (1–5)"),
-      yesNoQ("Förstod du vad du skulle göra idag? (Ja/Nej)"),
-      yesNoQ("Behöver du extra hjälp nästa lektion? (Ja/Nej)"),
-      yesNoQ("Vill du jobba mer i lugn miljö nästa gång? (Ja/Nej)")
-    ],
-    img: [],
-    drag: []
-  };
+  function handleTeacherConfirm(){
+    const input = getEl("teacherPasswordInput");
+    const text = getEl("teacherGateText");
+    if (!input) return;
 
-  return bank;
-}
+    const entered = input.value.trim();
+    if (!entered){ alert("Skriv in ett lösenord."); return; }
 
-function _fv5_setExitStatus(text){
-  const el = getEl("exitStatus");
-  if (el) el.textContent = String(text || "");
-}
+    const s = _fv5_getStateSafe();
+    if (!s){ alert("Tekniskt fel: state saknas."); return; }
 
-function _fv5_setExitPreview(obj){
-  const el = getEl("exitPreview");
-  if (!el) return;
-  try{
-    el.value = JSON.stringify(obj, null, 2);
-  }catch(e){
-    el.value = "";
-  }
-}
-
-function _fv5_replaceCurrentBankWithExit(){
-  if (typeof window.loadState !== "function" || typeof window.saveState !== "function"){
-    alert("Tekniskt fel: loadState/saveState saknas.");
-    return;
-  }
-
-  const s = window.loadState() || {};
-  const exitBank = _fv5_buildExitTemplateBank();
-
-  // ersätt lokal bank
-  s.bank = exitBank;
-
-  // sätt aktiv bank meta som “lokal”
-  s.activeBank = s.activeBank && typeof s.activeBank==="object" ? s.activeBank : {};
-  s.activeBank.bankType = "exit";
-  s.activeBank.name = exitBank.meta && exitBank.meta.name ? exitBank.meta.name : "Exit ticket";
-  s.activeBank.bankName = s.activeBank.name;
-
-  window.saveState(s);
-
-  _fv5_setExitStatus("EXIT-bank skapad och laddad som aktuell bank (lokalt).");
-  _fv5_setExitPreview(exitBank);
-
-  try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch(e){}
-}
-
-function _fv5_appendExitToCurrentBank(){
-  if (typeof window.loadState !== "function" || typeof window.saveState !== "function"){
-    alert("Tekniskt fel: loadState/saveState saknas.");
-    return;
-  }
-
-  const s = window.loadState() || {};
-  s.bank = (s.bank && typeof s.bank==="object") ? s.bank : {};
-  if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
-  if (!Array.isArray(s.bank.img)) s.bank.img = [];
-  if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
-
-  const exitBank = _fv5_buildExitTemplateBank();
-
-  // append MCQ
-  const before = s.bank.mcq.length;
-  exitBank.mcq.forEach((q)=> s.bank.mcq.push(q));
-  const added = s.bank.mcq.length - before;
-
-  // markera att banken innehåller exit-frågor
-  s.bank.meta = (s.bank.meta && typeof s.bank.meta==="object") ? s.bank.meta : {};
-  s.bank.meta.hasExit = true;
-
-  window.saveState(s);
-
-  _fv5_setExitStatus(`EXIT-frågor tillagda i aktuell bank (+${added} frågor).`);
-  _fv5_setExitPreview(exitBank);
-
-  try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch(e){}
-}
-
-function _fv5_bindExitTabButtons(){
-  const btnCreate = getEl("btnExitCreateBank");
-  const btnAppend = getEl("btnExitAppendToBank");
-
-  if (btnCreate && !btnCreate.__fv5Bound){
-    btnCreate.__fv5Bound = true;
-    btnCreate.addEventListener("click", ()=>{
-      if (!confirm("Skapa en EXIT-bank och ersätta aktuell bank på denna enhet?")) return;
-      _fv5_replaceCurrentBankWithExit();
-    });
-  }
-
-  if (btnAppend && !btnAppend.__fv5Bound){
-    btnAppend.__fv5Bound = true;
-    btnAppend.addEventListener("click", ()=>{
-      _fv5_appendExitToCurrentBank();
-    });
-  }
-}
-
-function _fv5_ensureExitReady(){
-  // injicera fliken först
-  if (_fv5_ensureTeacherExitTabInjected()){
-    // bind knappar
-    _fv5_bindExitTabButtons();
-    // preview mall direkt (bara för info)
-    try{ _fv5_setExitPreview(_fv5_buildExitTemplateBank()); }catch(e){}
-  }
-}
-
-// hook: när lärarmodalen öppnas -> säkerställ exit-flik
-(function(){
-  try{
-    if (window.__fv5_exit_hooked) return;
-    window.__fv5_exit_hooked = true;
-
-    const origOpen = window.openTeacherModal;
-    if (typeof origOpen === "function"){
-      window.openTeacherModal = function(){
-        const r = origOpen.apply(this, arguments);
-        try{ _fv5_ensureExitReady(); }catch(e){}
-        return r;
-      };
+    if (!s.teacherPassword){
+      s.teacherPassword = entered;
+      _fv5_safeCall(window.saveState, s);
+      showTeacherPasswordInStatus();
+      if (text) text.textContent = "Lösenord sparat. Öppnar lärarläge.";
+      closeTeacherGate();
+      openTeacherModal();
+      return;
     }
-  }catch(e){}
-})();
 
-// fallback: om lärarmodalen redan öppen av annan orsak, försök injicera
-try{
-  setTimeout(()=>{
+    if (s.teacherPassword === entered){
+      if (text) text.textContent = "Lösenord OK. Öppnar lärarläge.";
+      closeTeacherGate();
+      openTeacherModal();
+    } else {
+      if (text) text.textContent = "Fel lösenord. Försök igen.";
+      input.value = "";
+      input.focus();
+    }
+  }
+
+  function setupTabNavigation(){
+    const tabButtons = document.querySelectorAll(".tab-btn");
+    const panels = document.querySelectorAll(".tab-panel");
+    if (!tabButtons.length || !panels.length) return;
+
+    function activateTab(tabId){
+      tabButtons.forEach((btn)=>{
+        const isActive = btn.getAttribute("data-tab") === tabId;
+        btn.classList.toggle("active", isActive);
+      });
+
+      panels.forEach((panel)=>{
+        const panelId = panel.getAttribute("data-panel");
+        panel.classList.toggle("hidden", panelId !== tabId);
+      });
+
+      // När du går till progress: roster refresh
+      if (tabId === "progress"){
+        _fv5_safeCall(window.tryRefreshRosterTabs, true);
+      }
+
+      // Tvinga refresh när du går till editflikarna (fixar “bank finns men listor tomma”)
+      if (tabId === "questions" || tabId === "images" || tabId === "dragdrop" || tabId === "exit" || tabId === "bank"){
+        _fv5_nextTick(()=>_fv5_refreshQuestionEditors("tab:" + tabId));
+      }
+    }
+
+    tabButtons.forEach((btn)=>{
+      btn.addEventListener("click", ()=>{
+        const tabId = btn.getAttribute("data-tab");
+        if (!tabId) return;
+        activateTab(tabId);
+      });
+    });
+
+    // Default
+    if (document.querySelector('.tab-btn[data-tab="settings"]')) activateTab("settings");
+  }
+
+  /* =========================================================
+     5F – Molnknappar (ladda/spara/login/logout)
+     ========================================================= */
+
+  async function _fv5_loadCloudBanksNow(){
     try{
-      if (_fv5_isTeacherModalOpen()) _fv5_ensureExitReady();
-    }catch(e){}
-  }, 120);
-}catch(e){}
-/* slut Sektion 5G: EXIT TICKET (flik + mallfrågor) */
+      _fv5_bridgeCloudListIds();
+      if (typeof window.initFirebase === "function"){ try{ await window.initFirebase(); }catch(e){} }
 
+      const fn =
+        (typeof window.loadCloudBanksListV5 === "function") ? window.loadCloudBanksListV5 :
+        (typeof window.loadCloudBanksListV4 === "function") ? window.loadCloudBanksListV4 :
+        (typeof window.loadCloudBanksList === "function") ? window.loadCloudBanksList :
+        null;
+
+      if (!fn){
+        alert("Molnlist-funktionen saknas (loadCloudBanksListV5/V4). Kontrollera att SEKTION 3 är laddad.");
+        return;
+      }
+
+      await fn();
+      updateBankStatusUI();
+      _fv5_safeCall(window.tryRefreshRosterTabs, true);
+      _fv5_nextTick(()=>_fv5_refreshQuestionEditors("cloudLoaded"));
+    }catch(e){
+      console.error("Kunde inte ladda moln-bankar:", e);
+      alert("Kunde inte ladda moln-bankar. Se konsolen.");
+    }
+  }
+
+  /* =========================================================
+     5G – Exit ticket: standardfrågor + preview + refresh
+     ========================================================= */
+
+  function _fv5_exitQuestionsPack(){
+    // Endast MCQ (skala + ja/nej) – enkelt och robust
+    const scale = ["1", "2", "3", "4", "5"];
+    const yesno = ["Ja", "Nej"];
+
+    const mkScale = (qText)=>({
+      type: "mcq",
+      level: "E",
+      q: qText,
+      options: scale.map((x)=>String(x)),
+      answer: 2 // neutral default (3)
+    });
+
+    const mkYesNo = (qText)=>({
+      type: "mcq",
+      level: "E",
+      q: qText,
+      options: yesno.slice(),
+      answer: 0
+    });
+
+    return [
+      mkScale("Hur tydlig var lektionen idag? (1–5)"),
+      mkScale("Hur bra gick det för dig idag? (1–5)"),
+      mkScale("Hur lugnt var det i klassrummet? (1–5)"),
+      mkScale("Hur lätt var uppgiften att förstå? (1–5)"),
+      mkScale("Hur mycket ork hade du idag? (1–5)"),
+
+      mkYesNo("Fick du hjälp när du behövde? (Ja/Nej)"),
+      mkYesNo("Visste du vad du skulle göra idag? (Ja/Nej)"),
+      mkYesNo("Kände du dig trygg under lektionen? (Ja/Nej)"),
+      mkYesNo("Vill du göra mer sånt här nästa gång? (Ja/Nej)")
+    ];
+  }
+
+  function _fv5_setExitPreview(text){
+    const ta = getEl("exitBankPreview");
+    if (ta) ta.value = String(text || "");
+  }
+
+  function _fv5_createExitBank(){
+    const s = _fv5_getStateSafe() || {};
+    s.bank = (s.bank && typeof s.bank === "object") ? s.bank : {};
+    s.bank.mcq = _fv5_exitQuestionsPack();
+    s.bank.img = Array.isArray(s.bank.img) ? s.bank.img : [];
+    s.bank.drag = Array.isArray(s.bank.drag) ? s.bank.drag : [];
+
+    _fv5_safeCall(window.saveState, s);
+
+    _fv5_setExitPreview(JSON.stringify({ bank: s.bank }, null, 2));
+    updateBankStatusUI();
+    _fv5_nextTick(()=>_fv5_refreshQuestionEditors("exit:create"));
+    alert("EXIT-bank skapad i din lokala bank. (Spara till molnet om du vill.)");
+  }
+
+  function _fv5_appendExitQuestions(){
+    const s = _fv5_getStateSafe() || {};
+    s.bank = (s.bank && typeof s.bank === "object") ? s.bank : {};
+    s.bank.mcq = Array.isArray(s.bank.mcq) ? s.bank.mcq : [];
+    s.bank.img = Array.isArray(s.bank.img) ? s.bank.img : [];
+    s.bank.drag = Array.isArray(s.bank.drag) ? s.bank.drag : [];
+
+    const pack = _fv5_exitQuestionsPack();
+    pack.forEach((q)=> s.bank.mcq.push(q));
+
+    _fv5_safeCall(window.saveState, s);
+
+    _fv5_setExitPreview(JSON.stringify({ appended: pack.length, bank: s.bank }, null, 2));
+    updateBankStatusUI();
+    _fv5_nextTick(()=>_fv5_refreshQuestionEditors("exit:append"));
+    alert("EXIT-frågor tillagda i din lokala bank. (Spara till molnet om du vill.)");
+  }
+
+  /* =========================================================
+     5H – initApp + DOMContentLoaded (idempotent)
+     ========================================================= */
+
+  async function initApp(){
+    if (window.__FANGVAKTAREN_INITAPP_DONE){
+      // console.log("initApp: hoppar över (redan initierad)");
+      return;
+    }
+    window.__FANGVAKTAREN_INITAPP_DONE = true;
+
+    // console.log("initApp start");
+
+    _fv5_bridgeCloudListIds();
+
+    _fv5_safeCall(window.initTeacherEmailSettings);
+    _fv5_safeCall(window.initThresholdSettings);
+    _fv5_safeCall(window.initTeacherPasswordSettings);
+    showTeacherPasswordInStatus();
+
+    _fv5_safeCall(window.initGoalsMap);
+
+    // Init editor UI + render
+    _fv5_refreshQuestionEditors("initApp");
+
+    setupTabNavigation();
+
+    /* ---------- Elevyta ---------- */
+    _fv5_rebindButton("btnSaveStudent", (b)=>{ if (typeof window.handleSaveStudent==="function") b.addEventListener("click", window.handleSaveStudent); });
+
+    _fv5_rebindButton("start-levelE", (b)=>{ if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("E")); });
+    _fv5_rebindButton("start-levelC", (b)=>{ if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("C")); });
+    _fv5_rebindButton("start-levelA", (b)=>{ if (typeof window.startLevel==="function") b.addEventListener("click", ()=>window.startLevel("A")); });
+
+    _fv5_rebindButton("btnFinish", (b)=>{ if (typeof window.finishLevel==="function") b.addEventListener("click", window.finishLevel); });
+
+    _fv5_rebindButton("btnBack", (b)=>{
+      b.addEventListener("click", ()=>{
+        const result = getEl("result");
+        const play = getEl("play");
+        if (result) result.classList.add("hidden");
+        if (play) play.classList.add("hidden");
+        const studentCard = getEl("studentCard");
+        if (studentCard) studentCard.classList.remove("hidden");
+        _fv5_safeCall(window.syncUI);
+      });
+    });
+
+    _fv5_rebindButton("btnCancel", (b)=>{
+      b.addEventListener("click", ()=>{
+        // OBS: currentLevel/currentQuestions/currentAnswers ligger i SEKTION 4 (let). Den hanteras där.
+        const play = getEl("play");
+        const result = getEl("result");
+        if (play) play.classList.add("hidden");
+        if (result) result.classList.add("hidden");
+        const studentCard = getEl("studentCard");
+        if (studentCard) studentCard.classList.remove("hidden");
+        _fv5_safeCall(window.syncUI);
+      });
+    });
+
+    _fv5_rebindButton("btnSubmitGame", (b)=>{
+      b.addEventListener("click", async ()=>{
+        try{
+          if (typeof window.saveCurrentResultToFirestore !== "function") throw new Error("saveCurrentResultToFirestore saknas");
+          await window.saveCurrentResultToFirestore();
+          alert("Ditt resultat är inlämnat till läraren.");
+        }catch(err){
+          console.error("Fel vid inlämning:", err);
+          alert("Kunde inte lämna in resultatet. Försök igen eller kontakta läraren.");
+        }
+      });
+    });
+
+    /* ---------- Lärarläge ---------- */
+    _fv5_rebindButton("btnTeacherMode", (b)=> b.addEventListener("click", openTeacherGate));
+    _fv5_rebindButton("btnTeacherCancel", (b)=> b.addEventListener("click", closeTeacherGate));
+    _fv5_rebindButton("btnTeacherConfirm", (b)=> b.addEventListener("click", handleTeacherConfirm));
+    _fv5_rebindButton("btnCloseTeacher", (b)=> b.addEventListener("click", closeTeacherModal));
+
+    /* ---------- Inställningar ---------- */
+    _fv5_rebindButton("btnSaveThresholds", (b)=>{
+      if (typeof window.handleSaveThresholds === "function"){
+        b.addEventListener("click", ()=>{
+          window.handleSaveThresholds();
+          updateBankStatusUI();
+          _fv5_nextTick(()=>_fv5_refreshQuestionEditors("thresholdsSaved"));
+        });
+      }
+    });
+
+    _fv5_rebindButton("btnSaveTeacherEmail", (b)=>{ if (typeof window.handleSaveTeacherEmail==="function") b.addEventListener("click", window.handleSaveTeacherEmail); });
+
+    _fv5_rebindButton("btnChangeTeacherPassword", (b)=>{
+      if (typeof window.handleChangeTeacherPassword === "function"){
+        b.addEventListener("click", ()=>{
+          window.handleChangeTeacherPassword();
+          showTeacherPasswordInStatus();
+        });
+      }
+    });
+
+    /* ---------- Delmål/delbitar ---------- */
+    _fv5_rebindButton("btnAddGoalPart", (b)=>{ if (typeof window.handleAddGoalPart==="function") b.addEventListener("click", ()=>{ window.handleAddGoalPart(); _fv5_refreshQuestionEditors("goalPartAdded"); }); });
+    _fv5_rebindButton("btnSaveGoalsMap", (b)=>{ if (typeof window.handleSaveGoalsMap==="function") b.addEventListener("click", ()=>{ window.handleSaveGoalsMap(); _fv5_refreshQuestionEditors("goalsSaved"); }); });
+    _fv5_rebindButton("btnClearGoalsMap", (b)=>{ if (typeof window.handleClearGoalsMap==="function") b.addEventListener("click", ()=>{ window.handleClearGoalsMap(); _fv5_refreshQuestionEditors("goalsCleared"); }); });
+
+    /* ---------- Rensa ---------- */
+    _fv5_rebindButton("btnClearStudentData", (b)=>{ if (typeof window.handleClearStudentData==="function") b.addEventListener("click", window.handleClearStudentData); });
+    _fv5_rebindButton("btnResetGameData", (b)=>{ if (typeof window.handleResetGameData==="function") b.addEventListener("click", window.handleResetGameData); });
+
+    /* ---------- Moln / Firebase ---------- */
+    _fv5_rebindButton("btnLoadCloudBanks", (b)=> b.addEventListener("click", _fv5_loadCloudBanksNow));
+
+    _fv5_rebindButton("btnSaveToCloud", (b)=>{
+      b.addEventListener("click", async ()=>{
+        try{
+          if (typeof window.handleSaveToCloud !== "function") throw new Error("handleSaveToCloud saknas (SEKTION 3?)");
+          await window.handleSaveToCloud();
+          await _fv5_loadCloudBanksNow();
+          _fv5_nextTick(()=>_fv5_refreshQuestionEditors("cloudSaved"));
+        }catch(err){
+          console.error("Spara bank misslyckades:", err);
+          alert("Kunde inte spara bank till molnet. Se konsolen.");
+        }
+      });
+    });
+
+    _fv5_rebindButton("btnExportBank", (b)=>{ if (typeof window.handleExportBank==="function") b.addEventListener("click", ()=>{ window.handleExportBank(); updateBankStatusUI(); }); });
+
+    const fileImport = getEl("fileImport");
+    if (fileImport && !fileImport.__fv5Bound){
+      fileImport.__fv5Bound = true;
+      if (typeof window.handleImportBank === "function"){
+        fileImport.addEventListener("change", (evt)=>{
+          window.handleImportBank(evt);
+          updateBankStatusUI();
+          _fv5_nextTick(()=>_fv5_refreshQuestionEditors("imported"));
+        });
+      }
+    }
+
+    _fv5_rebindButton("btnGooglePlaceholder", (b)=>{ if (typeof window.handleGoogleLogin==="function") b.addEventListener("click", window.handleGoogleLogin); });
+    _fv5_rebindButton("btnGoogleLogout", (b)=>{ if (typeof window.handleGoogleLogout==="function") b.addEventListener("click", window.handleGoogleLogout); });
+
+    _fv5_rebindButton("btnPublishSharedBank", (b)=>{ if (typeof window.handlePublishSharedBank==="function") b.addEventListener("click", window.handlePublishSharedBank); });
+
+    /* ---------- Exit ticket ---------- */
+    _fv5_rebindButton("btnCreateExitBank", (b)=> b.addEventListener("click", _fv5_createExitBank));
+    _fv5_rebindButton("btnAppendExitQuestions", (b)=> b.addEventListener("click", _fv5_appendExitQuestions));
+
+    // console.log("initApp klar – knappar kopplade");
+  }
+
+  // Exponera (om andra sektioner vill kalla)
+  window.updateBankStatusUI = updateBankStatusUI;
+  window.openTeacherGate = openTeacherGate;
+  window.closeTeacherGate = closeTeacherGate;
+  window.openTeacherModal = openTeacherModal;
+  window.closeTeacherModal = closeTeacherModal;
+  window.handleTeacherConfirm = handleTeacherConfirm;
+  window.initApp = initApp;
+  window._fv5_refreshQuestionEditors = _fv5_refreshQuestionEditors;
+
+  document.addEventListener("DOMContentLoaded", function(){
+    if (window.__FANGVAKTAREN_DOMREADY_DONE) return;
+    window.__FANGVAKTAREN_DOMREADY_DONE = true;
+
+    // Init Firebase om SEKTION 3 finns
+    if (typeof window.initFirebase === "function"){
+      try{
+        if (!window.__FANGVAKTAREN_FIREBASE_INIT_DONE){
+          window.__FANGVAKTAREN_FIREBASE_INIT_DONE = true;
+          window.initFirebase();
+        }
+      }catch(e){
+        console.error("Fel vid initFirebase:", e);
+      }
+    }
+
+    try{ initApp(); }
+    catch(e){ console.error("Fel vid initApp:", e); }
+  });
 
 })(); // FV5
 </script>
-<!-- slut SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering & knappar) -->
+<!-- slut SEKTION 5: SCRIPT & LOGIK FÅNGVAKTAREN (lärarläge, flikar, bankstatus, initiering, exit-ticket & UI-refresh) -->
 
 
 
