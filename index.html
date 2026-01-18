@@ -6739,25 +6739,21 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 
 
-<!-- start SEKTION 5: LÄRAR-UI (frågeformulär, list-render, roster & exit-indikator) -->
-<!-- ÄNDRING: Återställer render/bind för MCQ/IMG/DRAG-listor + roster (moln-spar + token) + exit-indikator. (ca 360 rader) -->
+<!-- start SEKTION 5: UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit) -->
 <script>
 "use strict";
-
 /* =========================================================
-   Sektion 5A: GUARD + HELPERS
+   SEKTION 5 – UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit)
+   ÄNDRING: Återställde bindning för lärarlägeknapp + frågeformulär (MCQ/IMG/DRAG) + roster till moln-bank. (ca 430 rader)
    ========================================================= */
-(function FV5_SECTION5(){
-  if (window.__FV5_SECTION5_LOADED__) return;
-  window.__FV5_SECTION5_LOADED__ = true;
 
+/* start Sektion 5A: HELPERS (DOM + state + safe) */
+(function(){
   const $ = (id)=>document.getElementById(id);
   const qsa = (sel)=>Array.from(document.querySelectorAll(sel));
-  const sleep = (ms)=>new Promise(r=>setTimeout(r, ms));
-
-  const log = (...a)=>console.log("[FV5]", ...a);
-  const warn = (...a)=>console.warn("[FV5]", ...a);
-  const err = (...a)=>console.error("[FV5]", ...a);
+  const on = (el, ev, fn, opts)=>{ if(el) el.addEventListener(ev, fn, opts||false); };
+  const esc = (s)=>String(s||"").replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
+  const nowStamp = ()=>new Date().toISOString().replace("T"," ").slice(0,19);
 
   function safeLoadState(){
     try{ return (typeof window.loadState==="function") ? window.loadState() : null; }catch(e){ return null; }
@@ -6765,19 +6761,17 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   function safeSaveState(s){
     try{ if (typeof window.saveState==="function") window.saveState(s); }catch(e){}
   }
-
-  function ensureBankArrays(s){
-    if (!s || typeof s !== "object") s = {};
-    if (!s.bank || typeof s.bank !== "object") s.bank = {};
+  function ensureState(){
+    const s = safeLoadState() || {};
+    if (!s.bank || typeof s.bank!=="object") s.bank = {};
     if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
     if (!Array.isArray(s.bank.img)) s.bank.img = [];
     if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
-    if (!s.activeBank || typeof s.activeBank !== "object") s.activeBank = {};
     if (!s.activeMode) s.activeMode = "game";
+    if (!s.activeBank || typeof s.activeBank!=="object") s.activeBank = {};
     return s;
   }
-
-  function countBank(bank){
+  function bankCounts(bank){
     const b = bank && typeof bank==="object" ? bank : {};
     const mcq  = Array.isArray(b.mcq)  ? b.mcq.length  : 0;
     const img  = Array.isArray(b.img)  ? b.img.length  : 0;
@@ -6786,30 +6780,234 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   }
 
   function getDb(){
-    return window.firebaseDbInstance || (window.firebase && firebase.firestore && firebase.firestore()) || null;
+    try{
+      return window.firebaseDbInstance
+        || (window.firebase && firebase.firestore && firebase.firestore())
+        || null;
+    }catch(e){
+      return null;
+    }
   }
-
-  function getActiveBankRef(){
-    const s = ensureBankArrays(safeLoadState() || {});
-    const a = s.activeBank || {};
-    const ownerUid = (a.ownerUid||"").trim();
-    const bankId = (a.bankId||"").trim();
-    const db = getDb();
-    if (!db || !ownerUid || !bankId) return null;
-    return db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId);
+  function serverTS(){
+    try{
+      return (window.firebase && firebase.firestore && firebase.firestore.FieldValue && firebase.firestore.FieldValue.serverTimestamp)
+        ? firebase.firestore.FieldValue.serverTimestamp()
+        : Date.now();
+    }catch(e){
+      return Date.now();
+    }
   }
 
   function genToken(len=10){
     const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let out = "";
-    for (let i=0;i<len;i++){
-      out += chars[Math.floor(Math.random()*chars.length)];
-    }
+    for(let i=0;i<len;i++) out += chars[Math.floor(Math.random()*chars.length)];
     return out;
   }
 
+  // Exponera små helpers om andra sektioner vill använda dem
+  window._fv5 = window._fv5 || {};
+  window._fv5.$ = $;
+  window._fv5.qsa = qsa;
+  window._fv5.safeLoadState = safeLoadState;
+  window._fv5.safeSaveState = safeSaveState;
+  window._fv5.ensureState = ensureState;
+  window._fv5.bankCounts = bankCounts;
+  window._fv5.getDb = getDb;
+  window._fv5.serverTS = serverTS;
+  window._fv5.genToken = genToken;
+  window._fv5.nowStamp = nowStamp;
+/* slut Sektion 5A: HELPERS (DOM + state + safe) */
+
+/* start Sektion 5B: LÄRARLÄGE (open/close + bind knapp) */
+  function _fv5_show(el){
+    if (!el) return;
+    el.classList.remove("hidden");
+    // många av dina backdrops bygger på flex
+    if (!el.style.display || el.style.display === "none") el.style.display = "flex";
+  }
+  function _fv5_hide(el){
+    if (!el) return;
+    el.classList.add("hidden");
+    el.style.display = "none";
+  }
+
+  function openTeacherModal(){
+    const modal = $("teacherModal");
+    _fv5_show(modal);
+  }
+  function closeTeacherModal(){
+    const modal = $("teacherModal");
+    _fv5_hide(modal);
+  }
+
+  // Viktigt: gör funktionen global så den inte blir "undefined" i konsoltest
+  window.openTeacherModal = openTeacherModal;
+  window.closeTeacherModal = closeTeacherModal;
+
+  function bindTeacherModeButton(){
+    const btn = $("btnTeacherMode");
+    if (!btn) return;
+    if (btn.dataset.fv5Bound === "1") return;
+    btn.dataset.fv5Bound = "1";
+
+    on(btn, "click", (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      // Om gate finns i din kodbas, öppna den annars direkt modalen
+      const gate = $("teacherGate");
+      if (gate){
+        _fv5_show(gate);
+        const inp = $("teacherPasswordInput");
+        if (inp) setTimeout(()=>inp.focus(), 10);
+      } else {
+        openTeacherModal();
+      }
+    });
+  }
+
+  function bindTeacherModalClose(){
+    const modal = $("teacherModal");
+    if (!modal) return;
+
+    const btnClose = $("btnCloseTeacher");
+    if (btnClose && btnClose.dataset.fv5Bound !== "1"){
+      btnClose.dataset.fv5Bound = "1";
+      on(btnClose, "click", (e)=>{ e.preventDefault(); closeTeacherModal(); });
+    }
+
+    // Klick utanför själva rutan stänger (om du vill)
+    if (modal.dataset.fv5Bound !== "1"){
+      modal.dataset.fv5Bound = "1";
+      on(modal, "click", (e)=>{
+        if (e.target === modal) closeTeacherModal();
+      });
+    }
+  }
+/* slut Sektion 5B: LÄRARLÄGE (open/close + bind knapp) */
+
+/* start Sektion 5C: TABS (visa panel + exit-läge) */
+  function setActiveTab(tabName){
+    const btns = qsa(".tab-btn");
+    const panels = qsa(".tab-panel");
+
+    btns.forEach(b=>{
+      const t = b.getAttribute("data-tab");
+      if (t === tabName) b.classList.add("active");
+      else b.classList.remove("active");
+    });
+
+    panels.forEach(p=>{
+      const pn = p.getAttribute("data-panel");
+      if (pn === tabName) p.classList.remove("hidden");
+      else p.classList.add("hidden");
+    });
+
+    // Exit-mode flag (bara state + visuell markör på exit-knappen)
+    const s = ensureState();
+    if (tabName === "exit") s.activeMode = "exit";
+    else if (s.activeMode === "exit") s.activeMode = "game";
+    safeSaveState(s);
+
+    // Rendera listor när man går till frågetabbar
+    if (tabName === "questions" || tabName === "images" || tabName === "dragdrop" || tabName === "exit"){
+      if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
+    }
+
+    if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
+  }
+
+  function bindTabs(){
+    const nav = qsa(".tab-nav")[0] || null;
+    if (!nav) return;
+    if (nav.dataset.fv5Bound === "1") return;
+    nav.dataset.fv5Bound = "1";
+
+    on(nav, "click", (e)=>{
+      const btn = e.target.closest(".tab-btn");
+      if (!btn) return;
+      e.preventDefault();
+      const tab = btn.getAttribute("data-tab");
+      if (!tab) return;
+      setActiveTab(tab);
+    });
+  }
+
+  // Exponera (ibland bra i felsökning)
+  window._fv5_setActiveTab = setActiveTab;
+/* slut Sektion 5C: TABS (visa panel + exit-läge) */
+
+/* start Sektion 5D: RENDER – MCQ/IMG/DRAG (listor + delete) */
+  function renderMcqList(){
+    const list = $("mcqList");
+    const count = $("mcqCount");
+    if (!list) return;
+
+    const s = ensureState();
+    const arr = s.bank.mcq || [];
+    if (count) count.textContent = String(arr.length);
+
+    list.innerHTML = "";
+    if (!arr.length){
+      list.innerHTML = `<li class="mini">Inga flervalsfrågor ännu.</li>`;
+      return;
+    }
+
+    arr.forEach((q, idx)=>{
+      const opts = Array.isArray(q.options) ? q.options : [];
+      const a = Number.isFinite(q.answer) ? q.answer : null;
+
+      const li = document.createElement("li");
+      li.className = "question-item";
+      li.style.display = "flex";
+      li.style.gap = "10px";
+      li.style.alignItems = "flex-start";
+      li.style.justifyContent = "space-between";
+
+      const left = document.createElement("div");
+      left.style.flex = "1 1 auto";
+
+      const title = document.createElement("div");
+      title.className = "mini";
+      title.innerHTML = `<strong>${esc(q.level||"?")}</strong> • ${esc(q.q||"")}`;
+      left.appendChild(title);
+
+      const ul = document.createElement("ul");
+      ul.className = "mini";
+      ul.style.margin = "6px 0 0";
+      ul.style.paddingLeft = "18px";
+      opts.forEach((o, i)=>{
+        const liOpt = document.createElement("li");
+        const isCorrect = (a !== null && i === a);
+        liOpt.innerHTML = isCorrect ? `<strong>✅ ${esc(o)}</strong>` : esc(o);
+        ul.appendChild(liOpt);
+      });
+      left.appendChild(ul);
+
+      const right = document.createElement("div");
+      right.style.flex = "0 0 auto";
+      right.style.display = "flex";
+      right.style.gap = "6px";
+      right.style.alignItems = "center";
+
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "btn btn-sm btn-danger";
+      btnDel.textContent = "🗑️";
+      btnDel.title = "Ta bort fråga";
+      btnDel.dataset.kind = "mcq";
+      btnDel.dataset.idx = String(idx);
+
+      right.appendChild(btnDel);
+
+      li.appendChild(left);
+      li.appendChild(right);
+      list.appendChild(li);
+    });
+  }
+
   function pickImgSrc(q){
-    if (!q || typeof q!=="object") return "";
+    if (!q) return "";
     const cands = [q.image,q.img,q.dataUrl,q.dataURL,q.src,q.url];
     for (const c of cands){
       if (typeof c === "string" && c.trim()) return c.trim();
@@ -6817,252 +7015,84 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     return "";
   }
 
-  function normalizeMcqFromForm(){
-    const level = (($("mcqLevel")?.value)||"E").trim();
-    const q = (($("mcqQuestion")?.value)||"").trim();
-    const o0 = (($("mcqOption0")?.value)||"").trim();
-    const o1 = (($("mcqOption1")?.value)||"").trim();
-    const o2 = (($("mcqOption2")?.value)||"").trim();
-    const o3 = (($("mcqOption3")?.value)||"").trim();
-    const ans = parseInt((($("mcqAnswer")?.value)||"0"),10);
-    const opts = [o0,o1,o2,o3];
-
-    if (!q) return { ok:false, msg:"Skriv en frågetext." };
-    if (opts.some(x=>!x)) return { ok:false, msg:"Fyll i alla 4 svarsalternativ." };
-    if (!(ans>=0 && ans<=3)) return { ok:false, msg:"Sätt korrekt svar (0–3)." };
-
-    return {
-      ok:true,
-      item:{
-        level,
-        type:"mcq",
-        q,
-        options: opts,
-        answer: ans
-      }
-    };
-  }
-
-  async function normalizeImgFromForm(){
-    const level = (($("imgLevel")?.value)||"E").trim();
-    const q = (($("imgQuestion")?.value)||"").trim();
-    const o0 = (($("imgOption0")?.value)||"").trim();
-    const o1 = (($("imgOption1")?.value)||"").trim();
-    const o2 = (($("imgOption2")?.value)||"").trim();
-    const o3 = (($("imgOption3")?.value)||"").trim();
-    const ans = parseInt((($("imgAnswer")?.value)||"0"),10);
-    const opts = [o0,o1,o2,o3];
-
-    if (!q) return { ok:false, msg:"Skriv en frågetext." };
-    if (opts.some(x=>!x)) return { ok:false, msg:"Fyll i alla 4 svarsalternativ." };
-    if (!(ans>=0 && ans<=3)) return { ok:false, msg:"Sätt korrekt svar (0–3)." };
-
-    const file = $("imgFile")?.files?.[0] || null;
-    let dataUrl = "";
-    if (file){
-      dataUrl = await new Promise((resolve)=>{
-        try{
-          const r = new FileReader();
-          r.onload = ()=>resolve(String(r.result||""));
-          r.onerror = ()=>resolve("");
-          r.readAsDataURL(file);
-        }catch(e){ resolve(""); }
-      });
-      if (!dataUrl) return { ok:false, msg:"Kunde inte läsa bilden. Prova igen." };
-    } else {
-      // Tillåt utan ny fil (om du bara vill redigera text) – men ny fråga bör ha bild
-      dataUrl = "";
-    }
-
-    return {
-      ok:true,
-      item:{
-        level,
-        type:"img",
-        q,
-        options: opts,
-        answer: ans,
-        image: dataUrl // nyckel vi renderar miniatyr från
-      }
-    };
-  }
-
-  function normalizeDragFromForm(previewItems){
-    const level = (($("dragLevel")?.value)||"E").trim();
-    const q = (($("dragQuestion")?.value)||"").trim();
-    const c1 = (($("dragColumn1")?.value)||"").trim();
-    const c2 = (($("dragColumn2")?.value)||"").trim();
-
-    if (!q) return { ok:false, msg:"Skriv en instruktion." };
-    if (!c1 || !c2) return { ok:false, msg:"Fyll i båda kolumnerna." };
-    if (!Array.isArray(previewItems) || previewItems.length===0) return { ok:false, msg:"Lägg till minst 1 objekt att dra." };
-
-    return {
-      ok:true,
-      item:{
-        level,
-        type:"drag",
-        q,
-        columns:[c1,c2],
-        items: previewItems.map(it=>({ text: it.text, correct: it.correct }))
-      }
-    };
-  }
-
-  function setText(id, t){
-    const el = $(id);
-    if (el) el.textContent = t;
-  }
-
-  /* =========================================================
-     Sektion 5B: RENDER – MCQ/IMG/DRAG (från state.bank)
-     ========================================================= */
-  function renderMcqList(){
-    const s = ensureBankArrays(safeLoadState() || {});
-    const list = $("mcqList");
-    const countEl = $("mcqCount");
-    if (!list) return;
-
-    list.innerHTML = "";
-    const arr = Array.isArray(s.bank.mcq) ? s.bank.mcq : [];
-    if (countEl) countEl.textContent = String(arr.length);
-
-    if (arr.length===0){
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.textContent = "Inga flervalsfrågor ännu.";
-      list.appendChild(li);
-      return;
-    }
-
-    arr.forEach((q, idx)=>{
-      const li = document.createElement("li");
-      li.className = "question-item";
-
-      const wrap = document.createElement("div");
-      wrap.style.display = "flex";
-      wrap.style.gap = "10px";
-      wrap.style.justifyContent = "space-between";
-      wrap.style.alignItems = "flex-start";
-
-      const left = document.createElement("div");
-      left.style.flex = "1 1 auto";
-
-      const title = document.createElement("div");
-      title.className = "mini";
-      title.style.marginBottom = "6px";
-      title.innerHTML = `<strong>[${(q.level||"E")}]</strong> ${escapeHtml(q.q||"")}`;
-      left.appendChild(title);
-
-      const opts = Array.isArray(q.options) ? q.options : [];
-      const ans = Number.isFinite(q.answer) ? q.answer : null;
-
-      const ul = document.createElement("ul");
-      ul.className = "goals-list mini";
-      ul.style.margin = "0";
-      ul.style.paddingLeft = "18px";
-
-      for (let i=0;i<opts.length;i++){
-        const oli = document.createElement("li");
-        const isCorrect = (ans===i);
-        oli.textContent = `${isCorrect ? "✅ " : ""}${opts[i] ?? ""}`;
-        ul.appendChild(oli);
-      }
-      left.appendChild(ul);
-
-      const right = document.createElement("div");
-      right.style.flex = "0 0 auto";
-      right.style.display = "flex";
-      right.style.gap = "6px";
-      right.style.alignItems = "center";
-
-      const del = document.createElement("button");
-      del.className = "btn btn-sm btn-danger";
-      del.type = "button";
-      del.textContent = "🗑️";
-      del.title = "Ta bort fråga";
-      del.dataset.action = "delete-mcq";
-      del.dataset.index = String(idx);
-
-      right.appendChild(del);
-
-      wrap.appendChild(left);
-      wrap.appendChild(right);
-      li.appendChild(wrap);
-      list.appendChild(li);
-    });
-  }
-
   function renderImgList(){
-    const s = ensureBankArrays(safeLoadState() || {});
     const list = $("imgList");
-    const countEl = $("imgCount");
+    const count = $("imgCount");
     if (!list) return;
 
-    list.innerHTML = "";
-    const arr = Array.isArray(s.bank.img) ? s.bank.img : [];
-    if (countEl) countEl.textContent = String(arr.length);
+    const s = ensureState();
+    const arr = s.bank.img || [];
+    if (count) count.textContent = String(arr.length);
 
-    if (arr.length===0){
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.textContent = "Inga bildfrågor ännu.";
-      list.appendChild(li);
+    list.innerHTML = "";
+    if (!arr.length){
+      list.innerHTML = `<li class="mini">Inga bildfrågor ännu.</li>`;
       return;
     }
 
     arr.forEach((q, idx)=>{
+      const src = pickImgSrc(q);
+      const opts = Array.isArray(q.options) ? q.options : [];
+      const a = Number.isFinite(q.answer) ? q.answer : null;
+
       const li = document.createElement("li");
       li.className = "question-item";
+      li.style.display = "flex";
+      li.style.gap = "10px";
+      li.style.alignItems = "flex-start";
+      li.style.justifyContent = "space-between";
 
-      const wrap = document.createElement("div");
-      wrap.style.display = "flex";
-      wrap.style.gap = "10px";
-      wrap.style.justifyContent = "space-between";
-      wrap.style.alignItems = "flex-start";
+      const leftWrap = document.createElement("div");
+      leftWrap.style.display = "flex";
+      leftWrap.style.gap = "10px";
+      leftWrap.style.flex = "1 1 auto";
 
-      const left = document.createElement("div");
-      left.style.display = "flex";
-      left.style.gap = "10px";
-      left.style.flex = "1 1 auto";
-
-      const thumbSrc = pickImgSrc(q);
-      const thumb = document.createElement("img");
-      thumb.alt = "Bild";
-      thumb.style.width = "54px";
-      thumb.style.height = "54px";
-      thumb.style.objectFit = "cover";
+      const thumb = document.createElement("div");
+      thumb.style.flex = "0 0 64px";
+      thumb.style.width = "64px";
+      thumb.style.height = "64px";
       thumb.style.borderRadius = "8px";
+      thumb.style.overflow = "hidden";
       thumb.style.border = "1px solid var(--border)";
-      thumb.src = thumbSrc || "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+      thumb.style.background = "rgba(255,255,255,0.04)";
+      thumb.style.display = "flex";
+      thumb.style.alignItems = "center";
+      thumb.style.justifyContent = "center";
 
-      const content = document.createElement("div");
-      content.style.flex = "1 1 auto";
+      if (src){
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = "Bildfråga";
+        img.style.width = "100%";
+        img.style.height = "100%";
+        img.style.objectFit = "cover";
+        thumb.appendChild(img);
+      } else {
+        thumb.innerHTML = `<span class="mini">🖼️</span>`;
+      }
+
+      const text = document.createElement("div");
+      text.style.flex = "1 1 auto";
 
       const title = document.createElement("div");
       title.className = "mini";
-      title.style.marginBottom = "6px";
-      title.innerHTML = `<strong>[${(q.level||"E")}]</strong> ${escapeHtml(q.q||"")}`;
-      content.appendChild(title);
-
-      const opts = Array.isArray(q.options) ? q.options : [];
-      const ans = Number.isFinite(q.answer) ? q.answer : null;
+      title.innerHTML = `<strong>${esc(q.level||"?")}</strong> • ${esc(q.q||"")}`;
+      text.appendChild(title);
 
       const ul = document.createElement("ul");
-      ul.className = "goals-list mini";
-      ul.style.margin = "0";
+      ul.className = "mini";
+      ul.style.margin = "6px 0 0";
       ul.style.paddingLeft = "18px";
+      opts.forEach((o, i)=>{
+        const liOpt = document.createElement("li");
+        const isCorrect = (a !== null && i === a);
+        liOpt.innerHTML = isCorrect ? `<strong>✅ ${esc(o)}</strong>` : esc(o);
+        ul.appendChild(liOpt);
+      });
+      text.appendChild(ul);
 
-      for (let i=0;i<opts.length;i++){
-        const oli = document.createElement("li");
-        const isCorrect = (ans===i);
-        oli.textContent = `${isCorrect ? "✅ " : ""}${opts[i] ?? ""}`;
-        ul.appendChild(oli);
-      }
-      content.appendChild(ul);
-
-      left.appendChild(thumb);
-      left.appendChild(content);
+      leftWrap.appendChild(thumb);
+      leftWrap.appendChild(text);
 
       const right = document.createElement("div");
       right.style.flex = "0 0 auto";
@@ -7070,79 +7100,88 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       right.style.gap = "6px";
       right.style.alignItems = "center";
 
-      const del = document.createElement("button");
-      del.className = "btn btn-sm btn-danger";
-      del.type = "button";
-      del.textContent = "🗑️";
-      del.title = "Ta bort fråga";
-      del.dataset.action = "delete-img";
-      del.dataset.index = String(idx);
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "btn btn-sm btn-danger";
+      btnDel.textContent = "🗑️";
+      btnDel.title = "Ta bort fråga";
+      btnDel.dataset.kind = "img";
+      btnDel.dataset.idx = String(idx);
 
-      right.appendChild(del);
+      right.appendChild(btnDel);
 
-      wrap.appendChild(left);
-      wrap.appendChild(right);
-      li.appendChild(wrap);
+      li.appendChild(leftWrap);
+      li.appendChild(right);
       list.appendChild(li);
     });
+  }
+
+  function inferDragItemCorrect(item){
+    if (!item || typeof item!=="object") return null;
+    if (Number.isFinite(item.correct)) return item.correct;
+    if (Number.isFinite(item.correctColumn)) return item.correctColumn;
+    if (Number.isFinite(item.col)) return item.col;
+    if (Number.isFinite(item.column)) return item.column;
+    if (Number.isFinite(item.target)) return item.target;
+    if (typeof item.correctIndex === "number") return item.correctIndex;
+    if (typeof item.correct === "string") return item.correct;
+    if (typeof item.correctColumn === "string") return item.correctColumn;
+    if (typeof item.colName === "string") return item.colName;
+    return null;
   }
 
   function renderDragList(){
-    const s = ensureBankArrays(safeLoadState() || {});
     const list = $("dragList");
-    const countEl = $("dragCount");
+    const count = $("dragCount");
     if (!list) return;
 
-    list.innerHTML = "";
-    const arr = Array.isArray(s.bank.drag) ? s.bank.drag : [];
-    if (countEl) countEl.textContent = String(arr.length);
+    const s = ensureState();
+    const arr = s.bank.drag || [];
+    if (count) count.textContent = String(arr.length);
 
-    if (arr.length===0){
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.textContent = "Inga Drag & Drop-frågor ännu.";
-      list.appendChild(li);
+    list.innerHTML = "";
+    if (!arr.length){
+      list.innerHTML = `<li class="mini">Inga drag & drop-frågor ännu.</li>`;
       return;
     }
 
     arr.forEach((q, idx)=>{
+      const cols = Array.isArray(q.columns) ? q.columns : [];
+      const items = Array.isArray(q.items) ? q.items : [];
+
       const li = document.createElement("li");
       li.className = "question-item";
-
-      const wrap = document.createElement("div");
-      wrap.style.display = "flex";
-      wrap.style.gap = "10px";
-      wrap.style.justifyContent = "space-between";
-      wrap.style.alignItems = "flex-start";
+      li.style.display = "flex";
+      li.style.gap = "10px";
+      li.style.alignItems = "flex-start";
+      li.style.justifyContent = "space-between";
 
       const left = document.createElement("div");
       left.style.flex = "1 1 auto";
 
-      const cols = Array.isArray(q.columns) ? q.columns : [];
-      const colA = cols[0] ?? "Kolumn 1";
-      const colB = cols[1] ?? "Kolumn 2";
-
       const title = document.createElement("div");
       title.className = "mini";
-      title.style.marginBottom = "6px";
-      title.innerHTML = `<strong>[${(q.level||"E")}]</strong> ${escapeHtml(q.q||"")} <span class="mini">(${escapeHtml(colA)} / ${escapeHtml(colB)})</span>`;
+      title.innerHTML = `<strong>${esc(q.level||"?")}</strong> • ${esc(q.q||"")}`;
       left.appendChild(title);
 
-      const items = Array.isArray(q.items) ? q.items : [];
+      const meta = document.createElement("div");
+      meta.className = "mini";
+      meta.style.marginTop = "6px";
+      meta.innerHTML = `<strong>Kolumner:</strong> ${esc(cols[0]||"Kolumn 1")} / ${esc(cols[1]||"Kolumn 2")}`;
+      left.appendChild(meta);
+
       const ul = document.createElement("ul");
-      ul.className = "goals-list mini";
-      ul.style.margin = "0";
+      ul.className = "mini";
+      ul.style.margin = "6px 0 0";
       ul.style.paddingLeft = "18px";
-
       items.forEach((it)=>{
-        const txt = (it && (it.text || it.label || it.value)) || "";
-        const corr = (it && (Number.isFinite(it.correct) ? it.correct : (Number.isFinite(it.correctColumn) ? it.correctColumn : null)));
-        const corrLabel = (corr===0) ? colA : (corr===1) ? colB : "?";
-        const oli = document.createElement("li");
-        oli.textContent = `${txt}  →  ✅ ${corrLabel}`;
-        ul.appendChild(oli);
+        const txt = (it && (it.text || it.label || it.value || it.item || it.name)) || "";
+        const corr = inferDragItemCorrect(it);
+        const corrTxt = (corr === 0 || corr === 1) ? (corr === 0 ? (cols[0]||"Kolumn 1") : (cols[1]||"Kolumn 2")) : String(corr ?? "?");
+        const liIt = document.createElement("li");
+        liIt.innerHTML = `<strong>${esc(txt)}</strong> → ✅ ${esc(corrTxt)}`;
+        ul.appendChild(liIt);
       });
-
       left.appendChild(ul);
 
       const right = document.createElement("div");
@@ -7151,594 +7190,607 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       right.style.gap = "6px";
       right.style.alignItems = "center";
 
-      const del = document.createElement("button");
-      del.className = "btn btn-sm btn-danger";
-      del.type = "button";
-      del.textContent = "🗑️";
-      del.title = "Ta bort fråga";
-      del.dataset.action = "delete-drag";
-      del.dataset.index = String(idx);
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "btn btn-sm btn-danger";
+      btnDel.textContent = "🗑️";
+      btnDel.title = "Ta bort fråga";
+      btnDel.dataset.kind = "drag";
+      btnDel.dataset.idx = String(idx);
 
-      right.appendChild(del);
+      right.appendChild(btnDel);
 
-      wrap.appendChild(left);
-      wrap.appendChild(right);
-      li.appendChild(wrap);
+      li.appendChild(left);
+      li.appendChild(right);
       list.appendChild(li);
     });
   }
 
-  function renderAllQuestionLists(){
+  function bindDeleteInLists(){
+    const root = $("teacherModal") || document;
+    if (root.dataset.fv5DelBound === "1") return;
+    root.dataset.fv5DelBound = "1";
+
+    on(root, "click", (e)=>{
+      const btn = e.target.closest("button[data-kind][data-idx]");
+      if (!btn) return;
+      const kind = btn.dataset.kind;
+      const idx = parseInt(btn.dataset.idx, 10);
+      if (!Number.isFinite(idx)) return;
+
+      const s = ensureState();
+      if (kind === "mcq") s.bank.mcq.splice(idx, 1);
+      if (kind === "img") s.bank.img.splice(idx, 1);
+      if (kind === "drag") s.bank.drag.splice(idx, 1);
+      safeSaveState(s);
+
+      if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
+      if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
+    });
+  }
+
+  function _fv5_renderAllQuestionLists(){
     renderMcqList();
     renderImgList();
     renderDragList();
   }
-
-  // Exponera (så andra sektioner kan kalla samma)
-  window._fv5_renderAllQuestionLists = renderAllQuestionLists;
+  window._fv5_renderAllQuestionLists = _fv5_renderAllQuestionLists;
   window.renderMcqList = renderMcqList;
   window.renderImgList = renderImgList;
   window.renderDragList = renderDragList;
+/* slut Sektion 5D: RENDER – MCQ/IMG/DRAG (listor + delete) */
 
-  function escapeHtml(str){
-    return String(str||"").replace(/[&<>"']/g, (m)=>({
-      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
-    }[m]));
-  }
+/* start Sektion 5E: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
+  function initQuestionForms(){
+    // ----- MCQ -----
+    const btnMcqAdd = $("btnMcqAdd");
+    if (btnMcqAdd && btnMcqAdd.dataset.fv5Bound !== "1"){
+      btnMcqAdd.dataset.fv5Bound = "1";
+      on(btnMcqAdd, "click", (e)=>{
+        e.preventDefault();
+        const s = ensureState();
 
-  /* =========================================================
-     Sektion 5C: BIND – DELETE (delegation i listor)
-     ========================================================= */
-  function bindDeleteDelegation(){
-    const maps = [
-      { id:"mcqList", key:"mcq", action:"delete-mcq" },
-      { id:"imgList", key:"img", action:"delete-img" },
-      { id:"dragList", key:"drag", action:"delete-drag" }
-    ];
+        const level = ($("mcqLevel")?.value || "E").trim();
+        const qText = ($("mcqQuestion")?.value || "").trim();
+        const o0 = ($("mcqOption0")?.value || "").trim();
+        const o1 = ($("mcqOption1")?.value || "").trim();
+        const o2 = ($("mcqOption2")?.value || "").trim();
+        const o3 = ($("mcqOption3")?.value || "").trim();
 
-    maps.forEach(m=>{
-      const host = $(m.id);
-      if (!host) return;
-      host.addEventListener("click", (ev)=>{
-        const btn = ev.target && ev.target.closest && ev.target.closest("button[data-action]");
-        if (!btn) return;
-        if (btn.dataset.action !== m.action) return;
+        // rätt svar: radio först, annars mcqAnswer
+        let ans = null;
+        const radios = qsa("input[name='mcqCorrect']");
+        const checked = radios.find(r=>r.checked);
+        if (checked) ans = parseInt(checked.value, 10);
+        if (!Number.isFinite(ans)){
+          const v = parseInt(($("mcqAnswer")?.value || "0"), 10);
+          ans = Number.isFinite(v) ? v : 0;
+        }
 
-        const idx = parseInt(btn.dataset.index||"-1",10);
-        if (!(idx>=0)) return;
-
-        const s = ensureBankArrays(safeLoadState() || {});
-        const arr = Array.isArray(s.bank[m.key]) ? s.bank[m.key] : [];
-        if (!arr[idx]) return;
-
-        arr.splice(idx, 1);
-        s.bank[m.key] = arr;
-        safeSaveState(s);
-
-        renderAllQuestionLists();
-        if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI();
-      });
-    });
-  }
-
-  /* =========================================================
-     Sektion 5D: BIND – MCQ FORM (Lägg till)
-     ========================================================= */
-  function bindMcqForm(){
-    const btnAdd = $("btnMcqAdd");
-    const btnClear = $("btnMcqClear");
-    if (btnAdd){
-      btnAdd.addEventListener("click", ()=>{
-        const res = normalizeMcqFromForm();
-        if (!res.ok){
-          alert(res.msg);
+        if (!qText || !o0 || !o1 || !o2 || !o3){
+          alert("Fyll i frågetext + alla 4 svarsalternativ.");
           return;
         }
-        const s = ensureBankArrays(safeLoadState() || {});
-        s.bank.mcq.push(res.item);
+
+        s.bank.mcq.push({
+          level,
+          type: "mcq",
+          q: qText,
+          options: [o0,o1,o2,o3],
+          answer: ans
+        });
+
         safeSaveState(s);
+        _fv5_renderAllQuestionLists();
+        if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
-        // Clear
-        if ($("mcqQuestion")) $("mcqQuestion").value = "";
-        ["mcqOption0","mcqOption1","mcqOption2","mcqOption3"].forEach(id=>{ if ($(id)) $(id).value=""; });
-        if ($("mcqAnswer")) $("mcqAnswer").value = "0";
-
-        renderAllQuestionLists();
-        if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI();
+        // rensa formulär (behåller nivå)
+        $("mcqQuestion").value = "";
+        $("mcqOption0").value = "";
+        $("mcqOption1").value = "";
+        $("mcqOption2").value = "";
+        $("mcqOption3").value = "";
+        $("mcqAnswer").value = "";
+        radios.forEach(r=>r.checked = false);
       });
     }
 
-    if (btnClear){
-      btnClear.addEventListener("click", ()=>{
-        if ($("mcqQuestion")) $("mcqQuestion").value = "";
-        ["mcqOption0","mcqOption1","mcqOption2","mcqOption3"].forEach(id=>{ if ($(id)) $(id).value=""; });
-        if ($("mcqAnswer")) $("mcqAnswer").value = "0";
+    const btnMcqClear = $("btnMcqClear");
+    if (btnMcqClear && btnMcqClear.dataset.fv5Bound !== "1"){
+      btnMcqClear.dataset.fv5Bound = "1";
+      on(btnMcqClear, "click", (e)=>{
+        e.preventDefault();
+        $("mcqQuestion").value = "";
+        $("mcqOption0").value = "";
+        $("mcqOption1").value = "";
+        $("mcqOption2").value = "";
+        $("mcqOption3").value = "";
+        $("mcqAnswer").value = "";
+        qsa("input[name='mcqCorrect']").forEach(r=>r.checked = false);
       });
     }
-  }
 
-  /* =========================================================
-     Sektion 5E: BIND – IMG + DRAG FORMS
-     ========================================================= */
-  function bindImgForm(){
-    const btnAdd = $("btnImgAdd");
-    const btnClear = $("btnImgClear");
-    const file = $("imgFile");
-    const preview = $("imgPreview");
+    // ----- IMG -----
+    const imgFile = $("imgFile");
+    const imgPreview = $("imgPreview");
+    let pendingImgDataUrl = "";
 
-    if (file && preview){
-      file.addEventListener("change", ()=>{
-        const f = file.files && file.files[0];
+    if (imgFile && imgFile.dataset.fv5Bound !== "1"){
+      imgFile.dataset.fv5Bound = "1";
+      on(imgFile, "change", ()=>{
+        const f = imgFile.files && imgFile.files[0];
+        pendingImgDataUrl = "";
         if (!f){
-          preview.textContent = "Ingen bild vald ännu.";
+          if (imgPreview) imgPreview.textContent = "Ingen bild vald ännu.";
           return;
         }
-        preview.textContent = `Vald bild: ${f.name}`;
+        const fr = new FileReader();
+        fr.onload = ()=>{
+          pendingImgDataUrl = String(fr.result||"");
+          if (imgPreview){
+            imgPreview.innerHTML = "";
+            const im = document.createElement("img");
+            im.src = pendingImgDataUrl;
+            im.alt = "Förhandsvisning";
+            im.style.maxWidth = "140px";
+            im.style.maxHeight = "120px";
+            im.style.borderRadius = "8px";
+            im.style.display = "block";
+            imgPreview.appendChild(im);
+          }
+        };
+        fr.readAsDataURL(f);
       });
     }
 
-    if (btnAdd){
-      btnAdd.addEventListener("click", async ()=>{
-        const res = await normalizeImgFromForm();
-        if (!res.ok){
-          alert(res.msg);
+    const btnImgAdd = $("btnImgAdd");
+    if (btnImgAdd && btnImgAdd.dataset.fv5Bound !== "1"){
+      btnImgAdd.dataset.fv5Bound = "1";
+      on(btnImgAdd, "click", (e)=>{
+        e.preventDefault();
+        const s = ensureState();
+
+        const level = ($("imgLevel")?.value || "E").trim();
+        const qText = ($("imgQuestion")?.value || "").trim();
+        const o0 = ($("imgOption0")?.value || "").trim();
+        const o1 = ($("imgOption1")?.value || "").trim();
+        const o2 = ($("imgOption2")?.value || "").trim();
+        const o3 = ($("imgOption3")?.value || "").trim();
+
+        let ans = null;
+        const radios = qsa("input[name='imgCorrect']");
+        const checked = radios.find(r=>r.checked);
+        if (checked) ans = parseInt(checked.value, 10);
+        if (!Number.isFinite(ans)){
+          const v = parseInt(($("imgAnswer")?.value || "0"), 10);
+          ans = Number.isFinite(v) ? v : 0;
+        }
+
+        if (!qText || !o0 || !o1 || !o2 || !o3){
+          alert("Fyll i frågetext + alla 4 svarsalternativ.");
           return;
         }
-        if (!res.item.image){
-          alert("Välj en bildfil för bildfrågan.");
+        if (!pendingImgDataUrl){
+          alert("Välj en bildfil först (så den kan sparas i frågan).");
           return;
         }
 
-        const s = ensureBankArrays(safeLoadState() || {});
-        s.bank.img.push(res.item);
+        s.bank.img.push({
+          level,
+          type: "img",
+          q: qText,
+          image: pendingImgDataUrl,
+          options: [o0,o1,o2,o3],
+          answer: ans
+        });
+
         safeSaveState(s);
+        _fv5_renderAllQuestionLists();
+        if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
-        // Clear
-        if ($("imgQuestion")) $("imgQuestion").value = "";
-        ["imgOption0","imgOption1","imgOption2","imgOption3"].forEach(id=>{ if ($(id)) $(id).value=""; });
-        if ($("imgAnswer")) $("imgAnswer").value = "0";
-        if (file) file.value = "";
-        if (preview) preview.textContent = "Ingen bild vald ännu.";
-
-        renderAllQuestionLists();
-        if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI();
+        // rensa
+        $("imgQuestion").value = "";
+        $("imgOption0").value = "";
+        $("imgOption1").value = "";
+        $("imgOption2").value = "";
+        $("imgOption3").value = "";
+        $("imgAnswer").value = "";
+        radios.forEach(r=>r.checked = false);
+        if (imgFile) imgFile.value = "";
+        pendingImgDataUrl = "";
+        if (imgPreview) imgPreview.textContent = "Ingen bild vald ännu.";
       });
     }
 
-    if (btnClear){
-      btnClear.addEventListener("click", ()=>{
-        if ($("imgQuestion")) $("imgQuestion").value = "";
-        ["imgOption0","imgOption1","imgOption2","imgOption3"].forEach(id=>{ if ($(id)) $(id).value=""; });
-        if ($("imgAnswer")) $("imgAnswer").value = "0";
-        if (file) file.value = "";
-        if (preview) preview.textContent = "Ingen bild vald ännu.";
-      });
-    }
-  }
-
-  // DRAG preview-items hålls i minne (per session)
-  let _fv5_dragPreviewItems = [];
-
-  function renderDragPreview(){
-    const ul = $("dragItemsPreview");
-    if (!ul) return;
-    ul.innerHTML = "";
-    if (_fv5_dragPreviewItems.length===0){
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.textContent = "Inga objekt ännu.";
-      ul.appendChild(li);
-      return;
-    }
-    _fv5_dragPreviewItems.forEach((it, idx)=>{
-      const li = document.createElement("li");
-      li.className = "mini";
-      li.style.display = "flex";
-      li.style.justifyContent = "space-between";
-      li.style.gap = "8px";
-      li.textContent = `${it.text} → ${it.correct===0 ? "Kolumn 1" : "Kolumn 2"}`;
-
-      const btn = document.createElement("button");
-      btn.className = "btn btn-sm btn-danger";
-      btn.type = "button";
-      btn.textContent = "🗑️";
-      btn.dataset.action = "delete-drag-preview";
-      btn.dataset.index = String(idx);
-
-      const right = document.createElement("span");
-      right.appendChild(btn);
-      li.appendChild(right);
-
-      ul.appendChild(li);
-    });
-  }
-
-  function bindDragForm(){
-    const btnAddItem = $("btnDragAddItem");
-    const btnSaveQ = $("btnDragAddQuestion");
-    const btnClear = $("btnDragClearForm");
-    const previewHost = $("dragItemsPreview");
-
-    if (previewHost){
-      previewHost.addEventListener("click", (ev)=>{
-        const btn = ev.target && ev.target.closest && ev.target.closest("button[data-action='delete-drag-preview']");
-        if (!btn) return;
-        const idx = parseInt(btn.dataset.index||"-1",10);
-        if (!(idx>=0)) return;
-        _fv5_dragPreviewItems.splice(idx,1);
-        renderDragPreview();
+    const btnImgClear = $("btnImgClear");
+    if (btnImgClear && btnImgClear.dataset.fv5Bound !== "1"){
+      btnImgClear.dataset.fv5Bound = "1";
+      on(btnImgClear, "click", (e)=>{
+        e.preventDefault();
+        $("imgQuestion").value = "";
+        $("imgOption0").value = "";
+        $("imgOption1").value = "";
+        $("imgOption2").value = "";
+        $("imgOption3").value = "";
+        $("imgAnswer").value = "";
+        qsa("input[name='imgCorrect']").forEach(r=>r.checked = false);
+        if (imgFile) imgFile.value = "";
+        pendingImgDataUrl = "";
+        if (imgPreview) imgPreview.textContent = "Ingen bild vald ännu.";
       });
     }
 
-    if (btnAddItem){
-      btnAddItem.addEventListener("click", ()=>{
-        const txt = (($("dragItemText")?.value)||"").trim();
-        const corr = parseInt((($("dragItemCorrect")?.value)||"0"),10);
-        if (!txt){
-          alert("Skriv ett objekt att dra.");
-          return;
-        }
-        _fv5_dragPreviewItems.push({ text: txt, correct: (corr===1?1:0) });
-        if ($("dragItemText")) $("dragItemText").value = "";
-        renderDragPreview();
+    // ----- DRAG -----
+    const dragItemsPreview = $("dragItemsPreview");
+    let pendingDragItems = [];
+
+    function renderPendingDragItems(){
+      if (!dragItemsPreview) return;
+      dragItemsPreview.innerHTML = "";
+      if (!pendingDragItems.length){
+        dragItemsPreview.innerHTML = `<li class="mini">Inga objekt tillagda ännu.</li>`;
+        return;
+      }
+      pendingDragItems.forEach((it, i)=>{
+        const li = document.createElement("li");
+        li.className = "mini";
+        li.textContent = `${it.text} → Kolumn ${it.correct+1}`;
+        dragItemsPreview.appendChild(li);
       });
     }
 
-    if (btnSaveQ){
-      btnSaveQ.addEventListener("click", ()=>{
-        const res = normalizeDragFromForm(_fv5_dragPreviewItems);
-        if (!res.ok){
-          alert(res.msg);
-          return;
-        }
-        const s = ensureBankArrays(safeLoadState() || {});
-        s.bank.drag.push(res.item);
+    const btnDragAddItem = $("btnDragAddItem");
+    if (btnDragAddItem && btnDragAddItem.dataset.fv5Bound !== "1"){
+      btnDragAddItem.dataset.fv5Bound = "1";
+      on(btnDragAddItem, "click", (e)=>{
+        e.preventDefault();
+        const t = ($("dragItemText")?.value || "").trim();
+        const c = parseInt(($("dragItemCorrect")?.value || "0"), 10);
+        if (!t) return alert("Skriv ett objekt att dra.");
+        pendingDragItems.push({ text: t, correct: (c===1?1:0) });
+        $("dragItemText").value = "";
+        renderPendingDragItems();
+      });
+    }
+
+    const btnDragAddQuestion = $("btnDragAddQuestion");
+    if (btnDragAddQuestion && btnDragAddQuestion.dataset.fv5Bound !== "1"){
+      btnDragAddQuestion.dataset.fv5Bound = "1";
+      on(btnDragAddQuestion, "click", (e)=>{
+        e.preventDefault();
+        const s = ensureState();
+
+        const level = ($("dragLevel")?.value || "E").trim();
+        const qText = ($("dragQuestion")?.value || "").trim();
+        const c1 = ($("dragColumn1")?.value || "").trim();
+        const c2 = ($("dragColumn2")?.value || "").trim();
+
+        if (!qText || !c1 || !c2) return alert("Fyll i instruktion + båda kolumner.");
+        if (!pendingDragItems.length) return alert("Lägg till minst ett objekt att dra.");
+
+        s.bank.drag.push({
+          level,
+          type: "drag",
+          q: qText,
+          columns: [c1, c2],
+          items: pendingDragItems.slice()
+        });
+
         safeSaveState(s);
+        _fv5_renderAllQuestionLists();
+        if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
-        // Clear form + preview
-        if ($("dragQuestion")) $("dragQuestion").value = "";
-        if ($("dragColumn1")) $("dragColumn1").value = "";
-        if ($("dragColumn2")) $("dragColumn2").value = "";
-        _fv5_dragPreviewItems = [];
-        renderDragPreview();
-
-        renderAllQuestionLists();
-        if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI();
+        // rensa
+        $("dragQuestion").value = "";
+        $("dragColumn1").value = "";
+        $("dragColumn2").value = "";
+        $("dragItemText").value = "";
+        pendingDragItems = [];
+        renderPendingDragItems();
       });
     }
 
-    if (btnClear){
-      btnClear.addEventListener("click", ()=>{
-        if ($("dragQuestion")) $("dragQuestion").value = "";
-        if ($("dragColumn1")) $("dragColumn1").value = "";
-        if ($("dragColumn2")) $("dragColumn2").value = "";
-        if ($("dragItemText")) $("dragItemText").value = "";
-        if ($("dragItemCorrect")) $("dragItemCorrect").value = "0";
-        _fv5_dragPreviewItems = [];
-        renderDragPreview();
+    const btnDragClearForm = $("btnDragClearForm");
+    if (btnDragClearForm && btnDragClearForm.dataset.fv5Bound !== "1"){
+      btnDragClearForm.dataset.fv5Bound = "1";
+      on(btnDragClearForm, "click", (e)=>{
+        e.preventDefault();
+        $("dragQuestion").value = "";
+        $("dragColumn1").value = "";
+        $("dragColumn2").value = "";
+        $("dragItemText").value = "";
+        pendingDragItems = [];
+        renderPendingDragItems();
       });
     }
 
-    renderDragPreview();
+    renderPendingDragItems();
   }
 
-  /* =========================================================
-     Sektion 5F: ROSTER – ÖPPNA/RENDER/SAVE till moln-bank-doc
-     ========================================================= */
-  function rosterRowTemplate(row){
+  window.initQuestionForms = initQuestionForms;
+/* slut Sektion 5E: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
+
+/* start Sektion 5F: ROSTER (öppna + rader + spara i moln-bank) */
+  function buildRosterRow(row){
     const wrap = document.createElement("div");
     wrap.className = "card-row";
     wrap.style.gap = "8px";
     wrap.style.flexWrap = "wrap";
-    wrap.style.marginBottom = "8px";
-
-    const nameField = document.createElement("div");
-    nameField.className = "field";
-    nameField.style.flex = "1 1 180px";
+    wrap.style.marginTop = "6px";
 
     const name = document.createElement("input");
     name.className = "input";
-    name.placeholder = "Elevens namn...";
-    name.value = row.name || "";
-    name.dataset.role = "roster-name";
-
-    nameField.appendChild(name);
-
-    const emailField = document.createElement("div");
-    emailField.className = "field";
-    emailField.style.flex = "1 1 220px";
+    name.placeholder = "Namn";
+    name.style.flex = "1 1 160px";
+    name.value = (row && row.name) ? String(row.name) : "";
 
     const email = document.createElement("input");
     email.className = "input";
-    email.placeholder = "e-post (valfritt)...";
-    email.value = row.email || "";
-    email.dataset.role = "roster-email";
-
-    emailField.appendChild(email);
-
-    const tokenField = document.createElement("div");
-    tokenField.className = "field";
-    tokenField.style.flex = "0 0 160px";
+    email.placeholder = "E-post (valfritt)";
+    email.style.flex = "1 1 220px";
+    email.value = (row && row.email) ? String(row.email) : "";
 
     const token = document.createElement("input");
     token.className = "input";
-    token.readOnly = true;
-    token.value = row.token || genToken(10);
-    token.title = "Token (auto)";
-    token.dataset.role = "roster-token";
+    token.placeholder = "Token";
+    token.style.flex = "0 0 140px";
+    token.value = (row && row.token) ? String(row.token) : "";
 
-    tokenField.appendChild(token);
+    const btnTok = document.createElement("button");
+    btnTok.type = "button";
+    btnTok.className = "btn btn-sm";
+    btnTok.textContent = "🎟️";
+    btnTok.title = "Skapa token";
+    btnTok.style.flex = "0 0 auto";
 
-    const delField = document.createElement("div");
-    delField.className = "field";
-    delField.style.flex = "0 0 56px";
+    const btnDel = document.createElement("button");
+    btnDel.type = "button";
+    btnDel.className = "btn btn-sm btn-danger";
+    btnDel.textContent = "🗑️";
+    btnDel.title = "Ta bort elevrad";
+    btnDel.style.flex = "0 0 auto";
 
-    const del = document.createElement("button");
-    del.className = "btn btn-sm btn-danger";
-    del.type = "button";
-    del.textContent = "🗑️";
-    del.title = "Ta bort rad";
-    del.dataset.role = "roster-del";
+    btnTok.addEventListener("click", (e)=>{
+      e.preventDefault();
+      if (!token.value.trim()) token.value = genToken(10);
+    });
 
-    delField.appendChild(del);
+    btnDel.addEventListener("click", (e)=>{
+      e.preventDefault();
+      wrap.remove();
+    });
 
-    wrap.appendChild(nameField);
-    wrap.appendChild(emailField);
-    wrap.appendChild(tokenField);
-    wrap.appendChild(delField);
+    wrap.appendChild(name);
+    wrap.appendChild(email);
+    wrap.appendChild(token);
+    wrap.appendChild(btnTok);
+    wrap.appendChild(btnDel);
+
+    wrap._fv5_getRow = ()=>({
+      name: name.value.trim(),
+      email: email.value.trim(),
+      token: token.value.trim() || genToken(10)
+    });
 
     return wrap;
   }
 
-  function getRosterFromRows(){
-    const host = $("rosterRows");
-    if (!host) return [];
-    const rows = Array.from(host.children);
-    const out = [];
-
-    rows.forEach(r=>{
-      const name = (r.querySelector("input[data-role='roster-name']")?.value||"").trim();
-      const email = (r.querySelector("input[data-role='roster-email']")?.value||"").trim();
-      const token = (r.querySelector("input[data-role='roster-token']")?.value||"").trim() || genToken(10);
-
-      if (!name && !email) return; // hoppa tomma rader
-      out.push({ name, email, token });
-    });
-
-    // dedupe token om olycka
-    const seen = new Set();
-    out.forEach(e=>{
-      while (seen.has(e.token)) e.token = genToken(10);
-      seen.add(e.token);
-    });
-
-    return out;
+  async function readRosterFromCloud(ownerUid, bankId){
+    const db = getDb();
+    if (!db) return { ok:false, err:"NO_DB", roster:[] };
+    const ref = db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId);
+    const snap = await ref.get();
+    const data = snap.exists ? (snap.data()||{}) : {};
+    const roster = Array.isArray(data.roster) ? data.roster : [];
+    return { ok:true, roster };
   }
 
-  function setRosterRows(roster){
+  async function saveRosterToCloud(ownerUid, bankId, roster){
+    const db = getDb();
+    if (!db) return { ok:false, err:"NO_DB" };
+    const ref = db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId);
+    await ref.set({
+      roster: roster,
+      updatedAt: serverTS()
+    }, { merge:true });
+    return { ok:true };
+  }
+
+  async function openRosterModal(ownerUid, bankId){
+    const modal = $("bankRosterModal");
     const host = $("rosterRows");
-    if (!host) return;
+    if (!modal || !host) return;
+
+    modal.dataset.ownerUid = ownerUid || "";
+    modal.dataset.bankId = bankId || "";
+
+    // Hämta roster från molnet (om möjligt)
+    let roster = [];
+    try{
+      const res = await readRosterFromCloud(ownerUid, bankId);
+      if (res.ok) roster = res.roster || [];
+    }catch(e){}
 
     host.innerHTML = "";
-    const arr = Array.isArray(roster) ? roster : [];
-
-    if (arr.length===0){
-      // minst en rad
-      host.appendChild(rosterRowTemplate({ name:"", email:"", token: genToken(10) }));
-      return;
-    }
-
-    arr.forEach(r=>{
-      host.appendChild(rosterRowTemplate(r));
-    });
-  }
-
-  async function loadRosterFromCloudIfPossible(){
-    const ref = getActiveBankRef();
-    if (!ref) return null;
-    try{
-      const snap = await ref.get();
-      if (!snap.exists) return [];
-      const data = snap.data() || {};
-      return Array.isArray(data.roster) ? data.roster : [];
-    }catch(e){
-      warn("Kunde inte läsa roster från moln (fallback lokalt).", e);
-      return null;
-    }
-  }
-
-  async function openRosterModal(){
-    const modal = $("bankRosterModal");
-    if (!modal) return;
-
-    // Preferera moln-roster (om finns), annars local state
-    let roster = await loadRosterFromCloudIfPossible();
-    if (roster === null){
-      const s = ensureBankArrays(safeLoadState() || {});
-      roster = Array.isArray(s.activeBank.roster) ? s.activeBank.roster : [];
-    }
-
-    setRosterRows(roster);
-
-    // bind delete row delegation (per öppning)
-    const host = $("rosterRows");
-    if (host && !host.__fv5_bound){
-      host.__fv5_bound = true;
-      host.addEventListener("click", (ev)=>{
-        const btn = ev.target && ev.target.closest && ev.target.closest("button[data-role='roster-del']");
-        if (!btn) return;
-        const row = btn.closest(".card-row");
-        if (row && row.parentNode) row.parentNode.removeChild(row);
-      });
+    if (roster.length){
+      roster.forEach(r=>host.appendChild(buildRosterRow(r)));
+    } else {
+      host.appendChild(buildRosterRow({}));
     }
 
     modal.classList.remove("hidden");
-    if (typeof window._fv5_hydrateLog === "function") window._fv5_hydrateLog("openRosterModal", { ok:true });
+    modal.style.display = "block";
   }
 
-  async function saveRosterToCloud(){
-    const ref = getActiveBankRef();
-    const s = ensureBankArrays(safeLoadState() || {});
-    const roster = getRosterFromRows();
+  async function handleSaveRoster(){
+    const modal = $("bankRosterModal");
+    const host = $("rosterRows");
+    if (!modal || !host) return;
 
-    // Uppdatera state alltid (även om moln saknas)
-    s.activeBank.roster = roster;
-    s.activeBank.rosterLen = roster.length;
-    safeSaveState(s);
+    const ownerUid = (modal.dataset.ownerUid || "").trim();
+    const bankId = (modal.dataset.bankId || "").trim();
 
-    if (!ref){
-      alert("Saknar aktiv moln-bank (ownerUid/bankId). Roster sparad lokalt.");
-      if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI();
+    if (!ownerUid || !bankId){
+      // fallback: läs från activeBank i state
+      const s = ensureState();
+      const a = s.activeBank || {};
+      const ou = String(a.ownerUid||"").trim();
+      const bi = String(a.bankId||"").trim();
+      if (!ou || !bi){
+        alert("Saknar aktiv bank (ownerUid/bankId). Välj en moln-bank först.");
+        return;
+      }
+      modal.dataset.ownerUid = ou;
+      modal.dataset.bankId = bi;
+    }
+
+    const rows = Array.from(host.children).filter(el=>typeof el._fv5_getRow === "function");
+    const roster = rows.map(el=>el._fv5_getRow()).filter(r=>r.name);
+
+    // Se till att token alltid finns
+    roster.forEach(r=>{ if (!r.token) r.token = genToken(10); });
+
+    // Spara till moln-bank doc (merge)
+    const ou2 = (modal.dataset.ownerUid||"").trim();
+    const bi2 = (modal.dataset.bankId||"").trim();
+    try{
+      const res = await saveRosterToCloud(ou2, bi2, roster);
+      if (!res.ok) throw new Error(res.err || "SAVE_FAIL");
+    }catch(e){
+      alert("Kunde inte spara elevlista till molnet. Kontrollera internet/Firebase.");
       return;
     }
 
-    // Skriv till moln (merge)
-    const payload = {
-      roster,
-      updatedAt: (window.firebase && firebase.firestore && firebase.firestore.FieldValue)
-        ? firebase.firestore.FieldValue.serverTimestamp()
-        : new Date()
-    };
-
-    // retry 1 gång (om webchannel strular)
-    try{
-      await ref.set(payload, { merge:true });
-    }catch(e1){
-      warn("Roster-save failed, retry once…", e1);
-      await sleep(450);
-      await ref.set(payload, { merge:true });
-    }
-
-    // Uppdatera status/indikatorer
-    if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI();
-    if (typeof window.tryRefreshRosterTabs==="function") window.tryRefreshRosterTabs();
-
-    log(`Elevlista sparad till moln-bank. Elever: ${roster.length}`);
-    if (typeof window._fv5_hydrateLog === "function") window._fv5_hydrateLog("after-roster-save", { rosterLen: roster.length });
-  }
-
-  function closeRosterModal(){
-    const modal = $("bankRosterModal");
-    if (modal) modal.classList.add("hidden");
-  }
-
-  function bindRosterButtons(){
-    const btnClose = $("btnCloseRosterModal");
-    const btnAddRow = $("btnRosterAddRow");
-    const btnSave = $("btnRosterSave");
-
-    if (btnClose) btnClose.addEventListener("click", closeRosterModal);
-
-    if (btnAddRow){
-      btnAddRow.addEventListener("click", ()=>{
-        const host = $("rosterRows");
-        if (!host) return;
-        host.appendChild(rosterRowTemplate({ name:"", email:"", token: genToken(10) }));
-      });
-    }
-
-    if (btnSave){
-      btnSave.addEventListener("click", async ()=>{
-        try{
-          await saveRosterToCloud();
-        }catch(e){
-          err("Roster-save crashed:", e);
-          alert("Kunde inte spara elevlistan. Kolla internet/Firebase och prova igen.");
-        }
-      });
-    }
-
-    // Exponera globalt (så befintlig kod kan anropa)
-    window.openRosterModal = openRosterModal;
-    window._fv5_openRosterModal = openRosterModal;
-  }
-
-  /* =========================================================
-     Sektion 5G: HOOK – när bank/teacher UI uppdateras
-     (Fixar ditt fall: state har frågor men DOM-listerna visar 0)
-     ========================================================= */
-  function hookUpdateBankStatusUI(){
-    const orig = window.updateBankStatusUI;
-    if (typeof orig !== "function") return;
-
-    if (orig.__fv5_wrapped) return;
-    function wrapped(){
-      try{ orig.apply(this, arguments); }catch(e){}
-      try{
-        // Efter bankstatus uppdateras: rendera om listor från state.bank
-        renderAllQuestionLists();
-      }catch(e){}
-      try{
-        // Synka rosterLen om vi har roster i state.activeBank
-        const s = ensureBankArrays(safeLoadState() || {});
-        if (Array.isArray(s.activeBank.roster)) s.activeBank.rosterLen = s.activeBank.roster.length;
-        safeSaveState(s);
-      }catch(e){}
-      try{
-        // Exit-indikator
-        updateExitIndicator();
-      }catch(e){}
-    }
-    wrapped.__fv5_wrapped = true;
-    window.updateBankStatusUI = wrapped;
-  }
-
-  /* =========================================================
-     Sektion 5H: EXIT – enkel indikator i UI (ej elevlogik)
-     ========================================================= */
-  function updateExitIndicator(){
-    const s = ensureBankArrays(safeLoadState() || {});
-    const isExit = String(s.activeMode||"game") === "exit";
-    const tabExit = $("tab-exit");
-    if (!tabExit) return;
-
-    // “Badge” via title (ingen CSS-ändring)
-    tabExit.title = isExit ? "EXIT-läge valt (indikator)" : "";
-  }
-
-  function bindExitTab(){
-    const tabExit = $("tab-exit");
-    if (!tabExit) return;
-    tabExit.addEventListener("click", ()=>{
-      const s = ensureBankArrays(safeLoadState() || {});
-      s.activeMode = "exit";
-      safeSaveState(s);
-      updateExitIndicator();
-    });
-  }
-
-  /* =========================================================
-     Sektion 5I: INIT – bind + initial render
-     ========================================================= */
-  function initSection5(){
-    // Säkerställ state-form
-    const s = ensureBankArrays(safeLoadState() || {});
+    // Uppdatera local state (för att “Elever: X” ska uppdateras direkt)
+    const s = ensureState();
+    s.activeBank = s.activeBank || {};
+    s.activeBank.ownerUid = ou2;
+    s.activeBank.bankId = bi2;
+    s.activeBank.rosterLen = roster.length;
+    s.activeBank.roster = roster;
     safeSaveState(s);
 
-    bindDeleteDelegation();
-    bindMcqForm();
-    bindImgForm();
-    bindDragForm();
-    bindRosterButtons();
-    bindExitTab();
-
-    hookUpdateBankStatusUI();
-
-    // Initial render (så listor fylls även om tab öppnas senare)
-    renderAllQuestionLists();
-    updateExitIndicator();
+    if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
   }
 
-  // Starta när DOM finns
+  window._fv5_openRosterModal = openRosterModal;
+  window.handleSaveRoster = handleSaveRoster;
+
+  function bindRosterModalButtons(){
+    const modal = $("bankRosterModal");
+    const host = $("rosterRows");
+    const btnAdd = $("btnRosterAddRow");
+    const btnSave = $("btnRosterSave");
+    const btnClose = $("btnCloseRosterModal");
+    if (!modal || !host) return;
+
+    if (btnAdd && btnAdd.dataset.fv5Bound !== "1"){
+      btnAdd.dataset.fv5Bound = "1";
+      on(btnAdd, "click", (e)=>{
+        e.preventDefault();
+        host.appendChild(buildRosterRow({}));
+      });
+    }
+
+    if (btnSave && btnSave.dataset.fv5Bound !== "1"){
+      btnSave.dataset.fv5Bound = "1";
+      on(btnSave, "click", async (e)=>{
+        e.preventDefault();
+        await handleSaveRoster();
+      });
+    }
+
+    if (btnClose && btnClose.dataset.fv5Bound !== "1"){
+      btnClose.dataset.fv5Bound = "1";
+      on(btnClose, "click", (e)=>{
+        e.preventDefault();
+        modal.classList.add("hidden");
+        modal.style.display = "none";
+      });
+    }
+  }
+
+  // Delegation: öppna roster om något element har data-bank-id/data-owner-uid
+  function bindRosterOpenButtons(){
+    if (document.body.dataset.fv5RosterOpenBound === "1") return;
+    document.body.dataset.fv5RosterOpenBound = "1";
+
+    on(document, "click", async (e)=>{
+      const t = e.target.closest("[data-action='roster'],[data-open-roster='1'],.btn-roster,#btnOpenRosterModal,#btnOpenRoster");
+      if (!t) return;
+
+      e.preventDefault();
+      const s = ensureState();
+      const a = s.activeBank || {};
+      const ownerUid = (t.dataset.ownerUid || t.dataset.owner || a.ownerUid || "").trim();
+      const bankId = (t.dataset.bankId || t.dataset.bank || a.bankId || "").trim();
+
+      if (!ownerUid || !bankId){
+        alert("Saknar bank-id/ownerUid. Välj en bank i molnlistan först.");
+        return;
+      }
+      await openRosterModal(ownerUid, bankId);
+    });
+  }
+/* slut Sektion 5F: ROSTER (öppna + rader + spara i moln-bank) */
+
+/* start Sektion 5G: BANK-STATUS UI (minimalt, så det inte blir undefined) */
+  function updateBankStatusUI(){
+    // Om din kodbas redan har en bättre version: behåll den.
+    if (window._fv5_updateBankStatusUI_real) return window._fv5_updateBankStatusUI_real();
+
+    const s = ensureState();
+    const a = s.activeBank || {};
+    const counts = bankCounts(s.bank);
+
+    const status = $("cloudBankStatus");
+    if (status){
+      const name = a.name ? String(a.name) : "(ingen)";
+      const id = a.bankId ? String(a.bankId) : "-";
+      const upd = nowStamp();
+      const rosterLen = Number.isFinite(a.rosterLen) ? a.rosterLen : (Array.isArray(a.roster) ? a.roster.length : 0);
+      const activeTxt = "✅ Aktiv";
+      status.textContent = `${name} • Uppd: ${upd} ${activeTxt}  ID: ${id} • Frågor: ${counts.mcq} MCQ, ${counts.img} Bild, ${counts.drag} Drag • Elever: ${rosterLen}`;
+    }
+
+    // Exit-indikator (enkel): markera exit-tabben om activeMode=exit
+    const tabExit = $("tab-exit");
+    if (tabExit){
+      if (String(s.activeMode||"") === "exit") tabExit.classList.add("active");
+    }
+  }
+
+  // Om det redan finns updateBankStatusUI från tidigare version, spara den som “real”
+  if (typeof window.updateBankStatusUI === "function" && window.updateBankStatusUI !== updateBankStatusUI){
+    window._fv5_updateBankStatusUI_real = window.updateBankStatusUI;
+  }
+  window.updateBankStatusUI = updateBankStatusUI;
+/* slut Sektion 5G: BANK-STATUS UI (minimalt, så det inte blir undefined) */
+
+/* start Sektion 5H: INIT (bind allt + första render) */
+  function fv5_init(){
+    bindTeacherModeButton();
+    bindTeacherModalClose();
+    bindTabs();
+    bindDeleteInLists();
+    initQuestionForms();
+    bindRosterModalButtons();
+    bindRosterOpenButtons();
+
+    // Första render när lärarläget öppnas senare
+    _fv5_renderAllQuestionLists();
+    updateBankStatusUI();
+  }
+
   if (document.readyState === "loading"){
-    document.addEventListener("DOMContentLoaded", initSection5);
+    document.addEventListener("DOMContentLoaded", fv5_init);
   } else {
-    initSection5();
+    fv5_init();
   }
-
 })();
+/* slut Sektion 5H: INIT (bind allt + första render) */
 </script>
-<!-- slut SEKTION 5: LÄRAR-UI (frågeformulär, list-render, roster & exit-indikator) -->
+<!-- slut SEKTION 5: UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit) -->
 
 
 
