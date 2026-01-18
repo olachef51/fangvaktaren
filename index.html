@@ -6744,7 +6744,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 "use strict";
 /* =========================================================
    SEKTION 5 – UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit)
-   ÄNDRING: Återställde bindning för lärarlägeknapp + frågeformulär (MCQ/IMG/DRAG) + roster till moln-bank. (ca 430 rader)
+   ÄNDRING: Fixade teacherGate (Fortsätt/Avbryt + Enter) så lärarläge öppnar teacherModal efter lösenord. (ca 90 rader)
    ========================================================= */
 
 /* start Sektion 5A: HELPERS (DOM + state + safe) */
@@ -6881,6 +6881,115 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       modal.dataset.fv5Bound = "1";
       on(modal, "click", (e)=>{
         if (e.target === modal) closeTeacherModal();
+      });
+    }
+  }
+
+  function _fv5_resolveTeacherPassword(){
+    const gate = $("teacherGate");
+    const tryStr = (v)=> (typeof v === "string" && v.trim()) ? v.trim() : "";
+
+    // 1) data-attribut på teacherGate
+    if (gate){
+      const ds = gate.dataset || {};
+      const p1 = tryStr(ds.teacherPassword);
+      const p2 = tryStr(ds.password);
+      const p3 = tryStr(gate.getAttribute("data-teacher-password"));
+      const p4 = tryStr(gate.getAttribute("data-password"));
+      if (p1) return p1;
+      if (p2) return p2;
+      if (p3) return p3;
+      if (p4) return p4;
+    }
+
+    // 2) vanliga globala konstanter (om de finns i din kodbas)
+    const cands = [window.TEACHER_PASSWORD, window.teacherPassword, window.FV_TEACHER_PASSWORD];
+    for (const c of cands){
+      const p = tryStr(c);
+      if (p) return p;
+    }
+
+    // 3) inget hittat
+    return "";
+  }
+
+  async function _fv5_verifyTeacherPassword(entered){
+    // Om du redan har en verifierare globalt: använd den först
+    if (typeof window.verifyTeacherPassword === "function"){
+      try{
+        const out = window.verifyTeacherPassword(entered);
+        if (out && typeof out.then === "function") return !!(await out);
+        return !!out;
+      }catch(e){
+        return false;
+      }
+    }
+
+    // Fallback: jämför med konfigurerat lösenord (data-/global)
+    const expected = _fv5_resolveTeacherPassword();
+    if (!expected) return null; // signal: ej konfigurerat
+    return String(entered||"") === expected;
+  }
+
+  function bindTeacherGateButtons(){
+    const gate = $("teacherGate");
+    if (!gate) return;
+    if (gate.dataset.fv5GateBound === "1") return;
+    gate.dataset.fv5GateBound = "1";
+
+    const btnOk = $("btnTeacherConfirm");
+    const btnCancel = $("btnTeacherCancel");
+    const inp = $("teacherPasswordInput");
+
+    // Avbryt = stäng endast gate
+    if (btnCancel && btnCancel.dataset.fv5Bound !== "1"){
+      btnCancel.dataset.fv5Bound = "1";
+      on(btnCancel, "click", (e)=>{
+        e.preventDefault();
+        _fv5_hide(gate);
+      });
+    }
+
+    async function attemptLogin(){
+      const entered = (inp && inp.value) ? String(inp.value) : "";
+      const res = await _fv5_verifyTeacherPassword(entered);
+
+      if (res === null){
+        alert("Lösenord är inte konfigurerat i denna version (teacherGate saknar data-teacher-password).");
+        return;
+      }
+      if (!res){
+        alert("Fel lösenord.");
+        if (inp) inp.focus();
+        return;
+      }
+
+      _fv5_hide(gate);
+      openTeacherModal();
+      window._fv5TeacherModeOpen = true;
+      try{ document.body.dataset.fvTeacher = "1"; }catch(e){}
+      console.log("[FV] Lärarläge öppet");
+      if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
+    }
+
+    // Fortsätt/OK
+    if (btnOk && btnOk.dataset.fv5Bound !== "1"){
+      btnOk.dataset.fv5Bound = "1";
+      on(btnOk, "click", async (e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        await attemptLogin();
+      });
+    }
+
+    // Enter i lösenordsfältet
+    if (inp && inp.dataset.fv5Bound !== "1"){
+      inp.dataset.fv5Bound = "1";
+      on(inp, "keydown", async (e)=>{
+        if (e.key === "Enter"){
+          e.preventDefault();
+          await attemptLogin();
+        }
       });
     }
   }
@@ -7770,6 +7879,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 /* start Sektion 5H: INIT (bind allt + första render) */
   function fv5_init(){
     bindTeacherModeButton();
+    bindTeacherGateButtons();
     bindTeacherModalClose();
     bindTabs();
     bindDeleteInLists();
