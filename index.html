@@ -6744,7 +6744,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 "use strict";
 /* =========================================================
    SEKTION 5 – UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit)
-   ÄNDRING: Låste teacherGate-lösenord fallback till "password" så lärarläge alltid kan öppnas. (ca 10 rader)
+   ÄNDRING: Tvingar teacherGate att alltid ha data-teacher-password="password" + verifierar lokalt (ingen “inte konfigurerat”-varning). (ca 25 rader)
    ========================================================= */
 
 /* start Sektion 5A: HELPERS (DOM + state + safe) */
@@ -6823,13 +6823,24 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   function _fv5_show(el){
     if (!el) return;
     el.classList.remove("hidden");
-    // många av dina backdrops bygger på flex
     if (!el.style.display || el.style.display === "none") el.style.display = "flex";
   }
   function _fv5_hide(el){
     if (!el) return;
     el.classList.add("hidden");
     el.style.display = "none";
+  }
+
+  function _fv5_forceTeacherPasswordConfig(){
+    const gate = $("teacherGate");
+    if (!gate) return;
+    const pass = "password";
+    try{
+      if (gate.dataset && !gate.dataset.teacherPassword) gate.dataset.teacherPassword = pass;
+      gate.setAttribute("data-teacher-password", pass);
+      gate.setAttribute("data-password", pass);
+      gate.setAttribute("data-teacherPassword", pass);
+    }catch(e){}
   }
 
   function openTeacherModal(){
@@ -6841,7 +6852,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     _fv5_hide(modal);
   }
 
-  // Viktigt: gör funktionen global så den inte blir "undefined" i konsoltest
   window.openTeacherModal = openTeacherModal;
   window.closeTeacherModal = closeTeacherModal;
 
@@ -6854,9 +6864,9 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     on(btn, "click", (e)=>{
       e.preventDefault();
       e.stopPropagation();
-      // Om gate finns i din kodbas, öppna den annars direkt modalen
       const gate = $("teacherGate");
       if (gate){
+        _fv5_forceTeacherPasswordConfig();
         _fv5_show(gate);
         const inp = $("teacherPasswordInput");
         if (inp) setTimeout(()=>inp.focus(), 10);
@@ -6876,7 +6886,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       on(btnClose, "click", (e)=>{ e.preventDefault(); closeTeacherModal(); });
     }
 
-    // Klick utanför själva rutan stänger (om du vill)
     if (modal.dataset.fv5Bound !== "1"){
       modal.dataset.fv5Bound = "1";
       on(modal, "click", (e)=>{
@@ -6889,7 +6898,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const gate = $("teacherGate");
     const tryStr = (v)=> (typeof v === "string" && v.trim()) ? v.trim() : "";
 
-    // 1) data-attribut på teacherGate
     if (gate){
       const ds = gate.dataset || {};
       const p1 = tryStr(ds.teacherPassword);
@@ -6902,30 +6910,12 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       if (p4) return p4;
     }
 
-    // 2) vanliga globala konstanter (om de finns i din kodbas)
-    const cands = [window.TEACHER_PASSWORD, window.teacherPassword, window.FV_TEACHER_PASSWORD];
-    for (const c of cands){
-      const p = tryStr(c);
-      if (p) return p;
-    }
-
-    // 3) hård fallback enligt din info
+    // Sista fallback (hård): alltid "password"
     return "password";
   }
 
   async function _fv5_verifyTeacherPassword(entered){
-    // Om du redan har en verifierare globalt: använd den först
-    if (typeof window.verifyTeacherPassword === "function"){
-      try{
-        const out = window.verifyTeacherPassword(entered);
-        if (out && typeof out.then === "function") return !!(await out);
-        return !!out;
-      }catch(e){
-        return false;
-      }
-    }
-
-    // Fallback: jämför med konfigurerat lösenord (data-/global/fallback)
+    _fv5_forceTeacherPasswordConfig();
     const expected = _fv5_resolveTeacherPassword();
     return String(entered||"") === String(expected||"");
   }
@@ -6936,11 +6926,12 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     if (gate.dataset.fv5GateBound === "1") return;
     gate.dataset.fv5GateBound = "1";
 
+    _fv5_forceTeacherPasswordConfig();
+
     const btnOk = $("btnTeacherConfirm");
     const btnCancel = $("btnTeacherCancel");
     const inp = $("teacherPasswordInput");
 
-    // Avbryt = stäng endast gate
     if (btnCancel && btnCancel.dataset.fv5Bound !== "1"){
       btnCancel.dataset.fv5Bound = "1";
       on(btnCancel, "click", (e)=>{
@@ -6950,6 +6941,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
 
     async function attemptLogin(){
+      _fv5_forceTeacherPasswordConfig();
       const entered = (inp && inp.value) ? String(inp.value) : "";
       const ok = await _fv5_verifyTeacherPassword(entered);
 
@@ -6963,11 +6955,9 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       openTeacherModal();
       window._fv5TeacherModeOpen = true;
       try{ document.body.dataset.fvTeacher = "1"; }catch(e){}
-      console.log("[FV] Lärarläge öppet");
       if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
     }
 
-    // Fortsätt/OK
     if (btnOk && btnOk.dataset.fv5Bound !== "1"){
       btnOk.dataset.fv5Bound = "1";
       on(btnOk, "click", async (e)=>{
@@ -6977,7 +6967,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     }
 
-    // Enter i lösenordsfältet
     if (inp && inp.dataset.fv5Bound !== "1"){
       inp.dataset.fv5Bound = "1";
       on(inp, "keydown", async (e)=>{
@@ -7007,13 +6996,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       else p.classList.add("hidden");
     });
 
-    // Exit-mode flag (bara state + visuell markör på exit-knappen)
     const s = ensureState();
     if (tabName === "exit") s.activeMode = "exit";
     else if (s.activeMode === "exit") s.activeMode = "game";
     safeSaveState(s);
 
-    // Rendera listor när man går till frågetabbar
     if (tabName === "questions" || tabName === "images" || tabName === "dragdrop" || tabName === "exit"){
       if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
     }
@@ -7037,7 +7024,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     });
   }
 
-  // Exponera (ibland bra i felsökning)
   window._fv5_setActiveTab = setActiveTab;
 /* slut Sektion 5C: TABS (visa panel + exit-läge) */
 
@@ -7346,7 +7332,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 /* start Sektion 5E: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
   function initQuestionForms(){
-    // ----- MCQ -----
     const btnMcqAdd = $("btnMcqAdd");
     if (btnMcqAdd && btnMcqAdd.dataset.fv5Bound !== "1"){
       btnMcqAdd.dataset.fv5Bound = "1";
@@ -7361,7 +7346,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         const o2 = ($("mcqOption2")?.value || "").trim();
         const o3 = ($("mcqOption3")?.value || "").trim();
 
-        // rätt svar: radio först, annars mcqAnswer
         let ans = null;
         const radios = qsa("input[name='mcqCorrect']");
         const checked = radios.find(r=>r.checked);
@@ -7388,7 +7372,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         _fv5_renderAllQuestionLists();
         if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
-        // rensa formulär (behåller nivå)
         $("mcqQuestion").value = "";
         $("mcqOption0").value = "";
         $("mcqOption1").value = "";
@@ -7414,7 +7397,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     }
 
-    // ----- IMG -----
     const imgFile = $("imgFile");
     const imgPreview = $("imgPreview");
     let pendingImgDataUrl = "";
@@ -7492,7 +7474,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         _fv5_renderAllQuestionLists();
         if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
-        // rensa
         $("imgQuestion").value = "";
         $("imgOption0").value = "";
         $("imgOption1").value = "";
@@ -7524,7 +7505,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     }
 
-    // ----- DRAG -----
     const dragItemsPreview = $("dragItemsPreview");
     let pendingDragItems = [];
 
@@ -7535,7 +7515,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         dragItemsPreview.innerHTML = `<li class="mini">Inga objekt tillagda ännu.</li>`;
         return;
       }
-      pendingDragItems.forEach((it, i)=>{
+      pendingDragItems.forEach((it)=>{
         const li = document.createElement("li");
         li.className = "mini";
         li.textContent = `${it.text} → Kolumn ${it.correct+1}`;
@@ -7584,7 +7564,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         _fv5_renderAllQuestionLists();
         if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
-        // rensa
         $("dragQuestion").value = "";
         $("dragColumn1").value = "";
         $("dragColumn2").value = "";
@@ -7708,7 +7687,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     modal.dataset.ownerUid = ownerUid || "";
     modal.dataset.bankId = bankId || "";
 
-    // Hämta roster från molnet (om möjligt)
     let roster = [];
     try{
       const res = await readRosterFromCloud(ownerUid, bankId);
@@ -7735,7 +7713,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const bankId = (modal.dataset.bankId || "").trim();
 
     if (!ownerUid || !bankId){
-      // fallback: läs från activeBank i state
       const s = ensureState();
       const a = s.activeBank || {};
       const ou = String(a.ownerUid||"").trim();
@@ -7750,11 +7727,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
     const rows = Array.from(host.children).filter(el=>typeof el._fv5_getRow === "function");
     const roster = rows.map(el=>el._fv5_getRow()).filter(r=>r.name);
-
-    // Se till att token alltid finns
     roster.forEach(r=>{ if (!r.token) r.token = genToken(10); });
 
-    // Spara till moln-bank doc (merge)
     const ou2 = (modal.dataset.ownerUid||"").trim();
     const bi2 = (modal.dataset.bankId||"").trim();
     try{
@@ -7765,7 +7739,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       return;
     }
 
-    // Uppdatera local state (för att “Elever: X” ska uppdateras direkt)
     const s = ensureState();
     s.activeBank = s.activeBank || {};
     s.activeBank.ownerUid = ou2;
@@ -7814,7 +7787,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
   }
 
-  // Delegation: öppna roster om något element har data-bank-id/data-owner-uid
   function bindRosterOpenButtons(){
     if (document.body.dataset.fv5RosterOpenBound === "1") return;
     document.body.dataset.fv5RosterOpenBound = "1";
@@ -7840,7 +7812,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 /* start Sektion 5G: BANK-STATUS UI (minimalt, så det inte blir undefined) */
   function updateBankStatusUI(){
-    // Om din kodbas redan har en bättre version: behåll den.
     if (window._fv5_updateBankStatusUI_real) return window._fv5_updateBankStatusUI_real();
 
     const s = ensureState();
@@ -7857,14 +7828,12 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       status.textContent = `${name} • Uppd: ${upd} ${activeTxt}  ID: ${id} • Frågor: ${counts.mcq} MCQ, ${counts.img} Bild, ${counts.drag} Drag • Elever: ${rosterLen}`;
     }
 
-    // Exit-indikator (enkel): markera exit-tabben om activeMode=exit
     const tabExit = $("tab-exit");
     if (tabExit){
       if (String(s.activeMode||"") === "exit") tabExit.classList.add("active");
     }
   }
 
-  // Om det redan finns updateBankStatusUI från tidigare version, spara den som “real”
   if (typeof window.updateBankStatusUI === "function" && window.updateBankStatusUI !== updateBankStatusUI){
     window._fv5_updateBankStatusUI_real = window.updateBankStatusUI;
   }
@@ -7873,6 +7842,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 /* start Sektion 5H: INIT (bind allt + första render) */
   function fv5_init(){
+    _fv5_forceTeacherPasswordConfig();
     bindTeacherModeButton();
     bindTeacherGateButtons();
     bindTeacherModalClose();
@@ -7881,8 +7851,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     initQuestionForms();
     bindRosterModalButtons();
     bindRosterOpenButtons();
-
-    // Första render när lärarläget öppnas senare
     _fv5_renderAllQuestionLists();
     updateBankStatusUI();
   }
