@@ -6744,7 +6744,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 "use strict";
 /* =========================================================
    SEKTION 5 – UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit)
-   ÄNDRING: Tvingar teacherGate att alltid ha data-teacher-password="password" + verifierar lokalt (ingen “inte konfigurerat”-varning). (ca 25 rader)
+   ÄNDRING: Fixar roster-sparning: robust knapp-bindning (oavsett id/text) + läser rader även från “gamla” inputs + sparar rosterLen i moln-doc + uppdaterar Elever: X direkt. (ca 70 rader)
    ========================================================= */
 
 /* start Sektion 5A: HELPERS (DOM + state + safe) */
@@ -6805,7 +6805,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     return out;
   }
 
-  // Exponera små helpers om andra sektioner vill använda dem
   window._fv5 = window._fv5 || {};
   window._fv5.$ = $;
   window._fv5.qsa = qsa;
@@ -6819,7 +6818,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   window._fv5.nowStamp = nowStamp;
 /* slut Sektion 5A: HELPERS (DOM + state + safe) */
 
-/* start Sektion 5B: LÄRARLÄGE (open/close + bind knapp) */
+/* start Sektion 5B: LÄRARLÄGE (open/close + gate) */
   function _fv5_show(el){
     if (!el) return;
     el.classList.remove("hidden");
@@ -6851,7 +6850,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const modal = $("teacherModal");
     _fv5_hide(modal);
   }
-
   window.openTeacherModal = openTeacherModal;
   window.closeTeacherModal = closeTeacherModal;
 
@@ -6897,7 +6895,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   function _fv5_resolveTeacherPassword(){
     const gate = $("teacherGate");
     const tryStr = (v)=> (typeof v === "string" && v.trim()) ? v.trim() : "";
-
     if (gate){
       const ds = gate.dataset || {};
       const p1 = tryStr(ds.teacherPassword);
@@ -6909,8 +6906,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       if (p3) return p3;
       if (p4) return p4;
     }
-
-    // Sista fallback (hård): alltid "password"
     return "password";
   }
 
@@ -6977,7 +6972,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     }
   }
-/* slut Sektion 5B: LÄRARLÄGE (open/close + bind knapp) */
+/* slut Sektion 5B: LÄRARLÄGE (open/close + gate) */
 
 /* start Sektion 5C: TABS (visa panel + exit-läge) */
   function setActiveTab(tabName){
@@ -7360,13 +7355,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
           return;
         }
 
-        s.bank.mcq.push({
-          level,
-          type: "mcq",
-          q: qText,
-          options: [o0,o1,o2,o3],
-          answer: ans
-        });
+        s.bank.mcq.push({ level, type:"mcq", q:qText, options:[o0,o1,o2,o3], answer: ans });
 
         safeSaveState(s);
         _fv5_renderAllQuestionLists();
@@ -7461,14 +7450,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
           return;
         }
 
-        s.bank.img.push({
-          level,
-          type: "img",
-          q: qText,
-          image: pendingImgDataUrl,
-          options: [o0,o1,o2,o3],
-          answer: ans
-        });
+        s.bank.img.push({ level, type:"img", q:qText, image: pendingImgDataUrl, options:[o0,o1,o2,o3], answer: ans });
 
         safeSaveState(s);
         _fv5_renderAllQuestionLists();
@@ -7552,13 +7534,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         if (!qText || !c1 || !c2) return alert("Fyll i instruktion + båda kolumner.");
         if (!pendingDragItems.length) return alert("Lägg till minst ett objekt att dra.");
 
-        s.bank.drag.push({
-          level,
-          type: "drag",
-          q: qText,
-          columns: [c1, c2],
-          items: pendingDragItems.slice()
-        });
+        s.bank.drag.push({ level, type:"drag", q:qText, columns:[c1, c2], items: pendingDragItems.slice() });
 
         safeSaveState(s);
         _fv5_renderAllQuestionLists();
@@ -7589,7 +7565,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
     renderPendingDragItems();
   }
-
   window.initQuestionForms = initQuestionForms;
 /* slut Sektion 5E: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
 
@@ -7597,6 +7572,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   function buildRosterRow(row){
     const wrap = document.createElement("div");
     wrap.className = "card-row";
+    wrap.dataset.rosterRow = "1";
     wrap.style.gap = "8px";
     wrap.style.flexWrap = "wrap";
     wrap.style.marginTop = "6px";
@@ -7604,18 +7580,21 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const name = document.createElement("input");
     name.className = "input";
     name.placeholder = "Namn";
+    name.dataset.field = "name";
     name.style.flex = "1 1 160px";
     name.value = (row && row.name) ? String(row.name) : "";
 
     const email = document.createElement("input");
     email.className = "input";
     email.placeholder = "E-post (valfritt)";
+    email.dataset.field = "email";
     email.style.flex = "1 1 220px";
     email.value = (row && row.email) ? String(row.email) : "";
 
     const token = document.createElement("input");
     token.className = "input";
     token.placeholder = "Token";
+    token.dataset.field = "token";
     token.style.flex = "0 0 140px";
     token.value = (row && row.token) ? String(row.token) : "";
 
@@ -7658,6 +7637,16 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     return wrap;
   }
 
+  function _fv5_pickBtnInModal(modal, matchFn){
+    if (!modal) return null;
+    const btns = Array.from(modal.querySelectorAll("button, [role='button'], a.btn, .btn"));
+    return btns.find(matchFn) || null;
+  }
+
+  function _fv5_normTxt(el){
+    return String((el && el.textContent) ? el.textContent : "").trim().toLowerCase();
+  }
+
   async function readRosterFromCloud(ownerUid, bankId){
     const db = getDb();
     if (!db) return { ok:false, err:"NO_DB", roster:[] };
@@ -7674,6 +7663,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const ref = db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId);
     await ref.set({
       roster: roster,
+      rosterLen: roster.length,
       updatedAt: serverTS()
     }, { merge:true });
     return { ok:true };
@@ -7701,7 +7691,44 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
 
     modal.classList.remove("hidden");
-    modal.style.display = "block";
+    modal.style.display = "flex";
+  }
+
+  function _fv5_extractRosterFromHost(host){
+    const rows = [];
+
+    // 1) Våra egna rader (säkrast)
+    const own = Array.from(host.querySelectorAll("[data-roster-row='1']"));
+    if (own.length){
+      own.forEach(el=>{
+        if (typeof el._fv5_getRow === "function") rows.push(el._fv5_getRow());
+      });
+      return rows;
+    }
+
+    // 2) Fallback: “gamla” rader (inputs finns redan i DOM)
+    const candidates = Array.from(host.children);
+    candidates.forEach(rowEl=>{
+      const inputs = Array.from(rowEl.querySelectorAll("input"));
+      if (!inputs.length) return;
+
+      const byField = (field)=>inputs.find(i=>String(i.dataset && i.dataset.field).toLowerCase()===field) || null;
+      const byPH = (needle)=>inputs.find(i=>String(i.placeholder||"").toLowerCase().includes(needle)) || null;
+
+      const inpName  = byField("name")  || byPH("namn")  || inputs[0] || null;
+      const inpEmail = byField("email") || byPH("e-post") || byPH("epost") || inputs[1] || null;
+      const inpToken = byField("token") || byPH("token") || inputs[2] || null;
+
+      const name = inpName ? String(inpName.value||"").trim() : "";
+      const email = inpEmail ? String(inpEmail.value||"").trim() : "";
+      let token = inpToken ? String(inpToken.value||"").trim() : "";
+      if (name){
+        if (!token) token = genToken(10);
+        rows.push({ name, email, token });
+      }
+    });
+
+    return rows;
   }
 
   async function handleSaveRoster(){
@@ -7709,40 +7736,34 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const host = $("rosterRows");
     if (!modal || !host) return;
 
-    const ownerUid = (modal.dataset.ownerUid || "").trim();
-    const bankId = (modal.dataset.bankId || "").trim();
+    const s = ensureState();
+    const a = s.activeBank || {};
+
+    const ownerUid = String((modal.dataset.ownerUid || a.ownerUid || "")).trim();
+    const bankId   = String((modal.dataset.bankId   || a.bankId   || "")).trim();
 
     if (!ownerUid || !bankId){
-      const s = ensureState();
-      const a = s.activeBank || {};
-      const ou = String(a.ownerUid||"").trim();
-      const bi = String(a.bankId||"").trim();
-      if (!ou || !bi){
-        alert("Saknar aktiv bank (ownerUid/bankId). Välj en moln-bank först.");
-        return;
-      }
-      modal.dataset.ownerUid = ou;
-      modal.dataset.bankId = bi;
+      alert("Saknar aktiv bank (ownerUid/bankId). Välj en moln-bank först.");
+      return;
     }
 
-    const rows = Array.from(host.children).filter(el=>typeof el._fv5_getRow === "function");
-    const roster = rows.map(el=>el._fv5_getRow()).filter(r=>r.name);
-    roster.forEach(r=>{ if (!r.token) r.token = genToken(10); });
+    const roster = _fv5_extractRosterFromHost(host)
+      .map(r=>({ name:String(r.name||"").trim(), email:String(r.email||"").trim(), token:String(r.token||"").trim() || genToken(10) }))
+      .filter(r=>r.name);
 
-    const ou2 = (modal.dataset.ownerUid||"").trim();
-    const bi2 = (modal.dataset.bankId||"").trim();
     try{
-      const res = await saveRosterToCloud(ou2, bi2, roster);
+      const res = await saveRosterToCloud(ownerUid, bankId, roster);
       if (!res.ok) throw new Error(res.err || "SAVE_FAIL");
     }catch(e){
+      console.warn("[FV] roster save failed:", e);
       alert("Kunde inte spara elevlista till molnet. Kontrollera internet/Firebase.");
       return;
     }
 
-    const s = ensureState();
+    // Uppdatera state så “Elever: X” visar rätt direkt
     s.activeBank = s.activeBank || {};
-    s.activeBank.ownerUid = ou2;
-    s.activeBank.bankId = bi2;
+    s.activeBank.ownerUid = ownerUid;
+    s.activeBank.bankId = bankId;
     s.activeBank.rosterLen = roster.length;
     s.activeBank.roster = roster;
     safeSaveState(s);
@@ -7756,10 +7777,27 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   function bindRosterModalButtons(){
     const modal = $("bankRosterModal");
     const host = $("rosterRows");
-    const btnAdd = $("btnRosterAddRow");
-    const btnSave = $("btnRosterSave");
-    const btnClose = $("btnCloseRosterModal");
     if (!modal || !host) return;
+
+    // ID först, annars text-match (du hade 9 knappar, id kan variera)
+    const btnAddById   = $("btnRosterAddRow");
+    const btnSaveById  = $("btnRosterSave");
+    const btnCloseById = $("btnCloseRosterModal");
+
+    const btnAdd = btnAddById || _fv5_pickBtnInModal(modal, b=>{
+      const t = _fv5_normTxt(b);
+      return t.includes("lägg") || t.includes("ny rad") || t.includes("add");
+    });
+
+    const btnSave = btnSaveById || _fv5_pickBtnInModal(modal, b=>{
+      const t = _fv5_normTxt(b);
+      return t.includes("spara") || t.includes("save");
+    });
+
+    const btnClose = btnCloseById || _fv5_pickBtnInModal(modal, b=>{
+      const t = _fv5_normTxt(b);
+      return t.includes("stäng") || t.includes("avbryt") || t === "x" || t.includes("close");
+    });
 
     if (btnAdd && btnAdd.dataset.fv5Bound !== "1"){
       btnAdd.dataset.fv5Bound = "1";
@@ -7823,9 +7861,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       const name = a.name ? String(a.name) : "(ingen)";
       const id = a.bankId ? String(a.bankId) : "-";
       const upd = nowStamp();
-      const rosterLen = Number.isFinite(a.rosterLen) ? a.rosterLen : (Array.isArray(a.roster) ? a.roster.length : 0);
-      const activeTxt = "✅ Aktiv";
-      status.textContent = `${name} • Uppd: ${upd} ${activeTxt}  ID: ${id} • Frågor: ${counts.mcq} MCQ, ${counts.img} Bild, ${counts.drag} Drag • Elever: ${rosterLen}`;
+      const rosterLen =
+        Number.isFinite(a.rosterLen) ? a.rosterLen :
+        (Array.isArray(a.roster) ? a.roster.length : 0);
+
+      status.textContent = `${name} • Uppd: ${upd} ✅ Aktiv  ID: ${id} • Frågor: ${counts.mcq} MCQ, ${counts.img} Bild, ${counts.drag} Drag • Elever: ${rosterLen}`;
     }
 
     const tabExit = $("tab-exit");
@@ -7849,8 +7889,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     bindTabs();
     bindDeleteInLists();
     initQuestionForms();
+
+    // Roster (robust)
     bindRosterModalButtons();
     bindRosterOpenButtons();
+
     _fv5_renderAllQuestionLists();
     updateBankStatusUI();
   }
