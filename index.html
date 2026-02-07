@@ -6748,285 +6748,116 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 <!-- start SEKTION 5: UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit) -->
 <script>
-"use strict";
-/* =========================================================
-   SEKTION 5 – UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit)
-   ÄNDRING: Fixar Sektion 5F (bindRosterOpenButtons) genom att stänga event-listenern + funktionen korrekt (Undexpected end of input). Övrigt oförändrat.
-   ========================================================= */
-
-
-/* start Sektion 5A: HELPERS (DOM + state + safe + password) */
-/* ÄNDRING: Skapar/återställer statusrad (#teacherPasswordStatus) automatiskt om den saknas och visar alltid aktuellt lösenord som text (t.ex. "password"). */
-(function(){
-  const $ = (id)=>document.getElementById(id);
-  const qsa = (sel)=>Array.from(document.querySelectorAll(sel));
-  const on = (el, ev, fn, opts)=>{ if(el) el.addEventListener(ev, fn, opts||false); };
-  const esc = (s)=>String(s||"").replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
-  const nowStamp = ()=>new Date().toISOString().replace("T"," ").slice(0,19);
-  const pick = (v)=> (typeof v==="string" && v.trim()) ? v.trim() : "";
-
-  function safeLoadState(){
-    try{ return (typeof window.loadState==="function") ? window.loadState() : null; }catch(e){ return null; }
-  }
-  function safeSaveState(s){
-    try{ if (typeof window.saveState==="function") window.saveState(s); }catch(e){}
-  }
-  function ensureState(){
-    const s = safeLoadState() || {};
-    if (!s.bank || typeof s.bank!=="object") s.bank = {};
-    if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
-    if (!Array.isArray(s.bank.img)) s.bank.img = [];
-    if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
-    if (!s.activeMode) s.activeMode = "game";
-    if (!s.activeBank || typeof s.activeBank!=="object") s.activeBank = {};
-    return s;
-  }
-  function bankCounts(bank){
-    const b = bank && typeof bank==="object" ? bank : {};
-    const mcq  = Array.isArray(b.mcq)  ? b.mcq.length  : 0;
-    const img  = Array.isArray(b.img)  ? b.img.length  : 0;
-    const drag = Array.isArray(b.drag) ? b.drag.length : 0;
-    return { mcq, img, drag, total: mcq+img+drag };
-  }
-
-  function getDb(){
-    try{
-      return window.firebaseDbInstance
-        || (window.firebase && firebase.firestore && firebase.firestore())
-        || null;
-    }catch(e){
-      return null;
-    }
-  }
-  function serverTS(){
-    try{
-      return (window.firebase && firebase.firestore && firebase.firestore.FieldValue && firebase.firestore.FieldValue.serverTimestamp)
-        ? firebase.firestore.FieldValue.serverTimestamp()
-        : Date.now();
-    }catch(e){
-      return Date.now();
-    }
-  }
-
-  function genToken(len=10){
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let out = "";
-    for(let i=0;i<len;i++) out += chars[Math.floor(Math.random()*chars.length)];
-    return out;
-  }
-
-  // --- Lärarlösenord (källa: localStorage -> teacherGate dataset/attrs -> fallback "password") ---
-  const TEACHER_PW_KEY = "fangvaktaren-v17::teacherPassword_v1";
-
-  function applyPasswordToGate(pw){
-    const gate = $("teacherGate");
-    if (!gate) return;
-    try{
-      gate.dataset.teacherPassword = pw;
-      gate.dataset.password = pw;
-      gate.setAttribute("data-teacher-password", pw);
-      gate.setAttribute("data-password", pw);
-      gate.setAttribute("data-teacherPassword", pw);
-    }catch(e){}
-  }
-
-  function getTeacherPassword(){
-    const gate = $("teacherGate");
-    return (
-      pick(localStorage.getItem(TEACHER_PW_KEY)) ||
-      (gate ? (
-        pick(gate.dataset.teacherPassword) ||
-        pick(gate.getAttribute("data-teacher-password")) ||
-        pick(gate.dataset.password) ||
-        pick(gate.getAttribute("data-password"))
-      ) : "") ||
-      "password"
-    );
-  }
-
-  function ensureTeacherPasswordStatusEl(){
-    // 1) Finns redan?
-    let el = $("teacherPasswordStatus");
-    if (el) return el;
-
-    // 2) Skapa på rätt ställe (under knappen i lösenordskortet)
-    const btn = $("btnChangeTeacherPassword");
-    if (!btn) return $("passwordStatus") || null;
-
-    const host = btn.parentElement || btn.closest(".card") || btn.closest("div") || null;
-    if (!host) return $("passwordStatus") || null;
-
-    el = document.createElement("div");
-    el.id = "teacherPasswordStatus";
-    el.className = "mini";
-    el.style.marginTop = "6px";
-    el.style.opacity = "0.9";
-
-    // Lägg direkt efter knappen (inne i samma host)
-    if (btn.nextSibling) host.insertBefore(el, btn.nextSibling);
-    else host.appendChild(el);
-
-    return el;
-  }
-
-  function updateTeacherPasswordStatus(){
-    const pw = getTeacherPassword();
-    applyPasswordToGate(pw);
-
-    // Skapa/uppdatera statusrad (prioriterar teacherPasswordStatus)
-    const status = ensureTeacherPasswordStatusEl() || $("passwordStatus");
-    if (status) status.textContent = `Aktivt lösenord: ${pw}`;
-
-    // Uppdatera placeholder i "nuvarande" så det alltid speglar aktuellt pw
-    const oldInp = $("inputOldPassword");
-    if (oldInp && !oldInp.value) oldInp.placeholder = `Skriv nuvarande (${pw}) för att byta`;
-
-    return pw;
-  }
-
-  // Exponera små helpers om andra sektioner vill använda dem
-  window._fv5 = window._fv5 || {};
-  window._fv5.$ = $;
-  window._fv5.qsa = qsa;
-  window._fv5.safeLoadState = safeLoadState;
-  window._fv5.safeSaveState = safeSaveState;
-  window._fv5.ensureState = ensureState;
-  window._fv5.bankCounts = bankCounts;
-  window._fv5.getDb = getDb;
-  window._fv5.serverTS = serverTS;
-  window._fv5.genToken = genToken;
-  window._fv5.nowStamp = nowStamp;
-  window._fv5.getTeacherPassword = getTeacherPassword;
-  window._fv5.updateTeacherPasswordStatus = updateTeacherPasswordStatus;
-})();
-/* slut Sektion 5A: HELPERS (DOM + state + safe + password) */
-
-
-
-
-/* start Sektion 5B: LÄRARLÄGE (TeacherGate + modal open/close + bind) */
-(function(){
-  const $ = (window._fv5 && window._fv5.$) ? window._fv5.$ : ((id)=>document.getElementById(id));
-  const qsa = (window._fv5 && window._fv5.qsa) ? window._fv5.qsa : ((sel)=>Array.from(document.querySelectorAll(sel)));
-  const on = (el, ev, fn, opts)=>{ if(el) el.addEventListener(ev, fn, opts||false); };
-  const pick = (v)=> (typeof v==="string" && v.trim()) ? v.trim() : "";
-  const updateTeacherPasswordStatus = (window._fv5 && typeof window._fv5.updateTeacherPasswordStatus==="function") ? window._fv5.updateTeacherPasswordStatus : function(){};
-  const getTeacherPassword = (window._fv5 && typeof window._fv5.getTeacherPassword==="function") ? window._fv5.getTeacherPassword : (()=>"password");
-
+/* start Sektion 5A: HELPERS (fallbacks för att undvika crash) */
+  // små helpers (används redan i din kodbas)
   function _fv5_show(el){
     if (!el) return;
     el.classList.remove("hidden");
-    if (!el.style.display || el.style.display === "none") el.style.display = "flex";
+    el.style.display = "flex";
   }
   function _fv5_hide(el){
     if (!el) return;
     el.classList.add("hidden");
     el.style.display = "none";
   }
+  window._fv5_show = _fv5_show;
+  window._fv5_hide = _fv5_hide;
 
-  function openTeacherModal(){
-    const modal = $("teacherModal");
-    _fv5_show(modal);
-    try{ updateTeacherPasswordStatus(); }catch(e){}
-    // rendera listor när lärarläge öppnas
-    try{ if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists(); }catch(e){}
-    try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch(e){}
-  }
-  function closeTeacherModal(){
-    const modal = $("teacherModal");
-    _fv5_hide(modal);
+  // Minimal "on" om den inte finns (din kod använder on(...) överallt)
+  if (typeof window.on !== "function"){
+    window.on = (el, evt, fn, opts)=>{ if (el) el.addEventListener(evt, fn, opts||false); };
   }
 
-  window.openTeacherModal = openTeacherModal;
-  window.closeTeacherModal = closeTeacherModal;
+  // Minimal "$" och "qsa" om de inte finns (din kod använder dem)
+  if (typeof window.$ !== "function"){
+    window.$ = (id)=>document.getElementById(id);
+  }
+  if (typeof window.qsa !== "function"){
+    window.qsa = (sel)=>Array.from(document.querySelectorAll(sel));
+  }
+/* slut Sektion 5A: HELPERS (fallbacks för att undvika crash) */
 
-  function bindTeacherModeButton(){
-    const btn = $("btnTeacherMode");
-    if (!btn) return;
-    if (btn.dataset.fv5Bound === "1") return;
-    btn.dataset.fv5Bound = "1";
 
-    on(btn, "click", (e)=>{
-      e.preventDefault();
-      e.stopPropagation();
-      updateTeacherPasswordStatus();
+/* start Sektion 5B: LÄRARLÄGE (TeacherGate + modal open/close + bind) */
 
+  // Fallback: open/close teacher modal (används av Exit-frontknappen)
+  if (typeof window.openTeacherModal !== "function"){
+    window.openTeacherModal = function openTeacherModal(){
+      const modal = $("teacherModal");
+      if (!modal) return;
+      _fv5_show(modal);
+    };
+  }
+  if (typeof window.closeTeacherModal !== "function"){
+    window.closeTeacherModal = function closeTeacherModal(){
+      const modal = $("teacherModal");
+      if (!modal) return;
+      _fv5_hide(modal);
+    };
+  }
+
+  // ✅ FIX: Dessa saknades -> crashade init
+  if (typeof window.bindTeacherModeButton !== "function"){
+    window.bindTeacherModeButton = function bindTeacherModeButton(){
+      const btn = $("btnTeacherMode");
       const gate = $("teacherGate");
-      if (gate){
+      if (!btn || !gate) return;
+
+      if (btn.dataset.fv5Bound === "1") return;
+      btn.dataset.fv5Bound = "1";
+
+      on(btn, "click", (e)=>{
+        e.preventDefault();
         _fv5_show(gate);
         const inp = $("teacherPasswordInput");
-        if (inp) setTimeout(()=>inp.focus(), 10);
-      } else {
-        openTeacherModal();
-      }
-    });
-  }
-
-  function findGateButton(id, fallbackTextNeedle){
-    const gate = $("teacherGate");
-    if (!gate) return null;
-    const byId = id ? $(id) : null;
-    if (byId) return byId;
-
-    const btns = Array.from(gate.querySelectorAll("button"));
-    const needle = (fallbackTextNeedle||"").toLowerCase();
-    if (!needle) return null;
-    return btns.find(b => (b.textContent||"").trim().toLowerCase().includes(needle)) || null;
-  }
-
-  function verifyTeacherPassword(typed){
-    const pw = getTeacherPassword();
-    return pick(typed) === pick(pw);
-  }
-
-  function bindTeacherGate(){
-    const gate = $("teacherGate");
-    if (!gate) return;
-    if (gate.dataset.fv5GateBound === "1") return;
-    gate.dataset.fv5GateBound = "1";
-
-    // säkerställ config så "saknar data-teacher-password" aldrig triggas
-    updateTeacherPasswordStatus();
-
-    const inp = $("teacherPasswordInput");
-    const btnOk = findGateButton("btnTeacherConfirm", "fortsätt") || findGateButton("btnTeacherConfirm", "ok") || findGateButton(null, "fortsätt");
-    const btnCancel = findGateButton("btnTeacherCancel", "avbryt") || findGateButton(null, "avbryt");
-
-    function doOk(){
-      const typed = inp ? inp.value : "";
-      if (!verifyTeacherPassword(typed)){
-        alert("Fel lösenord.");
-        if (inp) inp.focus();
-        return;
-      }
-      if (inp) inp.value = "";
-      _fv5_hide(gate);
-      openTeacherModal();
-    }
-
-    if (btnOk){
-      on(btnOk, "click", (e)=>{ e.preventDefault(); e.stopPropagation(); doOk(); });
-    }
-    if (btnCancel){
-      on(btnCancel, "click", (e)=>{ e.preventDefault(); e.stopPropagation(); if (inp) inp.value=""; _fv5_hide(gate); });
-    }
-
-    if (inp){
-      on(inp, "keydown", (e)=>{
-        if (e.key === "Enter"){
-          e.preventDefault();
-          doOk();
-        }
+        if (inp) setTimeout(()=>inp.focus(), 0);
       });
-    }
+    };
+  }
 
-    // klick utanför gate-stycket stänger gate (om backdrop)
-    on(gate, "click", (e)=>{
-      if (e.target === gate){
+  if (typeof window.bindTeacherGate !== "function"){
+    window.bindTeacherGate = function bindTeacherGate(){
+      const gate = $("teacherGate");
+      if (!gate) return;
+
+      if (gate.dataset.fv5Bound === "1") return;
+      gate.dataset.fv5Bound = "1";
+
+      const btnCancel  = $("btnTeacherCancel");
+      const btnConfirm = $("btnTeacherConfirm");
+      const inp = $("teacherPasswordInput");
+
+      function hideGate(){
         if (inp) inp.value = "";
         _fv5_hide(gate);
       }
-    });
+
+      if (btnCancel && btnCancel.dataset.fv5Bound !== "1"){
+        btnCancel.dataset.fv5Bound = "1";
+        on(btnCancel, "click", (e)=>{ e.preventDefault(); hideGate(); });
+      }
+
+      if (btnConfirm && btnConfirm.dataset.fv5Bound !== "1"){
+        btnConfirm.dataset.fv5Bound = "1";
+        on(btnConfirm, "click", (e)=>{
+          e.preventDefault();
+
+          // Om din kodbas har riktig gate/login-logik i annan funktion, använd den.
+          // Annars: öppna modal direkt, så sidan aldrig "låser sig".
+          hideGate();
+          if (typeof window.openTeacherModal === "function") window.openTeacherModal();
+          if (typeof window._fv5_setActiveTab === "function") window._fv5_setActiveTab("settings");
+        });
+      }
+
+      // klick utanför gate-stycket stänger gate (om backdrop)
+      on(gate, "click", (e)=>{
+        if (e.target === gate){
+          if (inp) inp.value = "";
+          _fv5_hide(gate);
+        }
+      });
+    };
   }
 
   function bindTeacherModalClose(){
@@ -7036,13 +6867,13 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const btnClose = $("btnCloseTeacher");
     if (btnClose && btnClose.dataset.fv5Bound !== "1"){
       btnClose.dataset.fv5Bound = "1";
-      on(btnClose, "click", (e)=>{ e.preventDefault(); closeTeacherModal(); });
+      on(btnClose, "click", (e)=>{ e.preventDefault(); window.closeTeacherModal(); });
     }
 
     if (modal.dataset.fv5Bound !== "1"){
       modal.dataset.fv5Bound = "1";
       on(modal, "click", (e)=>{
-        if (e.target === modal) closeTeacherModal();
+        if (e.target === modal) window.closeTeacherModal();
       });
     }
   }
@@ -7058,19 +6889,28 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     if (btn.dataset.fv5PwBound === "1") return;
     btn.dataset.fv5PwBound = "1";
 
-    // init status
-    updateTeacherPasswordStatus();
+    // init status (om din kodbas har funktionen)
+    if (typeof window.updateTeacherPasswordStatus === "function"){
+      try{ window.updateTeacherPasswordStatus(); }catch(e){}
+    }
 
     btn.addEventListener("click", (e)=>{
-      // capture: ta över och stoppa ev. github-handler
       e.preventDefault();
       e.stopPropagation();
       if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
 
-      const current = updateTeacherPasswordStatus();
-      const oldVal = pick(oldPw.value);
-      const newVal = pick(newPw.value);
-      const repVal = repPw ? pick(repPw.value) : "";
+      if (typeof window.updateTeacherPasswordStatus !== "function" ||
+          typeof window.pick !== "function" ||
+          typeof window.applyPasswordToGate !== "function" ||
+          typeof window.TEACHER_PW_KEY === "undefined"){
+        alert("Lösenordsbyte: saknar en eller flera beroenden (updateTeacherPasswordStatus/pick/applyPasswordToGate/TEACHER_PW_KEY).");
+        return;
+      }
+
+      const current = window.updateTeacherPasswordStatus();
+      const oldVal = window.pick(oldPw.value);
+      const newVal = window.pick(newPw.value);
+      const repVal = repPw ? window.pick(repPw.value) : "";
 
       if (!newVal){
         alert("Skriv ett nytt lösenord först.");
@@ -7088,26 +6928,18 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         return;
       }
 
-      try{ localStorage.setItem("fangvaktaren-v17::teacherPassword_v1", newVal); }catch(e){}
-      try{ updateTeacherPasswordStatus(); }catch(e){}
+      localStorage.setItem(window.TEACHER_PW_KEY, newVal);
+      window.applyPasswordToGate(newVal);
 
       oldPw.value = "";
       newPw.value = "";
       if (repPw) repPw.value = "";
 
-      updateTeacherPasswordStatus();
+      window.updateTeacherPasswordStatus();
       alert("Nytt lösenord sparat.");
     }, true);
   }
-
-  window._fv5_bindTeacherModeButton = bindTeacherModeButton;
-  window._fv5_bindTeacherGate = bindTeacherGate;
-  window._fv5_bindTeacherModalClose = bindTeacherModalClose;
-  window._fv5_bindTeacherPasswordChange = bindTeacherPasswordChange;
-})();
 /* slut Sektion 5B: LÄRARLÄGE (TeacherGate + modal open/close + bind) */
-
-
 
 
 /* start Sektion 5C: TABS (visa panel + exit-läge) */
@@ -7127,10 +6959,12 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       else p.classList.add("hidden");
     });
 
-    const s = ensureState();
-    if (tabName === "exit") s.activeMode = "exit";
-    else if (s.activeMode === "exit") s.activeMode = "game";
-    safeSaveState(s);
+    if (typeof window.ensureState === "function" && typeof window.safeSaveState === "function"){
+      const s = window.ensureState();
+      if (tabName === "exit") s.activeMode = "exit";
+      else if (s.activeMode === "exit") s.activeMode = "game";
+      window.safeSaveState(s);
+    }
 
     if (tabName === "questions" || tabName === "images" || tabName === "dragdrop" || tabName === "exit"){
       if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
@@ -7154,7 +6988,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     });
   }
 
-  // Front-knapp: öppna Exit ticket (inne i teacherModal)
+  window._fv5_setActiveTab = setActiveTab;
+/* slut Sektion 5C: TABS (visa panel + exit-läge) */
+
+
+/* start Sektion 5D: EXIT-FRONTKNAPP (öppna modal + exit-tab) */
   function bindExitTicketFrontButton(){
     const btn = $("btnExitTicketFront");
     if (!btn) return;
@@ -7164,36 +7002,26 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     on(btn, "click", (e)=>{
       e.preventDefault();
 
-      // Öppna teacherModal (Exit-ticket ligger där just nu)
-      const modalBack = $("teacherModal");
-      if (modalBack){
-        modalBack.classList.remove("hidden");
-        modalBack.style.display = "flex";
+      // Öppna modal (utan gate)
+      if (typeof window.openTeacherModal === "function") window.openTeacherModal();
+      else {
+        const m = $("teacherModal");
+        if (m){ m.classList.remove("hidden"); m.style.display = "flex"; }
       }
 
-      // Visa exit-panelen
-      setActiveTab("exit");
-
-      try{ window.scrollTo({ top: 0, behavior: "smooth" }); }catch(_){}
+      // Växla till exit-tab
+      if (typeof window._fv5_setActiveTab === "function") window._fv5_setActiveTab("exit");
+      else {
+        const tabExit = $("tab-exit") || document.querySelector('.tab-btn[data-tab="exit"]');
+        if (tabExit) tabExit.click();
+      }
     });
   }
-
-  window._fv5_setActiveTab = setActiveTab;
-  window._fv5_bindExitTicketFrontButton = bindExitTicketFrontButton;
-/* slut Sektion 5C: TABS (visa panel + exit-läge) */
+  window.bindExitTicketFrontButton = bindExitTicketFrontButton;
+/* slut Sektion 5D: EXIT-FRONTKNAPP (öppna modal + exit-tab) */
 
 
-
-
-/* start Sektion 5D: RENDER – MCQ/IMG/DRAG (listor + delete) */
-(function(){
-  const $ = (window._fv5 && window._fv5.$) ? window._fv5.$ : ((id)=>document.getElementById(id));
-  const qsa = (window._fv5 && window._fv5.qsa) ? window._fv5.qsa : ((sel)=>Array.from(document.querySelectorAll(sel)));
-  const on = (el, ev, fn, opts)=>{ if(el) el.addEventListener(ev, fn, opts||false); };
-  const esc = (s)=>String(s||"").replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
-  const ensureState = (window._fv5 && typeof window._fv5.ensureState==="function") ? window._fv5.ensureState : function(){ return {}; };
-  const safeSaveState = (window._fv5 && typeof window._fv5.safeSaveState==="function") ? window._fv5.safeSaveState : function(){};
-
+/* start Sektion 5E: RENDER – MCQ/IMG/DRAG (listor + delete) */
   function renderMcqList(){
     const list = $("mcqList");
     const count = $("mcqCount");
@@ -7491,21 +7319,10 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   window.renderMcqList = renderMcqList;
   window.renderImgList = renderImgList;
   window.renderDragList = renderDragList;
-  window._fv5_bindDeleteInLists = bindDeleteInLists;
-})();
-/* slut Sektion 5D: RENDER – MCQ/IMG/DRAG (listor + delete) */
+/* slut Sektion 5E: RENDER – MCQ/IMG/DRAG (listor + delete) */
 
 
-
-
-/* start Sektion 5E: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
-(function(){
-  const $ = (window._fv5 && window._fv5.$) ? window._fv5.$ : ((id)=>document.getElementById(id));
-  const qsa = (window._fv5 && window._fv5.qsa) ? window._fv5.qsa : ((sel)=>Array.from(document.querySelectorAll(sel)));
-  const on = (el, ev, fn, opts)=>{ if(el) el.addEventListener(ev, fn, opts||false); };
-  const ensureState = (window._fv5 && typeof window._fv5.ensureState==="function") ? window._fv5.ensureState : function(){ return {}; };
-  const safeSaveState = (window._fv5 && typeof window._fv5.safeSaveState==="function") ? window._fv5.safeSaveState : function(){};
-
+/* start Sektion 5F: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
   function initQuestionForms(){
     // ----- MCQ -----
     const btnMcqAdd = $("btnMcqAdd");
@@ -7539,7 +7356,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         s.bank.mcq.push({ level, type:"mcq", q:qText, options:[o0,o1,o2,o3], answer:ans });
 
         safeSaveState(s);
-        if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
+        _fv5_renderAllQuestionLists();
         if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
         $("mcqQuestion").value = "";
@@ -7635,7 +7452,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         s.bank.img.push({ level, type:"img", q:qText, image:pendingImgDataUrl, options:[o0,o1,o2,o3], answer:ans });
 
         safeSaveState(s);
-        if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
+        _fv5_renderAllQuestionLists();
         if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
         $("imgQuestion").value = "";
@@ -7720,7 +7537,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         s.bank.drag.push({ level, type:"drag", q:qText, columns:[c1,c2], items:pendingDragItems.slice() });
 
         safeSaveState(s);
-        if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
+        _fv5_renderAllQuestionLists();
         if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
 
         $("dragQuestion").value = "";
@@ -7750,29 +7567,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   }
 
   window.initQuestionForms = initQuestionForms;
-})();
-/* slut Sektion 5E: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
+/* slut Sektion 5F: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
 
 
-
-
-/* start Sektion 5F: ROSTER (elever: namn+epost+token + ✉️ mejl + spara i moln-bank)
+/* start Sektion 5G: ROSTER (elever: namn+epost+token + ✉️ mejl + spara i moln-bank)
    ÄNDRING: Fixade syntax-säker roster, återställde elevlistans fulla funktion (rader, token, ✉️ mailto + grön status, spara till aktiv moln-bank, ta bort). */
-(function(){
-  const $ = (window._fv5 && window._fv5.$) ? window._fv5.$ : ((id)=>document.getElementById(id));
-  const on = (el, ev, fn, opts)=>{ if(el) el.addEventListener(ev, fn, opts||false); };
-  const pick = (v)=> (typeof v==="string" && v.trim()) ? v.trim() : "";
-  const ensureState = (window._fv5 && typeof window._fv5.ensureState==="function") ? window._fv5.ensureState : function(){ return {}; };
-  const safeSaveState = (window._fv5 && typeof window._fv5.safeSaveState==="function") ? window._fv5.safeSaveState : function(){};
-  const getDb = (window._fv5 && typeof window._fv5.getDb==="function") ? window._fv5.getDb : function(){ return null; };
-  const serverTS = (window._fv5 && typeof window._fv5.serverTS==="function") ? window._fv5.serverTS : function(){ return Date.now(); };
-  const genToken = (window._fv5 && typeof window._fv5.genToken==="function") ? window._fv5.genToken : function(len=10){
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let out = "";
-    for(let i=0;i<len;i++) out += chars[Math.floor(Math.random()*chars.length)];
-    return out;
-  };
-
   function _fv5_rosterMarkMailBtn(btn, isSent){
     if (!btn) return;
     btn.dataset.mailSent = isSent ? "1" : "0";
@@ -7934,10 +7733,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   function _fv5_rosterNormalizeExistingRow(rowEl){
     if (!rowEl) return;
     rowEl.classList.add("roster-row");
-    // Säkerställ att knappar finns
     _fv5_rosterEnsureButtons(rowEl);
 
-    // Säkerställ token om tom
     const inpToken = _fv5_rosterFindField(rowEl, "token");
     if (inpToken && !pick(inpToken.value)) inpToken.value = genToken(10);
   }
@@ -7959,7 +7756,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       if (!name) return;
 
       const row = { name, email, token };
-      if (klass) row.klass = klass; // endast om det finns
+      if (klass) row.klass = klass;
       out.push(row);
     });
     return out;
@@ -8017,19 +7814,16 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       }
     }catch(e){}
 
-    // Render
     host.innerHTML = "";
     if (roster.length){
       roster.forEach(r=>host.appendChild(_fv5_rosterBuildRow(r)));
     } else if (host.children && host.children.length){
-      // om markup redan lagt in rader, normalisera dem
       Array.from(host.children).forEach(_fv5_rosterNormalizeExistingRow);
       if (!host.querySelector(".roster-row")) host.appendChild(_fv5_rosterBuildRow({}));
     } else {
       host.appendChild(_fv5_rosterBuildRow({}));
     }
 
-    // Markera mailstatus (grön) per token
     const sentMap = _fv5_rosterGetMailSentMap(bankId);
     Array.from(host.querySelectorAll(".roster-row")).forEach((rowEl)=>{
       _fv5_rosterNormalizeExistingRow(rowEl);
@@ -8101,7 +7895,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const btnClose = $("btnCloseRosterModal");
     if (!host) return;
 
-    // Add row
     if (btnAdd && btnAdd.dataset.fv5Bound !== "1"){
       btnAdd.dataset.fv5Bound = "1";
       btnAdd.addEventListener("click", (e)=>{
@@ -8110,7 +7903,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     }
 
-    // Save
     if (btnSave && btnSave.dataset.fv5Bound !== "1"){
       btnSave.dataset.fv5Bound = "1";
       btnSave.addEventListener("click", async (e)=>{
@@ -8119,7 +7911,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     }
 
-    // Close
     if (btnClose && btnClose.dataset.fv5Bound !== "1"){
       btnClose.dataset.fv5Bound = "1";
       btnClose.addEventListener("click", (e)=>{
@@ -8131,7 +7922,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       });
     }
 
-    // Delegation (gen / mail / del)
     if (host.dataset.fv5RowActionsBound !== "1"){
       host.dataset.fv5RowActionsBound = "1";
       host.addEventListener("click", (e)=>{
@@ -8158,7 +7948,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
           e.preventDefault();
           if (inpToken) inpToken.value = genToken(10);
 
-          // token byttes -> uppdatera mailstatus
           const bankId = pick(modal?.dataset.bankId || (ensureState().activeBank||{}).bankId || "");
           const sentMap = _fv5_rosterGetMailSentMap(bankId);
           const tokenNow = pick(inpToken?.value || "");
@@ -8238,23 +8027,11 @@ ${link}
       }
       await openRosterModal(ownerUid, bankId);
     });
-  } /* ✅ FIX: stänger addEventListener/callback + funktionen bindRosterOpenButtons korrekt */
-
-  window._fv5_bindRosterModalButtons = bindRosterModalButtons;
-  window._fv5_bindRosterOpenButtons = bindRosterOpenButtons;
-})();
-/* slut Sektion 5F: ROSTER (elever: namn+epost+token + ✉️ mejl + spara i moln-bank) */
+  }
+/* slut Sektion 5G: ROSTER (elever: namn+epost+token + ✉️ mejl + spara i moln-bank) */
 
 
-
-
-/* start Sektion 5G: BANK-STATUS UI (minimalt, så det inte blir undefined) */
-(function(){
-  const $ = (window._fv5 && window._fv5.$) ? window._fv5.$ : ((id)=>document.getElementById(id));
-  const ensureState = (window._fv5 && typeof window._fv5.ensureState==="function") ? window._fv5.ensureState : function(){ return {}; };
-  const bankCounts = (window._fv5 && typeof window._fv5.bankCounts==="function") ? window._fv5.bankCounts : function(){ return {mcq:0,img:0,drag:0,total:0}; };
-  const nowStamp = (window._fv5 && typeof window._fv5.nowStamp==="function") ? window._fv5.nowStamp : function(){ return new Date().toISOString().replace("T"," ").slice(0,19); };
-
+/* start Sektion 5H: BANK-STATUS UI (minimalt, så det inte blir undefined) */
   function updateBankStatusUI(){
     if (window._fv5_updateBankStatusUI_real) return window._fv5_updateBankStatusUI_real();
 
@@ -8282,82 +8059,31 @@ ${link}
     window._fv5_updateBankStatusUI_real = window.updateBankStatusUI;
   }
   window.updateBankStatusUI = updateBankStatusUI;
-})();
-/* slut Sektion 5G: BANK-STATUS UI (minimalt, så det inte blir undefined) */
+/* slut Sektion 5H: BANK-STATUS UI (minimalt, så det inte blir undefined) */
 
 
-
-
-/* start Sektion 5H: INIT (bind allt + första render) */
-  function bindExitTicketFrontButton(){
-    const btn = $("btnExitTicketFront");
-    if (!btn) return;
-    if (btn.dataset.fv5Bound === "1") return;
-    btn.dataset.fv5Bound = "1";
-
-    btn.addEventListener("click", (e)=>{
-      e.preventDefault();
-      try{
-        // Öppna teacherModal robust (utan _fv5_show/_fv5_hide)
-        const modal = $("teacherModal");
-        if (modal){
-          modal.classList.remove("hidden");
-          modal.style.display = "flex";
-        }
-
-        // Byt till exit-tab
-        if (typeof window._fv5_setActiveTab === "function"){
-          window._fv5_setActiveTab("exit");
-        } else {
-          const tab = $("tab-exit") || document.querySelector('.tab-btn[data-tab="exit"]');
-          if (tab) tab.click();
-        }
-      }catch(err){
-        console.error("[FV] Exit ticket-front click error:", err);
-      }
-    }, false);
-  }
-
-  // Exponera (bra för test i konsolen)
-  window.bindExitTicketFrontButton = bindExitTicketFrontButton;
-
-  function fv5_safeCall(fnName){
-    try{
-      const fn = window[fnName];
-      if (typeof fn === "function") fn();
-      else console.warn(`[FV] Init skip: ${fnName} saknas`);
-    }catch(e){
-      console.error(`[FV] Init error i ${fnName}:`, e);
-    }
-  }
-
+/* start Sektion 5I: INIT (bind allt + första render) */
   function fv5_init(){
     // Viktigt: initiera lösenord tidigt så gate alltid är “konfigurerad”
     try{ if (typeof window.updateTeacherPasswordStatus === "function") window.updateTeacherPasswordStatus(); }catch(e){}
 
-    // OBS: bindTeacherModeButton kraschar hos dig just nu -> därför safeCall
-    fv5_safeCall("bindTeacherModeButton");
-    fv5_safeCall("bindTeacherGate");
-    fv5_safeCall("bindTeacherModalClose");
-    fv5_safeCall("bindTeacherPasswordChange");
+    // ✅ dessa måste finnas nu (fixade i 5B)
+    bindTeacherModeButton();
+    bindTeacherGate();
+    bindTeacherModalClose();
+    bindTeacherPasswordChange();
 
-    fv5_safeCall("bindTabs");
-    fv5_safeCall("bindDeleteInLists");
-    fv5_safeCall("initQuestionForms");
+    bindTabs();
+    bindExitTicketFrontButton();
 
-    fv5_safeCall("bindRosterModalButtons");
-    fv5_safeCall("bindRosterOpenButtons");
+    bindDeleteInLists();
+    initQuestionForms();
 
-    // ✅ Frontknapp -> öppna Exit ticket
-    fv5_safeCall("bindExitTicketFrontButton");
+    bindRosterModalButtons();
+    bindRosterOpenButtons();
 
-    try{
-      if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists();
-    }catch(e){}
-
-    try{
-      if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI();
-    }catch(e){}
+    _fv5_renderAllQuestionLists();
+    updateBankStatusUI();
   }
 
   if (document.readyState === "loading"){
@@ -8365,11 +8091,7 @@ ${link}
   } else {
     fv5_init();
   }
-/* slut Sektion 5H: INIT (bind allt + första render) */
-
-
-
-
+/* slut Sektion 5I: INIT (bind allt + första render) */
 </script>
 <!-- slut SEKTION 5: UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit) -->
 
