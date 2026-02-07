@@ -6750,7 +6750,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 <script>
 
 
-<!-- start Sektion 5A: HELPERS (fallbacks för att undvika crash) -->
+/* start Sektion 5A: HELPERS (fallbacks för att undvika crash) */
+
   // små helpers (används redan i din kodbas)
   function _fv5_show(el){
     if (!el) return;
@@ -6762,8 +6763,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     el.classList.add("hidden");
     el.style.display = "none";
   }
-  window._fv5_show = _fv5_show;
-  window._fv5_hide = _fv5_hide;
+  window._fv5_show = window._fv5_show || _fv5_show;
+  window._fv5_hide = window._fv5_hide || _fv5_hide;
 
   // Minimal "on" om den inte finns (din kod använder on(...) överallt)
   if (typeof window.on !== "function"){
@@ -6778,39 +6779,106 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     window.qsa = (sel)=>Array.from(document.querySelectorAll(sel));
   }
 
-  // ✅ FIX: Fallback state-funktioner så UI inte kraschar om din kodbas saknar dem just nu
-  // Dessa ersätter INTE din "riktiga" logik om den finns – de används bara om funktionerna saknas.
-  if (typeof window.ensureState !== "function"){
-    window.ensureState = function ensureState(){
-      const KEY = "fangvaktaren-v17::state";
-      let s = null;
-      try{
-        const raw = localStorage.getItem(KEY);
-        s = raw ? JSON.parse(raw) : null;
-      }catch(e){
-        s = null;
-      }
-      if (!s || typeof s !== "object") s = {};
-      if (!s.bank || typeof s.bank !== "object") s.bank = {};
-      if (!Array.isArray(s.bank.mcq)) s.bank.mcq = [];
-      if (!Array.isArray(s.bank.img)) s.bank.img = [];
-      if (!Array.isArray(s.bank.drag)) s.bank.drag = [];
-      if (!s.activeBank || typeof s.activeBank !== "object") s.activeBank = {};
-      if (typeof s.activeMode !== "string") s.activeMode = "game";
-      // spara tillbaka om den var trasig/ny
-      try{ localStorage.setItem(KEY, JSON.stringify(s)); }catch(e){}
-      return s;
+  // Minimal pick + esc om de saknas (används i Sektion 5)
+  if (typeof window.pick !== "function"){
+    window.pick = (v)=> (typeof v === "string" ? v.trim() : (v==null ? "" : String(v).trim()));
+  }
+  if (typeof window.esc !== "function"){
+    window.esc = (s)=>{
+      const str = (s==null ? "" : String(s));
+      return str
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
     };
   }
 
-  if (typeof window.safeSaveState !== "function"){
-    window.safeSaveState = function safeSaveState(state){
-      const KEY = "fangvaktaren-v17::state";
+  // ✅ FIX: fallback STATE så "ensureState is not defined" aldrig kan krascha
+  if (typeof window.ensureState !== "function"){
+    const FV_STATE_KEY = window.FV_STATE_KEY || window.STATE_KEY || "fangvaktaren-v17::state";
+
+    function _fv5_defaultState(){
+      return {
+        version: "v17",
+        activeMode: "game",
+        activeBank: null,
+        bank: { mcq: [], img: [], drag: [] }
+      };
+    }
+
+    window.ensureState = function ensureState(){
       try{
-        localStorage.setItem(KEY, JSON.stringify(state || {}));
+        const raw = localStorage.getItem(FV_STATE_KEY);
+        if (raw){
+          const obj = JSON.parse(raw);
+          if (obj && typeof obj === "object"){
+            if (!obj.bank || typeof obj.bank !== "object") obj.bank = { mcq: [], img: [], drag: [] };
+            if (!Array.isArray(obj.bank.mcq)) obj.bank.mcq = [];
+            if (!Array.isArray(obj.bank.img)) obj.bank.img = [];
+            if (!Array.isArray(obj.bank.drag)) obj.bank.drag = [];
+            return obj;
+          }
+        }
       }catch(e){}
+      const s = _fv5_defaultState();
+      try{ localStorage.setItem(FV_STATE_KEY, JSON.stringify(s)); }catch(e){}
+      return s;
+    };
+
+    window.safeSaveState = function safeSaveState(state){
+      try{
+        const s = (state && typeof state === "object") ? state : window.ensureState();
+        localStorage.setItem(FV_STATE_KEY, JSON.stringify(s));
+        return true;
+      }catch(e){
+        return false;
+      }
+    };
+  } else {
+    if (typeof window.safeSaveState !== "function"){
+      const FV_STATE_KEY = window.FV_STATE_KEY || window.STATE_KEY || "fangvaktaren-v17::state";
+      window.safeSaveState = function safeSaveState(state){
+        try{
+          localStorage.setItem(FV_STATE_KEY, JSON.stringify(state));
+          return true;
+        }catch(e){
+          return false;
+        }
+      };
+    }
+  }
+
+  // Fallback: bankCounts + nowStamp (används i Sektion 5H)
+  if (typeof window.bankCounts !== "function"){
+    window.bankCounts = function bankCounts(bank){
+      const b = (bank && typeof bank === "object") ? bank : {};
+      return {
+        mcq: Array.isArray(b.mcq) ? b.mcq.length : 0,
+        img: Array.isArray(b.img) ? b.img.length : 0,
+        drag: Array.isArray(b.drag) ? b.drag.length : 0
+      };
     };
   }
+  if (typeof window.nowStamp !== "function"){
+    window.nowStamp = function nowStamp(){
+      const d = new Date();
+      const pad = (n)=>String(n).padStart(2,"0");
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+  }
+
+  // Fallback: serverTS + getDb (om roster/cloud anropas utan att firebase-del hunnit initiera)
+  if (typeof window.serverTS !== "function"){
+    window.serverTS = ()=> (window.firebase && firebase.firestore && firebase.firestore.FieldValue)
+      ? firebase.firestore.FieldValue.serverTimestamp()
+      : null;
+  }
+  if (typeof window.getDb !== "function"){
+    window.getDb = ()=> (window.firebaseDbInstance || (window.firebase && firebase.firestore ? firebase.firestore() : null));
+  }
+
 /* slut Sektion 5A: HELPERS (fallbacks för att undvika crash) */
 
 
