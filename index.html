@@ -9193,6 +9193,163 @@ ${link}
 /* slut Sektion 5G: ROSTER (elever: kort per elev + ✉️ mejl + ta bort + spara i moln-bank) */
 
 
+<!-- start Sektion 5G1: ROSTER PATCH (blockera legacy openRosterInline/_fv_legacyAddRow + hard-clean) -->
+
+(function(){
+  // --- helpers ---
+  const _pick = (typeof window.pick === "function") ? window.pick : (v)=>String(v==null?"":v).trim();
+
+  function _host(){
+    return document.getElementById("rosterRows");
+  }
+
+  function _isLegacyNode(node){
+    try{
+      if (!node) return false;
+      const html = node.outerHTML || "";
+      if (html.includes("fv3-actions")) return true;
+      if (html.includes('data-act="gen"')) return true;
+      if (node.querySelector && node.querySelector(".fv3-actions")) return true;
+      if (node.querySelector && node.querySelector('button[data-act="gen"]')) return true;
+      return false;
+    }catch(e){
+      return false;
+    }
+  }
+
+  function _cleanHostHard(){
+    const h = _host();
+    if (!h) return;
+
+    // ta bort legacy rader/knappar om de redan finns
+    const legacyRows = Array.from(h.querySelectorAll(".roster-row")).filter(el=>{
+      return !!el.querySelector(".fv3-actions") || !!el.querySelector('button[data-act="gen"]');
+    });
+    legacyRows.forEach(el=>el.remove());
+
+    // om något legacy ändå ligger inuti, rensa knapparna
+    Array.from(h.querySelectorAll(".fv3-actions")).forEach(a=>a.remove());
+    Array.from(h.querySelectorAll('button[data-act="gen"]')).forEach(b=>b.remove());
+  }
+
+  // --- 1) blockera legacy row template om den används ---
+  // (så även om legacy försöker rendera HTML så blir det tomt)
+  if (typeof window._fv_legacyRowTemplate === "function"){
+    window._fv_legacyRowTemplate = function(){ return ""; };
+  }
+  if (typeof window._fv_rowTemplate === "function"){
+    // vissa kodbaser använder _fv_rowTemplate som fallback
+    const _old = window._fv_rowTemplate;
+    window._fv_rowTemplate = function(){
+      const out = _old.apply(this, arguments);
+      try{
+        if (String(out||"").includes("fv3-actions") || String(out||"").includes('data-act="gen"')) return "";
+      }catch(e){}
+      return out;
+    };
+  }
+
+  // --- 2) gör _fv_legacyAddRow till no-op ---
+  if (typeof window._fv_legacyAddRow === "function"){
+    window._fv_legacyAddRow = function(){
+      // blockerat
+      return null;
+    };
+  }
+
+  // --- 3) ersätt openRosterInline så den alltid öppnar via v2 ---
+  if (typeof window.openRosterInline === "function"){
+    window.openRosterInline = async function(ownerUid, bankId){
+      try{
+        _cleanHostHard();
+
+        const ou = _pick(ownerUid);
+        const bi = _pick(bankId);
+
+        // Föredra din v2
+        const fn = (typeof window._fv5_openRosterModal === "function")
+          ? window._fv5_openRosterModal
+          : (typeof window.openRosterModal === "function" ? window.openRosterModal : null);
+
+        if (fn){
+          return await fn(ou, bi);
+        }
+      }catch(e){}
+      // om v2 saknas av någon anledning: rensa bara så legacy inte dyker upp
+      _cleanHostHard();
+      return null;
+    };
+  }
+
+  // --- 4) hård-blockera DOM-inserts av legacy in i #rosterRows (append/insert/innerHTML) ---
+  function _installHostGuards(){
+    const h = _host();
+    if (!h) return;
+    if (h.__fv5HostGuard === "1") return;
+    h.__fv5HostGuard = "1";
+
+    // appendChild guard
+    const origAppend = h.appendChild.bind(h);
+    h.appendChild = function(node){
+      if (_isLegacyNode(node)) return node; // blockera
+      return origAppend(node);
+    };
+
+    // insertBefore guard
+    const origInsertBefore = h.insertBefore.bind(h);
+    h.insertBefore = function(node, ref){
+      if (_isLegacyNode(node)) return node; // blockera
+      return origInsertBefore(node, ref);
+    };
+
+    // insertAdjacentHTML guard
+    const origInsertAdj = h.insertAdjacentHTML.bind(h);
+    h.insertAdjacentHTML = function(pos, html){
+      try{
+        const s = String(html||"");
+        if (s.includes("fv3-actions") || s.includes('data-act="gen"')) return;
+      }catch(e){}
+      return origInsertAdj(pos, html);
+    };
+
+    // innerHTML guard (bara för host)
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML");
+    if (desc && desc.set && desc.get){
+      Object.defineProperty(h, "innerHTML", {
+        get(){ return desc.get.call(this); },
+        set(v){
+          try{
+            const s = String(v||"");
+            if (s.includes("fv3-actions") || s.includes('data-act="gen"')) return;
+          }catch(e){}
+          return desc.set.call(this, v);
+        }
+      });
+    }
+
+    // MutationObserver: om legacy ändå lyckas smita in via annan väg, ta bort direkt
+    const obs = new MutationObserver(()=>{
+      _cleanHostHard();
+    });
+    obs.observe(h, { childList:true, subtree:true });
+    h.__fv5HostObs = obs;
+  }
+
+  // installera guards + initial städning
+  _installHostGuards();
+  _cleanHostHard();
+
+  // om rosterRows skapas senare (fallback)
+  document.addEventListener("DOMContentLoaded", ()=>{
+    _installHostGuards();
+    _cleanHostHard();
+  });
+
+})();
+</script>
+<!-- slut Sektion 5G1: ROSTER PATCH (blockera legacy openRosterInline/_fv_legacyAddRow + hard-clean) -->
+
+
 /* start Sektion 5G2: ROSTER v2 (tom start + 2 toppknappar + elevkort med handledare + autosave) */
 
 (function FV5_ROSTER_V2(){
