@@ -8682,18 +8682,23 @@ Kort svar
 /* slut Sektion 5F: FORMS – MCQ/IMG/DRAG (Lägg till fungerar) */
   </script>
 
-<!-- start Sektion 5G+5G1+5G2: ROSTER (ERSÄTT HELA) -->
+<!-- start Sektion 5G+5G1+5G2: ROSTER (V2 ONLY + robust bind + autosave + CC handledare + token-size fix) -->
 <script>
-/* start Sektion 5G+5G1+5G2: ROSTER (single script för att undvika <script>-mismatch i VS) */
+(function FV5_ROSTER_V2_ONLY(){
+  // -----------------------------
+  // Helpers / fallbacks
+  // -----------------------------
+  const $ = (typeof window.$ === "function") ? window.$ : (id)=>document.getElementById(id);
+  const on = (typeof window.on === "function") ? window.on : (el, evt, fn, opts)=>{ if (el) el.addEventListener(evt, fn, opts||false); };
+  const pick = (typeof window.pick === "function") ? window.pick : (v)=>String(v==null?"":v).trim();
 
-(function FV5_ROSTER_SINGLE(){
-  // ---------- helpers ----------
-  const _pick = (v)=> (typeof window.pick==="function" ? window.pick(v) : String(v??"").trim());
-  const _getDb = ()=> (typeof window.getDb==="function" ? window.getDb() : (window.firebaseDbInstance || (window.firebase?.firestore ? firebase.firestore() : null)));
-  const _serverTS = ()=> (typeof window.serverTS==="function" ? window.serverTS() : (window.firebase?.firestore?.FieldValue ? firebase.firestore.FieldValue.serverTimestamp() : null));
-  const _state = ()=> (typeof window.ensureState==="function" ? window.ensureState() : { activeBank:null, bank:{mcq:[],img:[],drag:[]} });
-  const _saveState = (s)=> (typeof window.safeSaveState==="function" ? window.safeSaveState(s) : (localStorage.setItem(window.FV_STATE_KEY||window.STATE_KEY||"fangvaktaren-v17::state", JSON.stringify(s)), true));
+  const getDb = ()=> (typeof window.getDb==="function") ? window.getDb() : (window.firebase?.firestore ? firebase.firestore() : null);
+  const serverTS = ()=> (typeof window.serverTS==="function") ? window.serverTS() : (window.firebase?.firestore?.FieldValue ? firebase.firestore.FieldValue.serverTimestamp() : null);
 
+  const ensureState = ()=> (typeof window.ensureState==="function") ? window.ensureState() : { activeBank:null, bank:{mcq:[],img:[],drag:[]} };
+  const safeSaveState = (s)=> (typeof window.safeSaveState==="function") ? window.safeSaveState(s) : (localStorage.setItem(window.FV_STATE_KEY||window.STATE_KEY||"fangvaktaren-v17::state", JSON.stringify(s)), true);
+
+  // token generator fallback
   if (typeof window.genToken !== "function"){
     window.genToken = function genToken(len=10){
       const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
@@ -8704,29 +8709,32 @@ Kort svar
     };
   }
 
-  function _host(){ return document.getElementById("rosterRows") || document.querySelector("#rosterRows"); }
-  function _modal(){ return document.getElementById("bankRosterModal") || document.querySelector("#bankRosterModal"); }
+  function _host(){ return $("rosterRows") || document.querySelector("#rosterRows"); }
+  function _modal(){ return $("bankRosterModal") || document.querySelector("#bankRosterModal"); }
 
   function _resolveOwnerAndBank(){
     const m = _modal();
-    let ownerUid = _pick(m?.dataset.ownerUid || "");
-    let bankId   = _pick(m?.dataset.bankId || "");
+    let ownerUid = pick(m?.dataset.ownerUid || "");
+    let bankId   = pick(m?.dataset.bankId || "");
 
     if (!ownerUid || !bankId){
-      const s = _state();
+      const s = ensureState();
       const a = s.activeBank || {};
-      ownerUid = _pick(a.ownerUid) || ownerUid;
-      bankId   = _pick(a.bankId)   || bankId;
+      ownerUid = pick(a.ownerUid) || ownerUid;
+      bankId   = pick(a.bankId)   || bankId;
     }
     if (!ownerUid || !bankId){
-      ownerUid = _pick((window.currentTeacherUser && window.currentTeacherUser.uid) ? window.currentTeacherUser.uid : ownerUid);
-      bankId   = _pick(window.activeCloudBankId || bankId);
+      ownerUid = pick((window.currentTeacherUser && window.currentTeacherUser.uid) ? window.currentTeacherUser.uid : ownerUid);
+      bankId   = pick(window.activeCloudBankId || bankId);
     }
     return { ownerUid, bankId };
   }
 
+  // -----------------------------
+  // Cloud read/save
+  // -----------------------------
   async function _readRosterCloud(ownerUid, bankId){
-    const db = _getDb();
+    const db = getDb();
     if (!db) return [];
     const ref = db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId);
     const snap = await ref.get();
@@ -8735,69 +8743,83 @@ Kort svar
   }
 
   async function _saveRosterCloud(ownerUid, bankId, roster){
-    const db = _getDb();
+    const db = getDb();
     if (!db) throw new Error("NO_DB");
     const ref = db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId);
-    await ref.set({ roster: roster, updatedAt: _serverTS() }, { merge:true });
+    await ref.set({ roster: roster, updatedAt: serverTS() }, { merge:true });
   }
 
-  // ---------- legacy remover (tar bort kvarvarande gamla kort) ----------
-  function _isLegacyCard(card){
+  // -----------------------------
+  // Mail "sent" UI state (per bank+token)
+  // -----------------------------
+  function _mailSentKey(bankId){ return `fangvaktaren-v17::rosterMailSent::${pick(bankId)||"no-bank"}`; }
+  function _getMailSentMap(bankId){
     try{
-      if (!card) return false;
-      const supBtn  = card.querySelector('button[data-act="sup_toggle"]');
-      const mailBtn = card.querySelector('button[data-act="mail"]');
-      const mailTxt = (mailBtn?.textContent || "").trim();
-      const mailTit = (mailBtn?.getAttribute("title") || "").trim();
-      const legacyByNoSup = !supBtn;
-      const legacyByMail  = (mailTxt.includes("Skapa e-post") || mailTit.includes("Skapa mejl"));
-      const score = [legacyByNoSup, legacyByMail].filter(Boolean).length;
-      return score >= 2;
-    }catch(e){ return false; }
+      const raw = localStorage.getItem(_mailSentKey(bankId));
+      const obj = raw ? JSON.parse(raw) : {};
+      return (obj && typeof obj === "object") ? obj : {};
+    }catch(e){ return {}; }
   }
-  function _cleanLegacyCards(){
-    const h = _host();
-    if (!h) return 0;
-    const cards = Array.from(h.querySelectorAll(".roster-row"));
-    const legacy = cards.filter(_isLegacyCard);
-    legacy.forEach(el=>el.remove());
-    return legacy.length;
+  function _setMailSent(bankId, token, kind, isSent){
+    const b = pick(bankId);
+    const t = pick(token);
+    const k = pick(kind) || "student";
+    if (!t) return;
+    const map = _getMailSentMap(b);
+    const key = `${k}:${t}`;
+    if (isSent) map[key] = 1;
+    else delete map[key];
+    try{ localStorage.setItem(_mailSentKey(b), JSON.stringify(map)); }catch(e){}
+  }
+  function _isMailSent(bankId, token, kind){
+    const map = _getMailSentMap(bankId);
+    return !!map[`${pick(kind)||"student"}:${pick(token)}`];
   }
 
-  // ---------- UI builders ----------
+  function _markGreen(btn, on){
+    if (!btn) return;
+    if (on){
+      btn.style.background = "#16a34a";
+      btn.style.borderColor = "#16a34a";
+      btn.style.color = "#ffffff";
+    } else {
+      btn.style.background = "";
+      btn.style.borderColor = "";
+      btn.style.color = "";
+    }
+  }
+
+  // -----------------------------
+  // DOM builders
+  // -----------------------------
   function _mkInput(type, ph, val, dataKey, flex){
     const inp = document.createElement("input");
     inp.type = type;
     inp.placeholder = ph;
-    inp.value = val ? String(val) : "";
+    inp.value = (val!=null) ? String(val) : "";
     inp.setAttribute("data-fv", dataKey);
     inp.style.flex = flex || "1 1 180px";
-    inp.style.minWidth = "140px";
-    inp.style.boxSizing = "border-box";
     return inp;
   }
-  function _mkMiniLabel(txt){
-    const d = document.createElement("div");
-    d.className = "mini";
-    d.style.opacity = "0.9";
-    d.textContent = txt;
-    return d;
-  }
 
-  function _mkTokenBlock(token){
+  function _mkTokenInline(token){
     const wrap = document.createElement("div");
     wrap.style.display = "flex";
-    wrap.style.flexDirection = "column";
-    wrap.style.gap = "4px";
-    wrap.style.flex = "0 1 160px";
-    wrap.style.minWidth = "140px";
-    wrap.style.maxWidth = "200px";
+    wrap.style.alignItems = "center";
+    wrap.style.gap = "6px";
+    wrap.style.flex = "0 0 auto";
 
-    const lbl = _mkMiniLabel("Token");
-    const inp = _mkInput("text", "Token", token || window.genToken(10), "token", "1 1 auto");
+    const lbl = document.createElement("div");
+    lbl.className = "mini";
+    lbl.style.opacity = "0.9";
+    lbl.textContent = "Token";
+
+    const inp = _mkInput("text", "Token", token || window.genToken(10), "token", "0 0 auto");
     inp.readOnly = true;
     inp.title = "Token används i spellänken (skapas automatiskt).";
-    inp.style.width = "100%";
+    inp.style.width = "120px";
+    inp.style.maxWidth = "120px";
+    inp.style.minWidth = "120px";
     inp.style.padding = "8px 10px";
     inp.style.borderRadius = "10px";
 
@@ -8852,20 +8874,6 @@ Kort svar
     return supWrap;
   }
 
-  function _markSent(btn, sent){
-    if (!btn) return;
-    btn.dataset.mailSent = sent ? "1" : "0";
-    if (sent){
-      btn.style.background = "#16a34a";
-      btn.style.borderColor = "#16a34a";
-      btn.style.color = "#fff";
-    } else {
-      btn.style.background = "";
-      btn.style.borderColor = "";
-      btn.style.color = "";
-    }
-  }
-
   function _buildStudentCard(row){
     const r = (row && typeof row==="object") ? row : {};
     const card = document.createElement("div");
@@ -8878,17 +8886,17 @@ Kort svar
     grid.style.gap = "10px";
     grid.style.alignItems = "center";
 
-    const inpName  = _mkInput("text",  "Namn",   r.name  || "", "name",  "1 1 220px");
-    const inpKlass = _mkInput("text",  "Klass",  r.klass || "", "klass", "0 1 140px");
-    const inpEmail = _mkInput("email", "E-post", r.email || "", "email", "1 1 260px");
+    const inpName  = _mkInput("text",  "Namn",  r.name  || "", "name",  "1 1 220px");
+    const inpKlass = _mkInput("text",  "Klass", r.klass || "", "klass", "0 1 140px");
+    const inpEmail = _mkInput("email", "E-post",r.email || "", "email", "1 1 260px");
 
     const token = r.token ? String(r.token) : window.genToken(10);
-    const tokenBlock = _mkTokenBlock(token);
+    const tokenInline = _mkTokenInline(token);
 
     grid.appendChild(inpName);
     grid.appendChild(inpKlass);
     grid.appendChild(inpEmail);
-    grid.appendChild(tokenBlock);
+    grid.appendChild(tokenInline);
 
     const actions = document.createElement("div");
     actions.className = "card-row";
@@ -8929,10 +8937,6 @@ Kort svar
     card.appendChild(actions);
     card.appendChild(supArea);
 
-    // restore sent markers
-    if (r._sent_student) _markSent(btnMail, true);
-    if (r._sent_sup && supArea.querySelector('button[data-act="sup_send"]')) _markSent(supArea.querySelector('button[data-act="sup_send"]'), true);
-
     return card;
   }
 
@@ -8943,173 +8947,277 @@ Kort svar
     const out = [];
 
     for (const rowEl of rows){
-      const name  = _pick(rowEl.querySelector('[data-fv="name"]')?.value || "");
-      const klass = _pick(rowEl.querySelector('[data-fv="klass"]')?.value || "");
-      const email = _pick(rowEl.querySelector('[data-fv="email"]')?.value || "");
+      const name  = pick(rowEl.querySelector('[data-fv="name"]')?.value || "");
+      const klass = pick(rowEl.querySelector('[data-fv="klass"]')?.value || "");
+      const email = pick(rowEl.querySelector('[data-fv="email"]')?.value || "");
 
       const tokenInp = rowEl.querySelector('[data-fv="token"]');
-      let token = _pick(tokenInp?.value || "");
+      let token = pick(tokenInp?.value || "");
       if (!token){
         token = window.genToken(10);
         if (tokenInp) tokenInp.value = token;
       }
+
       if (!name) continue;
 
-      const row = { name, klass, email, token };
-
       const supWrap = rowEl.querySelector('[data-sup-wrap="1"]');
-      const supName  = _pick(supWrap?.querySelector('[data-fv="sup_name"]')?.value || "");
-      const supEmail = _pick(supWrap?.querySelector('[data-fv="sup_email"]')?.value || "");
-      if (supName || supEmail){
-        row.supervisor = { name: supName, email: supEmail };
-      }
+      const supName  = pick(supWrap?.querySelector('[data-fv="sup_name"]')?.value || "");
+      const supEmail = pick(supWrap?.querySelector('[data-fv="sup_email"]')?.value || "");
 
-      // mail markers
-      const btnStudent = rowEl.querySelector('button[data-act="mail"]');
-      row._sent_student = (btnStudent?.dataset.mailSent === "1");
-      const btnSupSend = supWrap?.querySelector('button[data-act="sup_send"]');
-      row._sent_sup = (btnSupSend?.dataset.mailSent === "1");
+      const row = { name, klass, email, token };
+      if (supName || supEmail) row.supervisor = { name: supName, email: supEmail };
 
       out.push(row);
     }
+
     return out;
   }
 
   function _inviteLink(bankId, token){
     const base = (location.origin + location.pathname);
-    if (_pick(bankId)) return `${base}?public=${encodeURIComponent(bankId)}&token=${encodeURIComponent(token)}`;
+    if (pick(bankId)) return `${base}?public=${encodeURIComponent(bankId)}&token=${encodeURIComponent(token)}`;
     return `${base}?token=${encodeURIComponent(token)}`;
   }
 
-  function _mailto(to, cc, subject, body){
-    const params = [];
-    if (subject) params.push(`subject=${encodeURIComponent(subject)}`);
-    if (body)    params.push(`body=${encodeURIComponent(body)}`);
-    if (cc)      params.push(`cc=${encodeURIComponent(cc)}`);
-    const href = `mailto:${encodeURIComponent(to||"")}${params.length ? "?" + params.join("&") : ""}`;
+  function _mailTo(to, cc, subject, body){
+    const _to = encodeURIComponent(to||"");
+    const _cc = encodeURIComponent(cc||"");
+    const _s  = encodeURIComponent(subject||"");
+    const _b  = encodeURIComponent(body||"");
+    const ccPart = cc ? `&cc=${_cc}` : "";
+    const href = `mailto:${_to}?subject=${_s}&body=${_b}${ccPart}`;
     window.location.href = href;
   }
 
-  // ---------- autosave ----------
-  let _saveT = null;
-  async function _autosaveNow(){
+  // -----------------------------
+  // Autosave (debounced + close-save)
+  // -----------------------------
+  let _saveTimer = null;
+  async function _saveNow(showAlert){
     const { ownerUid, bankId } = _resolveOwnerAndBank();
     if (!ownerUid || !bankId) return false;
 
     const roster = _collectRoster();
     await _saveRosterCloud(ownerUid, bankId, roster);
 
-    const s = _state();
+    const s = ensureState();
     s.activeBank = s.activeBank || {};
     s.activeBank.ownerUid = ownerUid;
     s.activeBank.bankId = bankId;
     s.activeBank.rosterLen = roster.length;
     s.activeBank.roster = roster;
-    _saveState(s);
+    safeSaveState(s);
 
     try{ if (typeof window.updateBankStatusUI==="function") window.updateBankStatusUI(); }catch(e){}
+
+    if (showAlert) alert("Elevlista sparad.");
     return true;
   }
 
-  function _autosaveKick(){
-    clearTimeout(_saveT);
-    _saveT = setTimeout(()=>{ _autosaveNow().catch(()=>{}); }, 650);
+  function _kickSave(){
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(()=>{ _saveNow(false).catch(()=>{}); }, 650);
   }
 
-  // ---------- open modal (LOAD FROM CLOUD, ej tomt) ----------
+  // -----------------------------
+  // Open modal (loads existing; blank if none)
+  // -----------------------------
   async function openRosterModalV2(ownerUid, bankId){
     const m = _modal();
     const h = _host();
     if (!h) return;
 
     if (m){
-      m.dataset.ownerUid = _pick(ownerUid);
-      m.dataset.bankId   = _pick(bankId);
+      m.dataset.ownerUid = pick(ownerUid);
+      m.dataset.bankId   = pick(bankId);
     }
 
-    // rensa host helt + ta bort legacy om något smiter in
+    // always hard-clean
     h.innerHTML = "";
-    _cleanLegacyCards();
 
-    let roster = [];
+    // load existing from cloud (blank start if none)
     try{
-      roster = (ownerUid && bankId) ? await _readRosterCloud(ownerUid, bankId) : [];
-    }catch(e){ roster = []; }
+      const roster = (pick(ownerUid) && pick(bankId)) ? await _readRosterCloud(ownerUid, bankId) : [];
+      if (Array.isArray(roster) && roster.length){
+        roster.forEach(r=>h.appendChild(_buildStudentCard(r)));
+      }
+    }catch(e){}
 
-    if (roster.length){
-      roster.forEach(r=>h.appendChild(_buildStudentCard(r)));
-    } else {
-      // start: TOMT (inga kort) => inget att visa om tom bank
-      // men om du vill ha en tom rad direkt, avkommentera:
-      // h.appendChild(_buildStudentCard({}));
-    }
+    // paint green mail buttons if already sent
+    try{
+      const sentStudent = _getMailSentMap(bankId);
+      Array.from(h.querySelectorAll(".roster-row")).forEach(rowEl=>{
+        const token = pick(rowEl.querySelector('[data-fv="token"]')?.value || "");
+        const btnMail = rowEl.querySelector('button[data-act="mail"]');
+        if (btnMail){
+          const isSent = _isMailSent(bankId, token, "student");
+          _markGreen(btnMail, isSent);
+        }
+        const btnSupSend = rowEl.querySelector('button[data-act="sup_send"]');
+        if (btnSupSend){
+          const isSent2 = _isMailSent(bankId, token, "supervisor");
+          _markGreen(btnSupSend, isSent2);
+        }
+      });
+    }catch(e){}
 
-    // göm legacy "Save" om du vill (autosave används)
-    const btnSave = document.getElementById("btnRosterSave");
-    if (btnSave) btnSave.style.display = "none";
-
+    // show modal
     if (m){
       m.classList.remove("hidden");
       m.style.display = "flex";
     }
 
-    _bindOnce();
+    // ensure binds
+    bindRosterModalButtons();
   }
 
-  // ---------- bindings ----------
-  function _bindOnce(){
+  // expose
+  window._fv5_openRosterModal = openRosterModalV2;
+  window.openRosterModal = openRosterModalV2;
+
+  // compatibility: Save button calls this in some flows
+  window.handleSaveRoster = async function(){
+    try{
+      const ok = await _saveNow(false);
+      if (!ok) alert("Saknar aktiv bank (ownerUid/bankId). Välj en moln-bank först.");
+    }catch(e){
+      alert("Kunde inte spara elevlista till molnet. Kontrollera internet/Firebase.");
+    }
+  };
+
+  // -----------------------------
+  // Bindings required by fv5_init()
+  // -----------------------------
+  window.bindRosterModalButtons = function bindRosterModalButtons(){
     const h = _host();
+    const m = _modal();
     if (!h) return;
-    if (h.dataset.fv5RosterSingleBound === "1") return;
-    h.dataset.fv5RosterSingleBound = "1";
 
-    // autosave on input
-    h.addEventListener("input", (e)=>{
-      const t = e.target;
-      if (t && t.matches('input[data-fv],textarea[data-fv]')) _autosaveKick();
-    }, true);
-
-    // actions
-    h.addEventListener("click", (e)=>{
-      const btn = e.target.closest("button[data-act]");
-      if (!btn) return;
-
-      const act = btn.dataset.act;
-      const rowEl = btn.closest(".roster-row");
-      if (!rowEl) return;
-
-      const { bankId } = _resolveOwnerAndBank();
-
-      const name  = _pick(rowEl.querySelector('[data-fv="name"]')?.value || "");
-      const klass = _pick(rowEl.querySelector('[data-fv="klass"]')?.value || "");
-      const email = _pick(rowEl.querySelector('[data-fv="email"]')?.value || "");
-
-      const tokenInp = rowEl.querySelector('[data-fv="token"]');
-      let token = _pick(tokenInp?.value || "");
-      if (!token){
-        token = window.genToken(10);
-        if (tokenInp) tokenInp.value = token;
-      }
-
-      const supWrap  = rowEl.querySelector('[data-sup-wrap="1"]');
-      const supName  = _pick(supWrap?.querySelector('[data-fv="sup_name"]')?.value || "");
-      const supEmail = _pick(supWrap?.querySelector('[data-fv="sup_email"]')?.value || "");
-
-      if (act === "del"){
+    // Add row button (top)
+    const btnAdd = $("btnRosterAddRow") || document.querySelector("#btnRosterAddRow,[data-roster-add='1'],.btn-roster-add");
+    if (btnAdd && btnAdd.dataset.fv5Bound !== "1"){
+      btnAdd.dataset.fv5Bound = "1";
+      on(btnAdd, "click", (e)=>{
         e.preventDefault();
-        rowEl.remove();
-        _autosaveKick();
-        return;
-      }
+        const card = _buildStudentCard({});
+        h.appendChild(card);
 
-      if (act === "mail"){
+        // paint mail button based on local "sent" map
+        const { bankId } = _resolveOwnerAndBank();
+        const token = pick(card.querySelector('[data-fv="token"]')?.value || "");
+        const btnMail = card.querySelector('button[data-act="mail"]');
+        _markGreen(btnMail, _isMailSent(bankId, token, "student"));
+
+        card.querySelector('[data-fv="name"]')?.focus();
+        _kickSave();
+      });
+    }
+
+    // Save button (top) - keep visible and working
+    const btnSave = $("btnRosterSave") || document.querySelector("#btnRosterSave");
+    if (btnSave && btnSave.dataset.fv5Bound !== "1"){
+      btnSave.dataset.fv5Bound = "1";
+      on(btnSave, "click", async (e)=>{
         e.preventDefault();
-        if (!name){ alert("Skriv elevens namn först."); rowEl.querySelector('[data-fv="name"]')?.focus(); return; }
-        if (!email){ alert("Skriv elevens e-post först."); rowEl.querySelector('[data-fv="email"]')?.focus(); return; }
+        try{
+          const ok = await _saveNow(true);
+          if (!ok) alert("Saknar aktiv bank (ownerUid/bankId). Välj en moln-bank först.");
+        }catch(err){
+          alert("Kunde inte spara elevlista till molnet. Kontrollera internet/Firebase.");
+        }
+      });
+    }
 
-        const link = _inviteLink(bankId, token);
-        const subject = "Fångvaktaren – din spellänk";
-        const body =
+    // Close button (top) - SAVE THEN CLOSE (så listan inte blir tom)
+    const btnClose = $("btnCloseRosterModal") || document.querySelector("#btnCloseRosterModal,[data-roster-close='1'],.btn-roster-close");
+    if (btnClose && btnClose.dataset.fv5Bound !== "1"){
+      btnClose.dataset.fv5Bound = "1";
+      on(btnClose, "click", async (e)=>{
+        e.preventDefault();
+        try{ await _saveNow(false); }catch(err){}
+        if (m){
+          m.classList.add("hidden");
+          m.style.display = "none";
+        }
+      });
+    }
+
+    // Inputs autosave (capturing)
+    if (h.dataset.fv5RosterV2InputBound !== "1"){
+      h.dataset.fv5RosterV2InputBound = "1";
+      h.addEventListener("input", (e)=>{
+        const t = e.target;
+        if (!t) return;
+        if (t.matches('input[data-fv],textarea[data-fv]')) _kickSave();
+      }, true);
+    }
+
+    // Delegated buttons
+    if (h.dataset.fv5RosterV2ActionsBound !== "1"){
+      h.dataset.fv5RosterV2ActionsBound = "1";
+      h.addEventListener("click", (e)=>{
+        const btn = e.target.closest("button[data-act]");
+        if (!btn) return;
+
+        const act = btn.dataset.act;
+        const rowEl = btn.closest(".roster-row");
+        if (!rowEl) return;
+
+        const { bankId } = _resolveOwnerAndBank();
+
+        const name  = pick(rowEl.querySelector('[data-fv="name"]')?.value || "");
+        const klass = pick(rowEl.querySelector('[data-fv="klass"]')?.value || "");
+        const email = pick(rowEl.querySelector('[data-fv="email"]')?.value || "");
+        const tokenInp = rowEl.querySelector('[data-fv="token"]');
+        let token = pick(tokenInp?.value || "");
+        if (!token){
+          token = window.genToken(10);
+          if (tokenInp) tokenInp.value = token;
+        }
+
+        if (act === "del"){
+          e.preventDefault();
+          rowEl.remove();
+          _kickSave();
+          return;
+        }
+
+        if (act === "sup_toggle"){
+          e.preventDefault();
+          const supWrap = rowEl.querySelector('[data-sup-wrap="1"]');
+          if (!supWrap) return;
+          const isOpen = (supWrap.style.display !== "none");
+          supWrap.style.display = isOpen ? "none" : "block";
+          btn.textContent = isOpen ? "➕ Lägg till handledare" : "✏️ Redigera handledare";
+          _kickSave();
+          return;
+        }
+
+        if (act === "sup_del"){
+          e.preventDefault();
+          const supWrap = rowEl.querySelector('[data-sup-wrap="1"]');
+          if (!supWrap) return;
+          const inpSN = supWrap.querySelector('[data-fv="sup_name"]');
+          const inpSE = supWrap.querySelector('[data-fv="sup_email"]');
+          if (inpSN) inpSN.value = "";
+          if (inpSE) inpSE.value = "";
+          supWrap.style.display = "none";
+          rowEl.querySelector('button[data-act="sup_toggle"]') && (rowEl.querySelector('button[data-act="sup_toggle"]').textContent = "➕ Lägg till handledare");
+          _kickSave();
+          return;
+        }
+
+        if (act === "mail"){
+          e.preventDefault();
+          if (!name){ alert("Skriv elevens namn först."); rowEl.querySelector('[data-fv="name"]')?.focus(); return; }
+          if (!email){ alert("Skriv elevens e-post först."); rowEl.querySelector('[data-fv="email"]')?.focus(); return; }
+
+          const supWrap = rowEl.querySelector('[data-sup-wrap="1"]');
+          const supEmail = pick(supWrap?.querySelector('[data-fv="sup_email"]')?.value || "");
+
+          const link = _inviteLink(bankId, token);
+          const subject = "Fångvaktaren – din spellänk";
+          const body =
 `Hej ${name}!
 
 Här är din personliga spellänk till Fångvaktaren:
@@ -9121,51 +9229,31 @@ ${link}
 
 / Läraren`;
 
-        // CC handledare om e-post finns
-        const cc = supEmail ? supEmail : "";
-        _mailto(email, cc, subject, body);
+          _mailTo(email, supEmail, subject, body);
 
-        _markSent(btn, true);
-        _autosaveKick();
-        return;
-      }
-
-      if (act === "sup_toggle"){
-        e.preventDefault();
-        if (!supWrap) return;
-        const isOpen = (supWrap.style.display !== "none");
-        supWrap.style.display = isOpen ? "none" : "block";
-        btn.textContent = isOpen ? "➕ Lägg till handledare" : "✏️ Redigera handledare";
-        _autosaveKick();
-        return;
-      }
-
-      if (act === "sup_del"){
-        e.preventDefault();
-        if (!supWrap) return;
-        const inpSN = supWrap.querySelector('[data-fv="sup_name"]');
-        const inpSE = supWrap.querySelector('[data-fv="sup_email"]');
-        if (inpSN) inpSN.value = "";
-        if (inpSE) inpSE.value = "";
-        supWrap.style.display = "none";
-        const tgl = rowEl.querySelector('button[data-act="sup_toggle"]');
-        if (tgl) tgl.textContent = "➕ Lägg till handledare";
-        _autosaveKick();
-        return;
-      }
-
-      if (act === "sup_send"){
-        e.preventDefault();
-        if (!name){ alert("Skriv elevens namn först."); rowEl.querySelector('[data-fv="name"]')?.focus(); return; }
-        if (!supEmail){
-          alert("Skriv handledarens e-post först.");
-          supWrap?.querySelector('[data-fv="sup_email"]')?.focus();
+          _setMailSent(bankId, token, "student", true);
+          _markGreen(btn, true);
+          _kickSave();
           return;
         }
 
-        const link = _inviteLink(bankId, token);
-        const subject = `Fångvaktaren – elevlänk (${name}${klass?` ${klass}`:""})`;
-        const body =
+        if (act === "sup_send"){
+          e.preventDefault();
+          if (!name){ alert("Skriv elevens namn först."); rowEl.querySelector('[data-fv="name"]')?.focus(); return; }
+
+          const supWrap = rowEl.querySelector('[data-sup-wrap="1"]');
+          const supName  = pick(supWrap?.querySelector('[data-fv="sup_name"]')?.value || "");
+          const supEmail = pick(supWrap?.querySelector('[data-fv="sup_email"]')?.value || "");
+
+          if (!supEmail){
+            alert("Skriv handledarens e-post först.");
+            supWrap?.querySelector('[data-fv="sup_email"]')?.focus();
+            return;
+          }
+
+          const link = _inviteLink(bankId, token);
+          const subject = `Fångvaktaren – elevlänk (${name}${klass?` ${klass}`:""})`;
+          const body =
 `Hej ${supName || ""}!
 
 Här är elevens länk till Fångvaktaren:
@@ -9175,76 +9263,43 @@ Länk: ${link}
 Hälsningar
 / Läraren`;
 
-        _mailto(supEmail, "", subject, body);
+          _mailTo(supEmail, "", subject, body);
 
-        _markSent(btn, true);
-        _autosaveKick();
-        return;
-      }
-    }, true);
-
-    // TOP buttons (Add/Close) + close autosave
-    document.addEventListener("click", (e)=>{
-      const t = e.target;
-
-      const add = t?.closest?.("#btnRosterAddRow,[data-roster-add='1'],.btn-roster-add");
-      if (add){
-        e.preventDefault();
-        const h2 = _host();
-        if (!h2) return;
-        const card = _buildStudentCard({});
-        h2.appendChild(card);
-        card.querySelector('[data-fv="name"]')?.focus();
-        _autosaveKick();
-        return;
-      }
-
-      const close = t?.closest?.("#btnCloseRosterModal,[data-roster-close='1'],.btn-roster-close");
-      if (close){
-        e.preventDefault();
-        // autosave före stäng (så inget försvinner)
-        _autosaveNow().catch(()=>{}).finally(()=>{
-          const m = _modal();
-          if (m){
-            m.classList.add("hidden");
-            m.style.display = "none";
-          }
-        });
-        return;
-      }
-    }, true);
-
-    // sista skydd: om legacy dyker upp, ta bort direkt
-    const hObs = _host();
-    if (hObs && !hObs.__fv5LegacyObs){
-      const obs = new MutationObserver(()=>{ _cleanLegacyCards(); });
-      obs.observe(hObs, { childList:true, subtree:true });
-      hObs.__fv5LegacyObs = obs;
-    }
-  }
-
-  // Exposed APIs / overrides
-  window._fv5_openRosterModal = openRosterModalV2;
-  window.openRosterModal = openRosterModalV2;
-
-  // Compatibility: om något kallar handleSaveRoster
-  window.handleSaveRoster = async function(){
-    try{
-      const ok = await _autosaveNow();
-      if (!ok) alert("Saknar aktiv bank (ownerUid/bankId). Välj en moln-bank först.");
-    }catch(e){
-      alert("Kunde inte spara elevlista till molnet. Kontrollera internet/Firebase.");
+          _setMailSent(bankId, token, "supervisor", true);
+          _markGreen(btn, true);
+          _kickSave();
+          return;
+        }
+      }, true);
     }
   };
 
-  // Safety clean on boot if host already has legacy
-  try{ _cleanLegacyCards(); }catch(e){}
+  window.bindRosterOpenButtons = function bindRosterOpenButtons(){
+    if (document.body.dataset.fv5RosterOpenBound === "1") return;
+    document.body.dataset.fv5RosterOpenBound = "1";
+
+    document.addEventListener("click", async (e)=>{
+      const t = e.target.closest("[data-action='roster'],[data-open-roster='1'],.btn-roster,#btnOpenRosterModal,#btnOpenRoster");
+      if (!t) return;
+
+      e.preventDefault();
+
+      const s = ensureState();
+      const a = s.activeBank || {};
+      const ownerUid = pick(t.dataset.ownerUid || t.dataset.owner || a.ownerUid || (window.currentTeacherUser && window.currentTeacherUser.uid ? window.currentTeacherUser.uid : ""));
+      const bankId = pick(t.dataset.bankId || t.dataset.bank || a.bankId || window.activeCloudBankId || "");
+
+      if (!ownerUid || !bankId){
+        alert("Saknar bank-id/ownerUid. Välj en bank i molnlistan först.");
+        return;
+      }
+      await openRosterModalV2(ownerUid, bankId);
+    }, true);
+  };
 
 })();
-
-/* slut Sektion 5G+5G1+5G2: ROSTER (single script för att undvika <script>-mismatch i VS) */
 </script>
-<!-- slut Sektion 5G+5G1+5G2: ROSTER (ERSÄTT HELA) -->
+<!-- slut Sektion 5G+5G1+5G2: ROSTER (V2 ONLY + robust bind + autosave + CC handledare + token-size fix) -->
 
 
 <script>
