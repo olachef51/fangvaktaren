@@ -6123,7 +6123,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
             <div class="fv3-actions">
               <button class="btn fv3-btn-xs btn-primary" type="button" id="btnAplScanIn">Skanna för incheckning</button>
               <button class="btn fv3-btn-xs" type="button" id="btnAplScanOut">Skanna för utcheckning</button>
-              <button class="btn fv3-btn-xs" type="button" id="btnAplStopScan">Stoppa</button>
             </div>
           </div>
 
@@ -6141,11 +6140,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         <div class="fv-goal-card">
           <div class="fv-goal-head">
             <div>
-              <div class="fv-goal-title">Du är incheckad</div>
+              <div class="fv-goal-title">✅ Du är incheckad</div>
               <div class="mini" id="aplCheckedMini">—</div>
             </div>
             <div class="fv3-actions">
-              <button class="btn fv3-btn-xs" type="button" id="btnAplForceCheckout">Utcheckning</button>
+              <button class="btn fv3-btn-xs" type="button" id="btnAplCheckoutManual">Manuell utcheckning</button>
             </div>
           </div>
 
@@ -6225,6 +6224,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 <!-- start SEKTION 4K: APL CHECK-IN (LOGIK) -->
 <script>
 (function(){
+  const __FV_APL_ADMIN_TEST_CODE = "APL-MRS-2026-01";
+
   let __fvAplStream = null;
   let __fvAplDetector = null;
   let __fvAplScanRAF = 0;
@@ -6307,6 +6308,20 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   async function _fv4_submitAplEvent(code, method, eventType){
     const c = String(code||"").trim();
     if (!c) throw new Error("no_code");
+
+    const isAdminTest = (c === __FV_APL_ADMIN_TEST_CODE);
+
+    // ADMIN TEST: tillåt UI-test även om Firebase/token/bank strular
+    if (isAdminTest){
+      const fake = {
+        type: String(eventType||"checkin"),
+        code: c,
+        method: String(method||"admin-test"),
+        atIso: _fv4_nowIso()
+      };
+      _fv4_setSavedLastApl(fake);
+      return fake;
+    }
 
     try{ if (typeof initFirebase === "function") await initFirebase(); }catch(e){}
 
@@ -6451,6 +6466,16 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
   }
 
+  function _fv4_setAplHeaderCheckedIn(active){
+    const sub = _fv4_getEl("aplModalSub");
+    if (!sub) return;
+    if (active && active.isCheckedIn){
+      sub.textContent = `✅ Incheckad (${active.code})`;
+    }else{
+      sub.textContent = "Checka in och välj sedan Läromål eller Dagbok.";
+    }
+  }
+
   function fvUpdateAplUI(){
     try{
       const last = _fv4_getSavedLastApl();
@@ -6466,9 +6491,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       if (active && active.isCheckedIn){
         _fv4_setText("aplCheckedMini", `${active.method} • ${_fv4_formatTs(active.atIso)}`);
         _fv4_setText("aplCheckedText", `Kod: ${active.code}`);
+        _fv4_setAplHeaderCheckedIn(active);
       }else{
         _fv4_setText("aplCheckedMini", "—");
         _fv4_setText("aplCheckedText", "Inte incheckad.");
+        _fv4_setAplHeaderCheckedIn(null);
       }
     }catch(e){}
   }
@@ -6487,7 +6514,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     modal.style.display = "flex";
 
     try{ _fv4_switchAplView(); }catch(e){}
-    try{ _fv4_setTab("goals"); }catch(e){}
+    try{ if (_fv4_isCheckedIn()) _fv4_setTab("goals"); }catch(e){}
   }
 
   function _fv4_closeApl(){
@@ -6549,14 +6576,16 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
                 const lastObj = await _fv4_submitAplEvent(raw, "scan", eventType);
 
                 if (eventType === "checkin"){
-                  _fv4_setCheckedInState(raw, "scan");
+                  const active = _fv4_setCheckedInState(raw, "scan");
                   _fv4_setText("aplSubmitStatus", `✅ Incheckning skickad (${lastObj.code}).`);
+                  _fv4_setAplHeaderCheckedIn(active);
                   if (typeof window.fvToast === "function") window.fvToast("✅ APL incheckning skickad.");
                   try{ _fv4_switchAplView(); }catch(e){}
                   try{ _fv4_setTab("goals"); }catch(e){}
                 }else{
                   _fv4_clearCheckedInState();
                   _fv4_setText("aplSubmitStatus", `✅ Utcheckning skickad (${lastObj.code}).`);
+                  _fv4_setAplHeaderCheckedIn(null);
                   if (typeof window.fvToast === "function") window.fvToast("✅ APL utcheckning skickad.");
                   try{ _fv4_switchAplView(); }catch(e){}
                 }
@@ -6613,7 +6642,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       const lastObj = await _fv4_submitAplEvent(code, "manual", "checkin");
       if (inpManual) inpManual.value = "";
 
-      _fv4_setCheckedInState(code, "manual");
+      const active = _fv4_setCheckedInState(code, "manual");
+      _fv4_setAplHeaderCheckedIn(active);
 
       _fv4_setText("aplSubmitStatus", `✅ Incheckning skickad (${lastObj.code}).`);
       if (typeof window.fvToast === "function") window.fvToast("✅ APL incheckning skickad.");
@@ -6625,17 +6655,21 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
   }
 
-  async function _fv4_doCheckoutSystem(){
+  async function _fv4_doManualCheckout(){
     const active = _fv4_getAplActive();
-    const code = active && active.code ? String(active.code) : "";
+    const code = (active && active.code) ? String(active.code) : "";
+
     if (!code){
-      _fv4_setText("aplSubmitStatus", "⚠️ Ingen aktiv kod att checka ut från. Använd skanna utcheckning eller stäng.");
+      _fv4_setText("aplSubmitStatus", "⚠️ Ingen aktiv kod att checka ut från. Använd skanna utcheckning eller checka in först.");
       return;
     }
+
     _fv4_setText("aplSubmitStatus", "⏳ Skickar utcheckning…");
     try{
-      const lastObj = await _fv4_submitAplEvent(code, "system", "checkout");
+      const lastObj = await _fv4_submitAplEvent(code, "manual", "checkout");
       _fv4_clearCheckedInState();
+      _fv4_setAplHeaderCheckedIn(null);
+
       _fv4_setText("aplSubmitStatus", `✅ Utcheckning skickad (${lastObj.code}).`);
       if (typeof window.fvToast === "function") window.fvToast("✅ APL utcheckning skickad.");
       try{ fvUpdateAplUI(); }catch(e){}
@@ -6654,14 +6688,12 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
     const btnScanIn  = _fv4_getEl("btnAplScanIn");
     const btnScanOut = _fv4_getEl("btnAplScanOut");
-    const btnStop    = _fv4_getEl("btnAplStopScan");
 
     const btnManualCheckin = _fv4_getEl("btnAplCheckinManual");
+    const btnManualCheckout = _fv4_getEl("btnAplCheckoutManual");
 
     const btnTabGoals = _fv4_getEl("btnAplTabGoals");
     const btnTabDiary = _fv4_getEl("btnAplTabDiary");
-
-    const btnForceCheckout = _fv4_getEl("btnAplForceCheckout");
 
     if (btnFront && !btnFront.__fvAplBoundFront){
       btnFront.__fvAplBoundFront = true;
@@ -6685,14 +6717,14 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       btnScanOut.__fvAplBound = true;
       btnScanOut.addEventListener("click", ()=>{ _fv4_startScan("out"); });
     }
-    if (btnStop && !btnStop.__fvAplBound){
-      btnStop.__fvAplBound = true;
-      btnStop.addEventListener("click", ()=>{ _fv4_stopScan(); });
-    }
 
     if (btnManualCheckin && !btnManualCheckin.__fvAplBound){
       btnManualCheckin.__fvAplBound = true;
       btnManualCheckin.addEventListener("click", ()=>{ _fv4_doManualCheckin(); });
+    }
+    if (btnManualCheckout && !btnManualCheckout.__fvAplBound){
+      btnManualCheckout.__fvAplBound = true;
+      btnManualCheckout.addEventListener("click", ()=>{ _fv4_doManualCheckout(); });
     }
 
     if (btnTabGoals && !btnTabGoals.__fvAplBound){
@@ -6702,11 +6734,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     if (btnTabDiary && !btnTabDiary.__fvAplBound){
       btnTabDiary.__fvAplBound = true;
       btnTabDiary.addEventListener("click", ()=>{ _fv4_setTab("diary"); });
-    }
-
-    if (btnForceCheckout && !btnForceCheckout.__fvAplBound){
-      btnForceCheckout.__fvAplBound = true;
-      btnForceCheckout.addEventListener("click", ()=>{ _fv4_doCheckoutSystem(); });
     }
 
     const modal = _fv4_getEl("aplModal");
@@ -6721,7 +6748,11 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
 
     try{ _fv4_switchAplView(); }catch(e){}
-    try{ _fv4_setTab("goals"); }catch(e){}
+    try{
+      if (_fv4_isCheckedIn()){
+        _fv4_setTab("goals");
+      }
+    }catch(e){}
     try{ fvUpdateAplUI(); }catch(e){}
   }
 
