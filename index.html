@@ -9353,12 +9353,11 @@ ${link}
 /* slut Sektion 5G1: ROSTER PATCH (blockera legacy openRosterInline/_fv_legacyAddRow + hard-clean) */
 
 
-<!-- start Sektion 5G2: ROSTER v2 (tom start + 2 toppknappar + elevkort med handledare + autosave) -->
+/* start Sektion 5G2: ROSTER v2 (tom start + 2 toppknappar + elevkort med handledare + autosave) */
 
 (function FV5_ROSTER_V2(){
   // --- helpers ---
   const _pick = (v)=> (typeof window.pick==="function" ? window.pick(v) : String(v??"").trim());
-  const _esc  = (s)=> (typeof window.esc==="function" ? window.esc(s) : String(s??""));
   const _getDb = ()=> (typeof window.getDb==="function" ? window.getDb() : (window.firebaseDbInstance || (window.firebase?.firestore ? firebase.firestore() : null)));
   const _serverTS = ()=> (typeof window.serverTS==="function" ? window.serverTS() : (window.firebase?.firestore?.FieldValue ? firebase.firestore.FieldValue.serverTimestamp() : null));
   const _state = ()=> (typeof window.ensureState==="function" ? window.ensureState() : { activeBank:null, bank:{mcq:[],img:[],drag:[]} });
@@ -9442,25 +9441,28 @@ ${link}
     return d;
   }
 
+  // FIX: tokenrutan ska aldrig bli en stor fyrkant (låser bredd oavsett global CSS)
   function _mkTokenBlock(token){
     const wrap = document.createElement("div");
     wrap.style.display = "flex";
     wrap.style.flexDirection = "column";
     wrap.style.gap = "4px";
     wrap.style.flex = "0 0 120px";
+    wrap.style.minWidth = "120px";
     wrap.style.maxWidth = "120px";
-    wrap.style.minWidth = "110px";
-    wrap.style.alignSelf = "flex-start";
+    wrap.style.boxSizing = "border-box";
 
     const lbl = _mkMiniLabel("Token");
-    const inp = _mkInput("text", "Token", token || window.genToken(10), "token", "0 0 120px");
+
+    const inp = _mkInput("text", "Token", token || window.genToken(10), "token", "0 0 auto");
     inp.readOnly = true;
     inp.title = "Token används i spellänken (skapas automatiskt).";
     inp.style.width = "120px";
     inp.style.maxWidth = "120px";
+    inp.style.minWidth = "120px";
     inp.style.boxSizing = "border-box";
-    inp.style.padding = "8px 10px";
-    inp.style.height = "38px";
+    inp.style.paddingLeft = "10px";
+    inp.style.paddingRight = "10px";
 
     wrap.appendChild(lbl);
     wrap.appendChild(inp);
@@ -9524,7 +9526,6 @@ ${link}
     grid.style.flexWrap = "wrap";
     grid.style.gap = "10px";
     grid.style.alignItems = "center";
-    grid.style.justifyContent = "flex-start";
 
     const inpName  = _mkInput("text",  "Namn",  r.name  || "", "name",  "1 1 220px");
     const inpKlass = _mkInput("text",  "Klass", r.klass || "", "klass", "0 1 140px");
@@ -9618,8 +9619,9 @@ ${link}
     return `${base}?token=${encodeURIComponent(token)}`;
   }
 
+  // FIX: mailto: får INTE encode:a själva e-postadressen (vissa klienter tappar den då)
   function _mailTo(to, subject, body){
-    const addr = String(to||"").trim();
+    const addr = _pick(to || "");
     const href = `mailto:${addr}?subject=${encodeURIComponent(subject||"")}&body=${encodeURIComponent(body||"")}`;
     window.location.href = href;
   }
@@ -9633,6 +9635,7 @@ ${link}
     const roster = _collectRoster();
     await _saveRosterCloud(ownerUid, bankId, roster);
 
+    // spegla i state
     const s = _state();
     s.activeBank = s.activeBank || {};
     s.activeBank.ownerUid = ownerUid;
@@ -9649,7 +9652,8 @@ ${link}
     _saveT = setTimeout(()=>{ _autosaveNow().catch(()=>{}); }, 650);
   }
 
-  // --- open roster modal v2 (LADDAR befintliga elever + handledare från molnet) ---
+  // --- open roster modal v2 ---
+  // FIX: rensa alltid host först och rendera ENDAST moln-roster. Om moln-roster är tom -> tom start.
   async function openRosterModalV2(ownerUid, bankId){
     const m = _modal();
     const h = _host();
@@ -9663,33 +9667,45 @@ ${link}
     _cleanHostHard();
 
     try{
-      const roster = (ownerUid && bankId) ? await _readRosterCloud(ownerUid, bankId) : [];
-      roster.forEach(r=>h.appendChild(_buildStudentCard(r)));
-    }catch(e){}
+      const ou = _pick(ownerUid);
+      const bi = _pick(bankId);
+      const roster = (ou && bi) ? await _readRosterCloud(ou, bi) : [];
+      if (Array.isArray(roster) && roster.length){
+        roster.forEach(r=>h.appendChild(_buildStudentCard(r)));
+      }
+    }catch(e){
+      // om läsning misslyckas: starta tomt (ingen default-ruta)
+    }
 
+    // göm gamla Save-knappen (vi autosave:ar)
     const btnSave = document.getElementById("btnRosterSave");
     if (btnSave) btnSave.style.display = "none";
 
+    // visa modal
     if (m){
       m.classList.remove("hidden");
       m.style.display = "flex";
     }
 
+    // bind v2 actions
     _bindRosterV2Once();
   }
 
+  // --- bind v2 (delegation) ---
   function _bindRosterV2Once(){
     const h = _host();
     if (!h) return;
     if (h.dataset.fv5RosterV2Bound === "1") return;
     h.dataset.fv5RosterV2Bound = "1";
 
+    // inputs autosave
     h.addEventListener("input", (e)=>{
       const t = e.target;
       if (!t) return;
       if (t.matches('input[data-fv],textarea[data-fv]')) _autosaveKick();
     }, true);
 
+    // buttons delegation (inne i elevkort)
     h.addEventListener("click", (e)=>{
       const btn = e.target.closest("button[data-act]");
       if (!btn) return;
@@ -9759,8 +9775,8 @@ ${link}
         if (inpSN) inpSN.value = "";
         if (inpSE) inpSE.value = "";
         supWrap.style.display = "none";
-        const bt = rowEl.querySelector('button[data-act="sup_toggle"]');
-        if (bt) bt.textContent = "➕ Lägg till handledare";
+        const supBtn = rowEl.querySelector('button[data-act="sup_toggle"]');
+        if (supBtn) supBtn.textContent = "➕ Lägg till handledare";
         _autosaveKick();
         return;
       }
@@ -9798,9 +9814,14 @@ Hälsningar
       }
     }, true);
 
+    // TOP buttons (Add/Close) - bind EN gång globalt
+    if (document.body.dataset.fv5RosterV2TopBound === "1") return;
+    document.body.dataset.fv5RosterV2TopBound = "1";
+
     document.addEventListener("click", (e)=>{
       const t = e.target;
 
+      // Lägg till elev (endast toppknapp)
       const add = t?.closest?.("#btnRosterAddRow,[data-roster-add='1'],.btn-roster-add");
       if (add){
         e.preventDefault();
@@ -9813,28 +9834,34 @@ Hälsningar
         return;
       }
 
+      // Stäng (toppknapp) -> autosave först
       const close = t?.closest?.("#btnCloseRosterModal,[data-roster-close='1'],.btn-roster-close");
       if (close){
         e.preventDefault();
-        const m = _modal();
-        if (m){
-          m.classList.add("hidden");
-          m.style.display = "none";
-        }
+        _autosaveNow().finally(()=>{
+          const m = _modal();
+          if (m){
+            m.classList.add("hidden");
+            m.style.display = "none";
+          }
+        });
         return;
       }
     }, true);
   }
 
+  // Override exposed APIs to guarantee v2 behavior
   window._fv5_openRosterModal = openRosterModalV2;
   window.openRosterModal = openRosterModalV2;
 
+  // Compatibility: if something calls handleSaveRoster, do autosave once
   window.handleSaveRoster = async function(){
     try{ await _autosaveNow(); }catch(e){
       alert("Kunde inte autospara elevlista till molnet. Kontrollera internet/Firebase.");
     }
   };
 
+  // Safety: om legacy rader finns i host, nuke dem
   try{
     const h = _host();
     if (h){
@@ -9846,7 +9873,6 @@ Hälsningar
 })();
 
 /* slut Sektion 5G2: ROSTER v2 (tom start + 2 toppknappar + elevkort med handledare + autosave) */
-
 
 
 </script>
