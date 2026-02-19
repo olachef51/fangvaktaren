@@ -7549,95 +7549,99 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 <!-- start SEKTION 5: UI-BINDINGS (Lärarläge + Frågeeditor + Roster + Exit) -->
 <script>
+
+
 /* start Sektion 5A: HELPERS (fallbacks för att undvika crash) */
 
-  // små helpers (används redan i din kodbas)
-  function _fv5_show(el){
-    if (!el) return;
-    el.classList.remove("hidden");
-    el.style.display = "flex";
-  }
-  function _fv5_hide(el){
-    if (!el) return;
-    el.classList.add("hidden");
-    el.style.display = "none";
-  }
-  window._fv5_show = window._fv5_show || _fv5_show;
-  window._fv5_hide = window._fv5_hide || _fv5_hide;
-
-  // Minimal "on" om den inte finns (din kod använder on(...) överallt)
-  if (typeof window.on !== "function"){
-    window.on = (el, evt, fn, opts)=>{ if (el) el.addEventListener(evt, fn, opts||false); };
-  }
-
-  // Minimal "$" och "qsa" om de inte finns (din kod använder dem)
-  if (typeof window.$ !== "function"){
-    window.$ = (sel, root)=> (root||document).querySelector(sel);
-  }
-  if (typeof window.qsa !== "function"){
-    window.qsa = (sel, root)=> Array.from((root||document).querySelectorAll(sel));
-  }
-
-  /* FV CLOUD FIX: se till att _fv5_getDb() och _fv5_getActiveIds() alltid finns och pekar rätt */
-  if (typeof window._fv5_getDb !== "function"){
-    window._fv5_getDb = function(){
-      try{
-        if (window.firebaseDbInstance) return window.firebaseDbInstance;
-        if (typeof window.getDb === "function"){
-          const d = window.getDb();
-          if (d) return d;
-        }
-        if (window.firebase && typeof firebase.firestore === "function"){
-          const d = firebase.firestore();
-          if (d) return d;
-        }
-      }catch(e){}
-      return null;
-    };
-  }
-
-  if (typeof window._fv5_getActiveIds !== "function"){
-    window._fv5_getActiveIds = function(){
-      try{
-        // 1) UI-valet i roster-modalen (oftast "senast valda")
-        const modal = document.querySelector("#bankRosterModal");
-        const uiBankId   = modal ? String(modal.dataset.bankId || "").trim() : "";
-        const uiPublicId = modal ? String(modal.dataset.publicId || "").trim() : "";
-
-        // 2) State.activeBank (kan vara äldre än UI)
-        let s = null;
-        try{ s = (typeof ensureState==="function") ? ensureState() : null; }catch(e){}
-        const ab = (s && s.activeBank && typeof s.activeBank==="object") ? s.activeBank : {};
-
-        // 3) ownerUid: state -> currentTeacherUser -> auth.currentUser
-        let ownerUid = String(ab.ownerUid || "").trim();
-        if (!ownerUid && window.currentTeacherUser && currentTeacherUser.uid) ownerUid = String(currentTeacherUser.uid).trim();
-        if (!ownerUid){
-          try{
-            const cu = (window.firebase?.auth?.() ? firebase.auth().currentUser : null);
-            if (cu && cu.uid) ownerUid = String(cu.uid).trim();
-          }catch(e){}
-        }
-
-        // 4) bankId: UI ska vinna om den finns, annars state / activeCloudBankId
-        let bankId = uiBankId || String(ab.bankId || ab.id || "").trim();
-        if (!bankId && String(window.activeCloudBankId||"").trim()) bankId = String(window.activeCloudBankId).trim();
-
-        // 5) publicId: UI -> state -> querystring
-        let publicId = uiPublicId || String(ab.publicId || "").trim();
-        try{
-          const qs = new URLSearchParams(location.search);
-          if (!publicId) publicId = String(qs.get("public") || "").trim();
-        }catch(e){}
-
-        return { ownerUid, bankId, publicId };
-      }catch(e){
-        return { ownerUid:"", bankId:"", publicId:"" };
+/* FV CLOUD FIX: se till att _fv5_getDb() och _fv5_getActiveIds() alltid finns och pekar rätt */
+if (typeof window._fv5_getDb !== "function"){
+  window._fv5_getDb = function(){
+    try{
+      if (window.firebaseDbInstance) return window.firebaseDbInstance;
+      if (typeof window.getDb === "function"){
+        const d = window.getDb();
+        if (d) return d;
       }
-    };
-  }
+      if (window.firebase && typeof window.firebase.firestore === "function"){
+        const d = window.firebase.firestore();
+        if (d) return d;
+      }
+      if (typeof firebase !== "undefined" && firebase && typeof firebase.firestore === "function"){
+        const d = firebase.firestore();
+        if (d) return d;
+      }
+    }catch(e){}
+    return null;
+  };
+}
+
+if (typeof window._fv5_getActiveIds !== "function"){
+  window._fv5_getActiveIds = function(){
+    try{
+      // 1) UI-val: kolla flera möjliga modaler
+      const modal =
+        document.querySelector("#bankRosterModal") ||
+        document.querySelector("#cloudBanksModal") ||
+        document.querySelector("[data-bank-id][data-fv5-close-bound]") ||
+        null;
+
+      const uiBankId   = modal ? String(modal.dataset.bankId || "").trim() : "";
+      const uiPublicId = modal ? String(modal.dataset.publicId || "").trim() : "";
+
+      // 2) State.activeBank (kan vara äldre än UI)
+      let s = null;
+      try{ s = (typeof ensureState==="function") ? ensureState() : null; }catch(e){}
+      const ab = (s && s.activeBank && typeof s.activeBank==="object") ? s.activeBank : {};
+
+      // 3) ownerUid: state -> currentTeacherUser -> auth.currentUser
+      let ownerUid = String(ab.ownerUid || "").trim();
+      if (!ownerUid && window.currentTeacherUser && window.currentTeacherUser.uid){
+        ownerUid = String(window.currentTeacherUser.uid).trim();
+      }
+      if (!ownerUid){
+        try{
+          const cu =
+            (window.firebase && typeof window.firebase.auth === "function" && window.firebase.auth().currentUser)
+              ? window.firebase.auth().currentUser
+              : (typeof firebase !== "undefined" && firebase && typeof firebase.auth === "function" && firebase.auth().currentUser)
+                ? firebase.auth().currentUser
+                : null;
+          if (cu && cu.uid) ownerUid = String(cu.uid).trim();
+        }catch(e){}
+      }
+
+      // 4) publicId: UI -> state -> querystring
+      let publicId = uiPublicId || String(ab.publicId || "").trim();
+      try{
+        const qs = new URLSearchParams(location.search);
+        if (!publicId) publicId = String(qs.get("public") || "").trim();
+      }catch(e){}
+
+      // IMPORTANT: om publicId finns ska den vinna helt (töm ownerUid/bankId)
+      if (publicId){
+        return { ownerUid:"", bankId:"", publicId };
+      }
+
+      // 5) bankId: UI ska vinna om den finns, annars state / activeCloudBankId
+      let bankId = uiBankId || String(ab.bankId || ab.id || "").trim();
+      if (!bankId && String(window.activeCloudBankId||"").trim()){
+        bankId = String(window.activeCloudBankId).trim();
+      }
+
+      return { ownerUid, bankId, publicId:"" };
+    }catch(e){
+      return { ownerUid:"", bankId:"", publicId:"" };
+    }
+  };
+}
+
+/* FV CLOUD CONSOLE TEST (kör i konsolen vid behov)
+console.log("[_fv5_getDb]", typeof window._fv5_getDb, window._fv5_getDb?.());
+console.log("[_fv5_getActiveIds]", typeof window._fv5_getActiveIds, window._fv5_getActiveIds?.());
+*/
 
 /* slut Sektion 5A: HELPERS (fallbacks för att undvika crash) */
+
 
 /* =========================================================
    Sektion 5B: LÄRARLÄGE (TeacherGate + modal open/close + bind)
