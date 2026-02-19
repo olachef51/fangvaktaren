@@ -9192,137 +9192,134 @@ ${link}
   }
 /* slut Sektion 5G: ROSTER (elever: kort per elev + ✉️ mejl + ta bort + spara i moln-bank) */
 
-/* start Sektion 5H: BANK-STATUS UI (minimalt, så det inte blir undefined) */
-  // ===== Cloud ↔ State reconcile + hydrate (SINGEL source of truth) =====
 
-  async function _fv5_cloudFetchBankDoc(ownerUid, bankId){
+<!-- start Sektion 5I: INIT (bind allt + första render) -->
+  /* =========================================================
+     FV5 CLOUD BANK SELECT (FIX)
+     - Klick på molnbank måste uppdatera ensureState().activeBank
+     - Ladda bankdoc.bank -> s.bank och doc.roster -> s.activeBank.roster
+     - Spara via safeSaveState och rendera listor
+     ========================================================= */
+
+  async function _fv5_selectCloudBank(ownerUid, bankId, name){
+    ownerUid = pick(ownerUid);
+    bankId   = pick(bankId);
+    name     = pick(name);
+
+    if (!ownerUid){
+      ownerUid = pick(window.currentTeacherUser && window.currentTeacherUser.uid ? window.currentTeacherUser.uid : "");
+    }
+    if (!ownerUid || !bankId){
+      alert("Saknar ownerUid/bankId för molnbank. (Kunde inte aktivera banken.)");
+      return { ok:false, err:"MISSING_IDS" };
+    }
+
     const db = getDb();
-    if (!db) return { ok:false, err:"NO_DB" };
-    if (!ownerUid || !bankId) return { ok:false, err:"MISSING_IDS" };
+    if (!db){
+      alert("Firebase/DB saknas. Kunde inte ladda molnbank.");
+      return { ok:false, err:"NO_DB" };
+    }
 
-    const ref = db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId);
-    const snap = await ref.get();
-    if (!snap.exists) return { ok:false, err:"NOT_FOUND" };
-    const data = snap.data() || {};
-    return { ok:true, data };
-  }
-
-  function _fv5_parseBankIdFromStatusText(txt){
-    const t = String(txt||"");
-    // matchar t.ex. "ID: 6DPkdYkuFVN71NQTQi62"
-    const m = t.match(/\bID:\s*([A-Za-z0-9_-]{10,})\b/);
-    return m ? String(m[1]) : "";
-  }
-
-  function _fv5_getLikelyOwnerUid(){
-    const s = ensureState();
-    const a = s.activeBank || {};
-    const uid1 = pick(a.ownerUid || "");
-    if (uid1) return uid1;
-    const uid2 = pick((window.currentTeacherUser && window.currentTeacherUser.uid) ? window.currentTeacherUser.uid : "");
-    if (uid2) return uid2;
-    const uid3 = pick((window.firebase?.auth?.()?.currentUser?.uid) ? window.firebase.auth().currentUser.uid : "");
-    return uid3 || "";
-  }
-
-  async function _fv5_setActiveCloudBankAndHydrate(ownerUid, bankId, nameHint){
-    const uid = pick(ownerUid || "");
-    const bid = pick(bankId || "");
-    if (!uid || !bid) return { ok:false, err:"MISSING_IDS" };
-
-    // hämta doc
-    let res;
+    let data = {};
     try{
-      res = await _fv5_cloudFetchBankDoc(uid, bid);
+      const snap = await db.collection("teachers").doc(ownerUid).collection("banks").doc(bankId).get();
+      data = snap.exists ? (snap.data()||{}) : {};
     }catch(e){
+      alert("Kunde inte hämta molnbank. Kontrollera internet/Firebase.");
       return { ok:false, err:"FETCH_FAIL" };
     }
-    if (!res.ok) return res;
 
-    const data = res.data || {};
-    const cloudBank = (data.bank && typeof data.bank === "object") ? data.bank : {};
+    const cloudBank = (data && typeof data.bank === "object" && data.bank) ? data.bank : {};
+    const newBank = {
+      mcq: Array.isArray(cloudBank.mcq) ? cloudBank.mcq : [],
+      img: Array.isArray(cloudBank.img) ? cloudBank.img : [],
+      drag: Array.isArray(cloudBank.drag) ? cloudBank.drag : []
+    };
+
     const roster = Array.isArray(data.roster) ? data.roster : [];
+    const bankName = name || pick(data.name) || "(molnbank)";
 
-    // skriv till state (EN sanning: state.activeBank + state.bank)
     const s = ensureState();
     s.activeBank = s.activeBank || {};
-    s.activeBank.ownerUid = uid;
-    s.activeBank.bankId = bid;
-    s.activeBank.name = pick(data.name || nameHint || s.activeBank.name || "");
+    s.activeBank.ownerUid = ownerUid;
+    s.activeBank.bankId = bankId;
+    s.activeBank.name = bankName;
     s.activeBank.roster = roster;
     s.activeBank.rosterLen = roster.length;
 
-    // Hydrate frågor
-    s.bank = s.bank || { mcq:[], img:[], drag:[] };
-    s.bank.mcq  = Array.isArray(cloudBank.mcq)  ? cloudBank.mcq  : [];
-    s.bank.img  = Array.isArray(cloudBank.img)  ? cloudBank.img  : [];
-    s.bank.drag = Array.isArray(cloudBank.drag) ? cloudBank.drag : [];
+    s.bank = newBank;
 
     safeSaveState(s);
 
-    // UI refresh
     try{ if (typeof window._fv5_renderAllQuestionLists === "function") window._fv5_renderAllQuestionLists(); }catch(e){}
     try{ if (typeof window.updateBankStatusUI === "function") window.updateBankStatusUI(); }catch(e){}
 
-    return { ok:true, bankId: bid, ownerUid: uid };
+    return { ok:true };
   }
-  window._fv5_setActiveCloudBankAndHydrate = _fv5_setActiveCloudBankAndHydrate;
+  window._fv5_selectCloudBank = _fv5_selectCloudBank;
 
-  async function _fv5_reconcileActiveBankFromUI(){
-    const status = $("cloudBankStatus");
-    const uiBankId = _fv5_parseBankIdFromStatusText(status ? status.textContent : "");
-    if (!uiBankId) return { ok:false, err:"NO_UI_BANKID" };
+  function _fv5_tryParseBankClickTarget(t){
+    if (!t) return null;
 
-    const s = ensureState();
-    const stBankId = pick(s.activeBank?.bankId || "");
+    const el =
+      t.closest("[data-bank-id],[data-bankid],[data-id],[data-docid],[data-open-bank],[data-cloud-bank]") ||
+      t.closest(".cloud-bank,.bank-row,.bank-item,.bank-card,[data-action='openBank']") ||
+      null;
 
-    // Om mismatch: UI visar annan bank än state -> synka state till UI bank
-    if (stBankId && stBankId === uiBankId) return { ok:true, synced:false };
+    if (!el) return null;
 
-    const uid = _fv5_getLikelyOwnerUid();
-    if (!uid) return { ok:false, err:"NO_UID" };
+    const d = el.dataset || {};
 
-    return await _fv5_setActiveCloudBankAndHydrate(uid, uiBankId, s.activeBank?.name || "");
-  }
-  window._fv5_reconcileActiveBankFromUI = _fv5_reconcileActiveBankFromUI;
+    const bankId =
+      pick(d.bankId) || pick(d.bankid) || pick(d.id) || pick(d.docid) ||
+      pick(d.openBank) || pick(d.cloudBank) ||
+      pick(el.getAttribute("data-bank-id")) || pick(el.getAttribute("data-bankid")) ||
+      pick(el.getAttribute("data-id")) || pick(el.getAttribute("data-docid")) ||
+      "";
 
-  function updateBankStatusUI(){
-    // Om din kodbas har en "riktig" variant, kör den, men vi lägger reconcile i bakgrunden.
-    if (window._fv5_updateBankStatusUI_real){
-      try{ window._fv5_updateBankStatusUI_real(); }catch(e){}
-      // bakgrund: försök reconcile en gång om det ser fel ut
-      setTimeout(()=>{ try{ _fv5_reconcileActiveBankFromUI(); }catch(e){} }, 0);
-      return;
+    const ownerUid =
+      pick(d.ownerUid) || pick(d.owneruid) || pick(d.owner) || pick(d.uid) ||
+      pick(el.getAttribute("data-owner-uid")) || pick(el.getAttribute("data-owneruid")) ||
+      pick(el.getAttribute("data-owner")) || pick(el.getAttribute("data-uid")) ||
+      "";
+
+    let name =
+      pick(d.name) || pick(d.bankName) || pick(d.bankname) ||
+      pick(el.getAttribute("data-name")) || pick(el.getAttribute("data-bank-name")) ||
+      "";
+
+    if (!name){
+      const txt = pick(el.textContent || "");
+      if (txt) name = txt.split("\n").map(x=>x.trim()).filter(Boolean)[0] || "";
     }
 
-    const s = ensureState();
-    const a = s.activeBank || {};
-    const counts = bankCounts(s.bank);
-
-    const status = $("cloudBankStatus");
-    if (status){
-      const name = a.name ? String(a.name) : "(ingen)";
-      const id = a.bankId ? String(a.bankId) : "-";
-      const upd = nowStamp();
-      const rosterLen = Number.isFinite(a.rosterLen) ? a.rosterLen : (Array.isArray(a.roster) ? a.roster.length : 0);
-      const activeTxt = (a.bankId && a.ownerUid) ? "✅ Aktiv" : "⛔ Ingen bank";
-      status.textContent = `${name} • Uppd: ${upd} ${activeTxt}  ID: ${id} • Frågor: ${counts.mcq} MCQ, ${counts.img} Bild, ${counts.drag} Drag • Elever: ${rosterLen}`;
-    }
-
-    const tabExit = $("tab-exit");
-    if (tabExit){
-      if (String(s.activeMode||"") === "exit") tabExit.classList.add("active");
-    }
+    if (!bankId) return null;
+    return { ownerUid, bankId, name };
   }
 
-  if (typeof window.updateBankStatusUI === "function" && window.updateBankStatusUI !== updateBankStatusUI){
-    window._fv5_updateBankStatusUI_real = window.updateBankStatusUI;
+  function _fv5_bindCloudBankClickToState(){
+    if (document.body.dataset.fv5CloudBankBind === "1") return;
+    document.body.dataset.fv5CloudBankBind = "1";
+
+    document.addEventListener("click", async (e)=>{
+      const t = e.target;
+      if (!t) return;
+
+      // Undvik att vi fångar klick i modaler som inte är banklistan
+      if (t.closest("#bankRosterModal")) return;
+
+      // match: klick på bank i molnlistan (robust)
+      const info = _fv5_tryParseBankClickTarget(t);
+      if (!info) return;
+
+      // Om elementet är en “roster”-knapp eller annat, låt roster-bind hantera
+      if (t.closest("[data-action='roster'],[data-open-roster='1'],.btn-roster,#btnOpenRosterModal,#btnOpenRoster")) return;
+
+      e.preventDefault();
+      await _fv5_selectCloudBank(info.ownerUid, info.bankId, info.name);
+    }, true);
   }
-  window.updateBankStatusUI = updateBankStatusUI;
-/* slut Sektion 5H: BANK-STATUS UI (minimalt, så det inte blir undefined) */
 
-
-/* start Sektion 5I: INIT (bind allt + första render) */
   function fv5_init(){
     // Viktigt: initiera lösenord tidigt så gate alltid är “konfigurerad”
     try{ if (typeof window.updateTeacherPasswordStatus === "function") window.updateTeacherPasswordStatus(); }catch(e){}
@@ -9342,28 +9339,11 @@ ${link}
     bindRosterModalButtons();
     bindRosterOpenButtons();
 
+    // ✅ FIX: klick på molnbank måste uppdatera state + ladda bank
+    _fv5_bindCloudBankClickToState();
+
     _fv5_renderAllQuestionLists();
     updateBankStatusUI();
-
-    // ===== NYTT: Hydrate molnbank -> state.bank + roster, och reconcile om UI visar annan bank =====
-    (async ()=>{
-      try{
-        const s = ensureState();
-        const uid = pick(s.activeBank?.ownerUid || "") || _fv5_getLikelyOwnerUid();
-        const bid = pick(s.activeBank?.bankId || "");
-
-        // 1) Om vi har en aktiv bank i state: hydratera den
-        if (uid && bid){
-          await _fv5_setActiveCloudBankAndHydrate(uid, bid, s.activeBank?.name || "");
-        }
-
-        // 2) Om UI visar en annan bankId än state: reconcile + hydratera den (fixar "status visar 6DPk men state pekar Ev87")
-        await _fv5_reconcileActiveBankFromUI();
-
-      }catch(e){
-        // swallow – vi vill aldrig crasha init
-      }
-    })();
   }
 
   if (document.readyState === "loading"){
@@ -9371,7 +9351,9 @@ ${link}
   } else {
     fv5_init();
   }
-/* slut Sektion 5I: INIT (bind allt + första render) -->
+/* slut Sektion 5I: INIT (bind allt + första render) */
+
+
 
 /* start Sektion 5J: EXIT-TEMPLATE (Lägg till/ta bort frågor + elevvy + dynamisk mailtext) */
 
