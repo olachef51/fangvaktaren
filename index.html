@@ -8847,7 +8847,7 @@ Kort svar
           <input type="email" placeholder="Handledare – e-post" data-fv="sup_email" style="flex:1 1 260px;" value="${esc(supEmail)}">
         </div>
         <div class="card-row" style="gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:10px;">
-          <button class="btn btn-sm" type="button" data-act="sup_send">✉️ Skicka till handledare</button>
+          <button class="btn btn-sm" type="button" data-act="sup_send" data-mail-sent="0">✉️ Skicka till handledare</button>
           <button class="btn btn-sm btn-danger" type="button" data-act="sup_del">🗑️ Ta bort handledare</button>
         </div>
       </div>
@@ -8960,7 +8960,8 @@ Kort svar
         e.preventDefault();
         const supWrap = row.querySelector('[data-sup-wrap="1"]');
         if (!supWrap) return;
-        const show = (supWrap.style.display === "none" || !supWrap.style.display);
+        const cur = (supWrap.style.display || "").toLowerCase();
+        const show = (cur === "none" || cur === "");
         supWrap.style.display = show ? "block" : "none";
         _fv5_scheduleAutoSave();
         return;
@@ -9046,10 +9047,33 @@ Kort svar
     }, true);
   }
 
+  function _fv5_hideRosterModalSafe(){
+    try{
+      if (typeof window._fv5_hideRosterModal === "function"){
+        window._fv5_hideRosterModal();
+        return;
+      }
+    }catch(e){}
+    const modal = document.querySelector("#bankRosterModal");
+    if (modal){
+      modal.classList.add("hidden");
+      modal.style.display = "none";
+    }
+  }
+
+  async function _fv5_saveRosterNow(why){
+    const roster = _fv5_collectRosterFromUI();
+    const res = await _fv5_cloudSaveRoster(roster);
+    if (!res.ok){
+      alert((why ? (why + ": ") : "") + "spara misslyckades: " + (res.reason||"okänt fel"));
+      return false;
+    }
+    return true;
+  }
+
   function _fv5_bindTopButtons(){
     const btnAdd  = _fv5_el("btnRosterAddRow");
     const btnSave = _fv5_el("btnRosterSave");
-    const btnClose= _fv5_el("btnRosterClose") || _fv5_el("btnRosterCloseModal");
     const host = _fv5_getHost();
 
     if (btnAdd && btnAdd.dataset.fv5Bound !== "1"){
@@ -9068,47 +9092,53 @@ Kort svar
       btnSave.dataset.fv5Bound = "1";
       btnSave.addEventListener("click", async (e)=>{
         e.preventDefault();
-        const roster = _fv5_collectRosterFromUI();
-        const res = await _fv5_cloudSaveRoster(roster);
-        if (!res.ok){ alert("Spara misslyckades: " + (res.reason||"okänt fel")); return; }
-        alert("Elever sparade i banken.");
+        const ok = await _fv5_saveRosterNow("Spara");
+        if (ok) alert("Elever sparade i banken.");
       });
     }
 
-    if (btnClose && btnClose.dataset.fv5Bound !== "1"){
-      btnClose.dataset.fv5Bound = "1";
-      btnClose.addEventListener("click", async (e)=>{
+    const modal = document.querySelector("#bankRosterModal");
+    if (modal && modal.dataset.fv5CloseBound !== "1"){
+      modal.dataset.fv5CloseBound = "1";
+
+      modal.addEventListener("click", async (e)=>{
+        const el = e.target.closest("button, a, .btn, .modal-close, .close, .btn-close");
+        if (!el) return;
+
+        const txt = (el.textContent||"").trim().toLowerCase();
+        const id  = (el.id||"").toLowerCase();
+        const cls = (el.className||"").toLowerCase();
+
+        const isClose =
+          id === "btncloserostermodal" ||
+          txt.includes("stäng") || txt === "x" || txt.includes("close") ||
+          id.includes("close") || cls.includes("close") || cls.includes("modal-close") ||
+          el.getAttribute("data-act") === "close";
+
+        if (!isClose) return;
+
         e.preventDefault();
-        const roster = _fv5_collectRosterFromUI();
-        const res = await _fv5_cloudSaveRoster(roster);
-        if (!res.ok){ alert("Stängning: spara misslyckades: " + (res.reason||"okänt fel")); return; }
+        e.stopPropagation();
 
-        try{
-          if (typeof window._fv5_hideRosterModal === "function"){
-            window._fv5_hideRosterModal();
-            return;
-          }
-        }catch(_){}
+        const ok = await _fv5_saveRosterNow("Stängning");
+        if (!ok) return;
 
-        const modal = document.querySelector("#bankRosterModal");
-        if (modal){
-          modal.classList.add("hidden");
-          modal.style.display = "none";
-        }
-        if (host) host.innerHTML = "";
-      });
+        _fv5_hideRosterModalSafe();
+      }, true);
     }
   }
 
   async function _fv5_openRosterV2(){
     const host = _fv5_getHost();
     if (host) host.innerHTML = ""; // blank start
+
     const roster = await _fv5_cloudLoadRoster();
     const h = _fv5_getHost();
     if (h){
       h.innerHTML = "";
       roster.forEach(obj=>h.appendChild(_fv5_mkRow(obj)));
     }
+
     _fv5_bindRowActions();
     _fv5_bindTopButtons();
   }
@@ -9147,7 +9177,6 @@ Kort svar
   }
 })();
 /* slut Sektion 5G2: ROSTER v2 (blank start + add row + handledare + autosave + mail cc + close saves) */
-
 
 </script>
 <!-- slut Sektion 5G+5G1+5G2: ROSTER (v2 replace, load+save+close-save, no legacy, token size fix, cc supervisor) -->
