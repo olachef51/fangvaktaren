@@ -7199,14 +7199,18 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
   }
   window.bindTeacherPasswordChange = window.bindTeacherPasswordChange || bindTeacherPasswordChange;
 
-  // Glömt lösenord (SAFE: bind endast på explicita ID:n, aldrig textmatch)
+  // Recovery (Google-inlogg = recovery-nyckeln)
+  // - Visar/aktiverar endast om Google-inloggad lärare
+  // - Nollställer lokalt och låter läraren sätta nytt lösenord
   function bindTeacherForgotPassword(){
     const ids = [
       "btnForgotTeacherPassword",
       "btnTeacherForgotPassword",
       "btnForgotPassword",
       "btnForgotPw",
-      "btnTeacherForgotPw"
+      "btnTeacherForgotPw",
+      "btnTeacherRecovery",
+      "btnRecoveryTeacherPassword"
     ];
 
     let el = null;
@@ -7219,33 +7223,126 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     if (el.dataset.fv5ForgotBound === "1") return;
     el.dataset.fv5ForgotBound = "1";
 
+    function _fv5_isGoogleTeacher(){
+      try{
+        if (typeof window._fv_hasTeacher === "function" && !window._fv_hasTeacher()) return false;
+      }catch(e){}
+      try{
+        if (window.currentTeacherUser && window.currentTeacherUser.uid) return true;
+      }catch(e){}
+      try{
+        const cu = window.firebase?.auth?.() ? window.firebase.auth().currentUser : null;
+        if (cu && cu.uid) return true;
+      }catch(e){}
+      return false;
+    }
+
+    function _fv5_setRecoveryUiState(){
+      const ok = _fv5_isGoogleTeacher();
+      try{
+        el.disabled = !ok;
+      }catch(e){}
+      try{
+        el.title = ok
+          ? "Återställ lärarlösenord via Google-inlogg"
+          : "Logga in med Google (lärarläge) för att kunna återställa lösenordet.";
+      }catch(e){}
+      try{
+        el.style.opacity = ok ? "" : "0.6";
+        el.style.cursor = ok ? "" : "not-allowed";
+      }catch(e){}
+      return ok;
+    }
+
+    // init + lyssna på ev auth-event (om din kod triggar fv-auth-changed)
+    _fv5_setRecoveryUiState();
+    try{
+      if (!window.__fv5_recoveryAuthHooked){
+        window.__fv5_recoveryAuthHooked = true;
+        window.addEventListener("fv-auth-changed", ()=>{ try{ _fv5_setRecoveryUiState(); }catch(e){} });
+      }
+    }catch(e){}
+
     el.addEventListener("click", (e)=>{
       e.preventDefault();
       e.stopPropagation();
       if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
 
-      let pw = "";
-      try{
-        if (typeof window._fv_getTeacherPassword === "function") pw = String(window._fv_getTeacherPassword()||"").trim();
-      }catch(_e){}
-      if (!pw){
-        try{
-          const key = String(window.TEACHER_PW_KEY||"").trim();
-          if (key) pw = String(localStorage.getItem(key)||"").trim();
-        }catch(_e){}
-      }
-
-      if (!pw){
-        alert("Inget lösenord är sparat ännu.");
+      if (!_fv5_setRecoveryUiState()){
+        alert("Återställning kräver Google-inlogg i lärarläge.");
         return;
       }
-      alert("Lärarlösenord (lokalt sparat): " + pw);
+
+      const ok = confirm(
+        "Återställ lärarlösenord via Google?\n\n" +
+        "Detta nollställer lärarlösenordet lokalt på DENNA enhet.\n" +
+        "Sedan får du ange ett nytt lösenord.\n\n" +
+        "Fortsätt?"
+      );
+      if (!ok) return;
+
+      // Nollställ (föredrar din säkra funktion från 3C, annars fallback)
+      try{
+        if (typeof window._fv_forgetTeacherPassword === "function"){
+          window._fv_forgetTeacherPassword();
+        }else{
+          try{
+            const key = String(window.TEACHER_PW_KEY||"").trim();
+            if (key) localStorage.removeItem(key);
+          }catch(_e){}
+          try{
+            if (typeof window.loadState==="function" && typeof window.saveState==="function"){
+              const st = window.loadState() || {};
+              st.teacherPassword = "";
+              window.saveState(st);
+            }
+          }catch(_e){}
+          try{
+            if (typeof window.applyPasswordToGate==="function") window.applyPasswordToGate("");
+          }catch(_e){}
+        }
+      }catch(err){}
+
+      // Sätt nytt direkt (utan att visa något gammalt lösenord)
+      const new1 = prompt("Sätt nytt lärarlösenord (minst 4 tecken):", "");
+      if (!new1) {
+        alert("Lösenordet är nollställt. Öppna lärarläget igen och sätt nytt lösenord när du vill.");
+        return;
+      }
+      if (String(new1).trim().length < 4){
+        alert("För kort lösenord. Lösenordet är fortfarande nollställt. Försök igen.");
+        return;
+      }
+      const new2 = prompt("Upprepa nytt lärarlösenord:", "");
+      if (String(new2||"").trim() !== String(new1).trim()){
+        alert("Matchar inte. Lösenordet är nollställt. Försök igen.");
+        return;
+      }
+
+      try{
+        const pw = String(new1).trim();
+        if (typeof window._fv_setTeacherPassword === "function") {
+          window._fv_setTeacherPassword(pw);
+        } else {
+          try{ localStorage.setItem(String(window.TEACHER_PW_KEY||""), pw); }catch(_e){}
+          try{ window.applyPasswordToGate?.(pw); }catch(_e){}
+          try{
+            if (typeof window.loadState==="function" && typeof window.saveState==="function"){
+              const st = window.loadState() || {};
+              st.teacherPassword = pw;
+              window.saveState(st);
+            }
+          }catch(_e){}
+        }
+      }catch(err){}
+
+      try{ window.updateTeacherPasswordStatus?.(); }catch(_e){}
+      alert("✅ Nytt lärarlösenord sparat via Google-recovery.");
     }, true);
   }
   window.bindTeacherForgotPassword = window.bindTeacherForgotPassword || bindTeacherForgotPassword;
 
 /* slut Sektion 5B: LÄRARLÄGE (TeacherGate + modal open/close + bind) */
-
 
 /* start Sektion 5B1: GLÖMT LÖSENORD (BIND I LÄRARMODALEN, RESET) */
 (function(){
@@ -8538,6 +8635,7 @@ window.initQuestionForms = window.initQuestionForms || initQuestionForms;
     try{ window.bindTeacherGate?.(); }catch(e){}
     try{ window.bindTeacherModalClose?.(); }catch(e){}
     try{ window.bindTeacherPasswordChange?.(); }catch(e){}
+    try{ window.bindTeacherForgotPassword?.(); }catch(e){}
 
     // tabs / navigation
     try{ window.bindTabs?.(); }catch(e){}
@@ -8574,7 +8672,6 @@ window.initQuestionForms = window.initQuestionForms || initQuestionForms;
   }
 })();
 /* slut Sektion 5I: INIT (bind framsida + teacher + exit + render) */
-
 
 
 /* start Sektion 5J: EXIT-TEMPLATE (Lägg till/ta bort frågor + elevvy + dynamisk mailtext) */
