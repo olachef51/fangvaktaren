@@ -2488,7 +2488,7 @@ async function handleGoogleLogout(){
 /* start Sektion 3C: MOLN + ROSTER + PROGRESSION + UI-BIND (samlat) */
 
 /* ---------- PRE-BOOT FALLBACKS (måste ligga först i 3C) ---------- */
-/* start Sektion 3C0: PRE-BOOT FALLBACKS (pw-key + token + roster + render) */
+/* start Sektion 3C0: PRE-BOOT FALLBACKS (pw + rosterTabs + progress cache) */
 (function(){
   "use strict";
 
@@ -2514,7 +2514,8 @@ async function handleGoogleLogout(){
     return Array.from(uniq);
   }
 
-  function _fv_readPwFromSomewhere(){
+  function _fv_readPw(){
+    // 1) localStorage (alla kandidater)
     try{
       const keys = _fv_knownPwKeys();
       for (const k of keys){
@@ -2522,6 +2523,7 @@ async function handleGoogleLogout(){
         if (v) return { pw:v, key:k, src:"ls" };
       }
     }catch(e){}
+    // 2) state.teacherPassword
     try{
       const st = (typeof window.loadState==="function") ? (window.loadState()||{}) : {};
       const pw = _fv_pickStr(st.teacherPassword);
@@ -2530,71 +2532,78 @@ async function handleGoogleLogout(){
     return { pw:"", key:"", src:"none" };
   }
 
-  function _fv_ensureApplyPasswordToGate(){
+  function _fv_writePwEverywhere(pw){
+    const P = _fv_pickStr(pw);
+    if (!P) return;
+    const keys = _fv_knownPwKeys();
+    for (const k of keys){
+      try{ localStorage.setItem(k, P); }catch(e){}
+    }
     try{
-      if (typeof window.applyPasswordToGate !== "function"){
-        window.applyPasswordToGate = function(pw){
-          try{
-            const key = _fv_pickStr(window.TEACHER_PW_KEY);
-            if (key) localStorage.setItem(key, _fv_pickStr(pw));
-          }catch(e){}
-          try{
-            const t = document.getElementById("teacherGateText");
-            if (t){
-              const has = _fv_pickStr(pw).length > 0;
-              t.textContent = has
-                ? "Ange lärarlösenord. (Lösenord är redan satt – skriv rätt lösenord för att fortsätta.)"
-                : "Ange lärarlösenord. Första gången du loggar in blir lösenordet det du skriver här.";
-            }
-          }catch(e){}
-        };
+      if (typeof window.loadState==="function" && typeof window.saveState==="function"){
+        const st = window.loadState() || {};
+        st.teacherPassword = P;
+        window.saveState(st);
       }
     }catch(e){}
   }
 
-  function _fv_syncTeacherPwKey(){
-    try{
-      const base = _fv_getStorageBase();
-      const preferKey = _fv_pickStr(window.TEACHER_PW_KEY) || (base + "::teacherPassword");
+  // --- TEACHER_PW_KEY canonical ---
+  try{
+    const base = _fv_getStorageBase();
+    const preferKey = _fv_pickStr(window.TEACHER_PW_KEY) || (base + "::teacherPassword");
+    window.TEACHER_PW_KEY = preferKey;
+  }catch(e){}
 
-      const found = _fv_readPwFromSomewhere();
-      const preferPw = _fv_pickStr((function(){
-        try{ return localStorage.getItem(preferKey); }catch(e){ return ""; }
-      })());
-
-      if (!preferPw && found.pw){
+  // --- applyPasswordToGate fallback ---
+  try{
+    if (typeof window.applyPasswordToGate !== "function"){
+      window.applyPasswordToGate = function(pw){
         try{
-          window.TEACHER_PW_KEY = preferKey;
-          localStorage.setItem(preferKey, found.pw);
+          const key = _fv_pickStr(window.TEACHER_PW_KEY);
+          if (key) localStorage.setItem(key, _fv_pickStr(pw));
         }catch(e){}
-      }else{
-        try{ window.TEACHER_PW_KEY = preferKey; }catch(e){}
-      }
-
-      try{
-        if (typeof window.loadState==="function" && typeof window.saveState==="function"){
-          const st = window.loadState() || {};
-          if (!_fv_pickStr(st.teacherPassword)){
-            const pw = _fv_pickStr(localStorage.getItem(window.TEACHER_PW_KEY));
-            if (pw){
-              st.teacherPassword = pw;
-              window.saveState(st);
-            }
+        try{
+          const t = document.getElementById("teacherGateText");
+          if (t){
+            const has = _fv_pickStr(pw).length > 0;
+            t.textContent = has
+              ? "Ange lärarlösenord. (Lösenord är redan satt – skriv rätt lösenord för att fortsätta.)"
+              : "Ange lärarlösenord. Första gången du loggar in blir lösenordet det du skriver här.";
           }
-        }
-      }catch(e){}
+        }catch(e){}
+      };
+    }
+  }catch(e){}
 
-      try{ _fv_ensureApplyPasswordToGate(); }catch(e){}
-      try{
-        const pwNow = _fv_pickStr(localStorage.getItem(window.TEACHER_PW_KEY));
-        if (pwNow) window.applyPasswordToGate(pwNow);
-      }catch(e){}
-    }catch(e){}
+  // --- password helpers (om någon annan kod vill använda) ---
+  if (typeof window._fv_getTeacherPassword !== "function"){
+    window._fv_getTeacherPassword = function(){
+      const found = _fv_readPw();
+      return _fv_pickStr(found.pw);
+    };
+  }
+  if (typeof window._fv_setTeacherPassword !== "function"){
+    window._fv_setTeacherPassword = function(pw){
+      const P = _fv_pickStr(pw);
+      if (!P) return;
+      _fv_writePwEverywhere(P);
+      try{ window.applyPasswordToGate(P); }catch(e){}
+    };
   }
 
-  _fv_syncTeacherPwKey();
+  // --- SYNC: om lösenord finns någonstans -> skriv till ALLA nycklar (fixar "Fel nuvarande lösenord" pga fel key) ---
+  (function(){
+    try{
+      const found = _fv_readPw();
+      if (found.pw){
+        _fv_writePwEverywhere(found.pw);
+        try{ window.applyPasswordToGate(found.pw); }catch(e){}
+      }
+    }catch(e){}
+  })();
 
-  // REQUIRED GLOBALS (fallbacks) – förhindrar ReferenceError i boot
+  // --- REQUIRED GLOBALS (fallbacks) för boot ---
   if (typeof window._fv_getSelectedToken !== "function") {
     window._fv_getSelectedToken = function(){
       try{
@@ -2638,6 +2647,27 @@ async function handleGoogleLogout(){
     };
   }
 
+  // din nya error: _fv_buildRosterTabs saknas
+  if (typeof window._fv_buildRosterTabs !== "function"){
+    window._fv_buildRosterTabs = function(){
+      try{
+        // om du har en riktig byggare någon annanstans så kör den
+        if (typeof window._fv_renderRosterTabs === "function"){
+          return window._fv_renderRosterTabs.apply(this, arguments);
+        }
+      }catch(e){}
+      return null;
+    };
+  }
+
+  // din nya error: _fvTeacherStudentCache saknas
+  if (typeof window._fvTeacherStudentCache !== "object" || !window._fvTeacherStudentCache){
+    window._fvTeacherStudentCache = {
+      byToken: Object.create(null),
+      list: []
+    };
+  }
+
   if (typeof window._fv_renderUl !== "function") {
     window._fv_renderUl = function(host, rows, mapFn){
       try{
@@ -2646,7 +2676,8 @@ async function handleGoogleLogout(){
         const ul = document.createElement("ul");
         (rows||[]).forEach((r, i)=>{
           const li = document.createElement("li");
-          li.appendChild(mapFn ? mapFn(r,i) : document.createTextNode(String(r)));
+          const node = mapFn ? mapFn(r,i) : document.createTextNode(String(r));
+          if (node) li.appendChild(node);
           ul.appendChild(li);
         });
         host.appendChild(ul);
@@ -2661,7 +2692,7 @@ async function handleGoogleLogout(){
   try{ window.__fv5_bootSafePatched = true; }catch(e){}
   try{ console.log("✅ [FV] Sektion 3C0 pre-boot fallbacks active."); }catch(e){}
 })();
-/* slut Sektion 3C0: PRE-BOOT FALLBACKS (pw-key + token + roster + render) */
+/* slut Sektion 3C0: PRE-BOOT FALLBACKS (pw + rosterTabs + progress cache) */
 
 
 /* ---------- Cloud helpers ---------- */
