@@ -7294,6 +7294,21 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
   }
 
+  function _fv_isGoogleTeacherVerified(){
+    try{
+      const v = sessionStorage.getItem("fvTeacherGoogleVerified");
+      if (!v) return false;
+      const ts = parseInt(v, 10);
+      if (!isFinite(ts)) return false;
+      // giltig i 15 min
+      return (Date.now() - ts) <= (15*60*1000);
+    }catch(e){ return false; }
+  }
+
+  function _fv_markGoogleTeacherVerified(){
+    try{ sessionStorage.setItem("fvTeacherGoogleVerified", String(Date.now())); }catch(e){}
+  }
+
   async function _fv_requireGoogleOrStop(){
     try{
       if (typeof window.initFirebase === "function") await window.initFirebase();
@@ -7303,7 +7318,10 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const u = auth ? auth.currentUser : null;
 
     const isTeacher = (typeof window._fv_hasTeacher === "function") ? !!window._fv_hasTeacher() : !!u;
-    if (isTeacher) return true;
+    if (isTeacher){
+      _fv_markGoogleTeacherVerified();
+      return true;
+    }
 
     const res = await _fv_forceGoogleAccountPick();
     if (res.mode === "redirect"){
@@ -7314,6 +7332,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       alert("❌ Google-inloggning misslyckades. Se konsolen.");
       return false;
     }
+    _fv_markGoogleTeacherVerified();
     return true;
   }
 
@@ -7469,7 +7488,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
   };
 
-  // ===== Bind: Lösenordsbyte (FIX: korrekt current + Google-reset-flagga) =====
+  // ===== Bind: Lösenordsbyte (FIX: Google-verifierad byte utan gammalt) =====
   window.bindTeacherPasswordChange = function(){
     const btn   = $("btnChangeTeacherPassword");
     const oldPw = $("inputOldPassword");
@@ -7482,7 +7501,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
     try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
 
-    btn.addEventListener("click", (e)=>{
+    btn.addEventListener("click", async (e)=>{
       e.preventDefault();
       e.stopPropagation();
       if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
@@ -7513,62 +7532,64 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         return;
       }
 
-      // 1) Om inget lösenord finns alls -> tillåt sätta nytt (första gången / efter reset)
-      if (!currentRaw){
-        try{ localStorage.setItem(String(window.TEACHER_PW_KEY), newVal); }catch(e){}
+      // helper: save everywhere
+      function _saveNewPw(val){
+        try{ localStorage.setItem(String(window.TEACHER_PW_KEY), val); }catch(e){}
         try{
           if (typeof window.loadState==="function" && typeof window.saveState==="function"){
             const st = window.loadState() || {};
-            st.teacherPassword = newVal;
+            st.teacherPassword = val;
             window.saveState(st);
           }
         }catch(e){}
-        try{ window.applyPasswordToGate(newVal); }catch(e){}
-        try{ sessionStorage.removeItem(resetFlagKey); }catch(e){}
+        try{ window.applyPasswordToGate(val); }catch(e){}
         try{ oldPw.value=""; newPw.value=""; if (repPw) repPw.value=""; }catch(e){}
         try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
+      }
+
+      // A) Om inget lösenord finns alls -> tillåt sätta nytt
+      if (!currentRaw){
+        _saveNewPw(newVal);
+        try{ sessionStorage.removeItem(resetFlagKey); }catch(e){}
         alert("Nytt lösenord sparat.");
         return;
       }
 
-      // 2) Om reset precis verifierats via Google: tillåt byte utan gammalt (en gång)
+      // B) Om reset precis verifierats via Google: tillåt byte utan gammalt (en gång)
       if (resetVerified && !oldVal){
-        try{ localStorage.setItem(String(window.TEACHER_PW_KEY), newVal); }catch(e){}
-        try{
-          if (typeof window.loadState==="function" && typeof window.saveState==="function"){
-            const st = window.loadState() || {};
-            st.teacherPassword = newVal;
-            window.saveState(st);
-          }
-        }catch(e){}
-        try{ window.applyPasswordToGate(newVal); }catch(e){}
+        _saveNewPw(newVal);
         try{ sessionStorage.removeItem(resetFlagKey); }catch(e){}
-        try{ oldPw.value=""; newPw.value=""; if (repPw) repPw.value=""; }catch(e){}
-        try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
         alert("Nytt lösenord sparat (Google-verifierad återställning).");
         return;
       }
 
-      // 3) Normalfall: kräver korrekt nuvarande lösenord
+      // C) Om du är Google-verifierad (inloggad i lärarläge) -> tillåt byte utan gammalt
+      if (!oldVal){
+        const alreadyVerified = _fv_isGoogleTeacherVerified();
+        let okGoogle = alreadyVerified;
+        if (!okGoogle){
+          okGoogle = await _fv_requireGoogleOrStop();
+        }
+        if (okGoogle){
+          _saveNewPw(newVal);
+          try{ sessionStorage.removeItem(resetFlagKey); }catch(e){}
+          alert("Nytt lösenord sparat (Google verifierad).");
+          return;
+        }
+        alert("❌ Google-verifiering krävs för att byta utan nuvarande lösenord.");
+        try{ oldPw.focus(); }catch(e){}
+        return;
+      }
+
+      // D) Normalfall: kräver korrekt nuvarande lösenord
       if (oldVal !== currentRaw){
         alert("Fel nuvarande lösenord.");
         try{ oldPw.focus(); }catch(e){}
         return;
       }
 
-      try{ localStorage.setItem(String(window.TEACHER_PW_KEY), newVal); }catch(e){}
-      try{
-        if (typeof window.loadState==="function" && typeof window.saveState==="function"){
-          const st = window.loadState() || {};
-          st.teacherPassword = newVal;
-          window.saveState(st);
-        }
-      }catch(e){}
-      try{ window.applyPasswordToGate(newVal); }catch(e){}
-
-      try{ oldPw.value=""; newPw.value=""; if (repPw) repPw.value=""; }catch(e){}
+      _saveNewPw(newVal);
       try{ sessionStorage.removeItem(resetFlagKey); }catch(e){}
-      try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
       alert("Nytt lösenord sparat.");
     }, true);
   };
@@ -7626,8 +7647,9 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       const okGoogle = await _fv_requireGoogleOrStop();
       if (!okGoogle) return;
 
-      // Sätt en 1-gångsflagga: nästa lösenordsbyte kan ske utan gammalt
+      // Markera Google-verifierad session + 1-gångs reset
       try{ sessionStorage.setItem("fvTeacherPwResetVerified", "1"); }catch(_e){}
+      _fv_markGoogleTeacherVerified();
 
       const ok = confirm(
         "Återställ lärarlösenord (lokalt på denna enhet)?\n\n" +
@@ -7657,6 +7679,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
 })();
 /* slut Sektion 5B: LÄRARLÄGE (TeacherGate + modal open/close + bind) */
+
 
 
 /* start Sektion 5C: TABS (visa panel + exit-läge) */
