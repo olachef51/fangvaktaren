@@ -7208,58 +7208,52 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     return byText || null;
   }
 
-  // ===== Resolve expected password (single source of truth) =====
-  function _fv_getExpectedTeacherPw(){
-    try{
-      if (typeof window.updateTeacherPasswordStatus === "function"){
-        const v = _fv_pick(window.updateTeacherPasswordStatus());
-        if (v) return v;
-      }
-    }catch(e){}
-
-    try{
-      const key = _fv_pick(window.TEACHER_PW_KEY) || "fangvaktaren-v17::teacherPassword";
-      const v = _fv_pick(localStorage.getItem(key));
-      if (v) return v;
-    }catch(e){}
-
-    try{
-      if (typeof window.loadState === "function"){
-        const st = window.loadState() || {};
-        const v = _fv_pick(st.teacherPassword);
-        if (v) return v;
-      }
-    }catch(e){}
-
-    return "";
+  // ===== Resolve local password (single source of truth) =====
+  function _fv_getTeacherPwKey(){
+    const k = _fv_pick(window.TEACHER_PW_KEY);
+    return k || "fangvaktaren-v17::teacherPassword";
   }
 
-  function _fv_getCurrentPwRaw(){
-    let ls = "";
-    let stPw = "";
+  function _fv_getCurrentTeacherPw(){
+    const k = _fv_getTeacherPwKey();
+    let ls = "", st = "";
+    try{ ls = _fv_pick(localStorage.getItem(k)); }catch(e){}
     try{
-      const k = _fv_pick(window.TEACHER_PW_KEY) || "fangvaktaren-v17::teacherPassword";
-      ls = _fv_pick(localStorage.getItem(k));
-    }catch(e){}
-    try{
-      if (typeof window.loadState === "function"){
-        const st = window.loadState() || {};
-        stPw = _fv_pick(st.teacherPassword);
+      if (typeof window.loadState==="function"){
+        const s = window.loadState() || {};
+        st = _fv_pick(s.teacherPassword);
       }
     }catch(e){}
-    return _fv_pick(ls) || _fv_pick(stPw) || "";
+    return _fv_pick(ls) || _fv_pick(st) || "";
   }
 
-  function _fv_savePwEverywhere(val){
-    try{ localStorage.setItem(String(window.TEACHER_PW_KEY), val); }catch(e){}
+  // ===== Local clear password (no Google) =====
+  function _fv_clearTeacherPwLocal(){
+    const base = _fv_pick(window.STORAGE_KEY) || "fangvaktaren-v17";
+    const keyMain = _fv_pick(window.TEACHER_PW_KEY) || "fangvaktaren-v17::teacherPassword";
+
+    const keys = [
+      keyMain,
+      base + "::teacherPassword",
+      "fangvaktaren-v17::teacherPassword",
+      "fangvaktaren::teacherPassword",
+      "fv::teacherPassword",
+      "teacherPassword",
+      "teacherPw",
+      "teacher_pass"
+    ].filter(Boolean);
+
+    keys.forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
+
     try{
       if (typeof window.loadState==="function" && typeof window.saveState==="function"){
         const st = window.loadState() || {};
-        st.teacherPassword = val;
+        st.teacherPassword = "";
         window.saveState(st);
       }
     }catch(e){}
-    try{ window.applyPasswordToGate?.(val); }catch(e){}
+
+    try{ window.applyPasswordToGate?.(""); }catch(e){}
     try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
   }
 
@@ -7337,7 +7331,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
           e.stopPropagation();
           if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
 
-          const expected = _fv_getExpectedTeacherPw();
+          const expected = _fv_getCurrentTeacherPw();
           const entered  = _fv_pick(inp ? inp.value : "");
 
           if (!expected){
@@ -7381,75 +7375,74 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }
   };
 
-  // ===== Bind: Lösenordsbyte (100% LOKALT) =====
+  // ===== Bind: Lösenordsbyte (LOKALT, skottsäkert + stoppar andra handlers) =====
   window.bindTeacherPasswordChange = function(){
-    const btn   = $("btnChangeTeacherPassword");
+    const btn0  = $("btnChangeTeacherPassword");
     const oldPw = $("inputOldPassword");
     const newPw = $("inputNewPassword");
     const repPw = $("inputNewPasswordRepeat");
 
-    if (!btn || !oldPw || !newPw) return;
+    if (!btn0 || !oldPw || !newPw) return;
+
+    let btn = btn0;
+    if (btn.__fvPwWiped !== true){
+      const clone = btn.cloneNode(true);
+      btn.parentNode.replaceChild(clone, btn);
+      clone.__fvPwWiped = true;
+      btn = clone;
+    }
     if (btn.__fvPwBound) return;
     btn.__fvPwBound = true;
-
-    try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
 
     btn.addEventListener("click", (e)=>{
       e.preventDefault();
       e.stopPropagation();
       if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
 
-      if (typeof window.applyPasswordToGate !== "function" ||
-          typeof window.TEACHER_PW_KEY === "undefined"){
-        alert("Lösenordsbyte: saknar beroenden (applyPasswordToGate/TEACHER_PW_KEY).");
-        return;
-      }
-
-      const currentRaw = _fv_getCurrentPwRaw();
-      const oldVal = _fv_pick(oldPw.value);
-      const newVal = _fv_pick(newPw.value);
-      const repVal = repPw ? _fv_pick(repPw.value) : "";
+      const current = _fv_getCurrentTeacherPw();
+      const oldVal  = _fv_pick(oldPw.value);
+      const newVal  = _fv_pick(newPw.value);
+      const repVal  = repPw ? _fv_pick(repPw.value) : "";
 
       if (!newVal){
         alert("Skriv ett nytt lösenord först.");
-        try{ newPw.focus(); }catch(e){}
+        try{ newPw.focus(); }catch(_e){}
         return;
       }
       if (repPw && repVal !== newVal){
         alert("Nytt lösenord matchar inte i 'Upprepa nytt lösenord'.");
-        try{ repPw.focus(); }catch(e){}
+        try{ repPw.focus(); }catch(_e){}
         return;
       }
 
-      // Om inget lösenord finns alls: tillåt skapa direkt
-      if (!currentRaw){
-        _fv_savePwEverywhere(newVal);
-        try{ oldPw.value=""; newPw.value=""; if (repPw) repPw.value=""; }catch(e){}
-        alert("Nytt lösenord sparat.");
-        return;
-      }
-
-      // UX-guard: många råkar skriva gamla lösenordet i NYTT-fältet och lämna gamla tomt
-      if (!oldVal && newVal === currentRaw){
-        alert("Du har skrivit NUVARANDE lösenord i fältet 'Nytt lösenord'.\n\nSkriv nuvarande lösenord i 'Nuvarande lösenord' och ett NYTT i 'Nytt lösenord'.");
-        try{ oldPw.focus(); }catch(e){}
-        return;
-      }
-
-      // Normalfall: kräver korrekt nuvarande
-      if (oldVal !== currentRaw){
+      // Om ett lösenord redan finns -> kräver korrekt nuvarande
+      if (current && oldVal !== current){
         alert("Fel nuvarande lösenord.");
-        try{ oldPw.focus(); }catch(e){}
+        try{ oldPw.focus(); }catch(_e){}
         return;
       }
 
-      _fv_savePwEverywhere(newVal);
-      try{ oldPw.value=""; newPw.value=""; if (repPw) repPw.value=""; }catch(e){}
-      alert("Nytt lösenord sparat.");
+      // Spara lokalt (localStorage + state) + uppdatera UI
+      const k = _fv_getTeacherPwKey();
+      try{ localStorage.setItem(k, newVal); }catch(e){}
+
+      try{
+        if (typeof window.loadState==="function" && typeof window.saveState==="function"){
+          const st = window.loadState() || {};
+          st.teacherPassword = newVal;
+          window.saveState(st);
+        }
+      }catch(e){}
+
+      try{ window.applyPasswordToGate?.(newVal); }catch(e){}
+      try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
+
+      try{ oldPw.value = ""; newPw.value = ""; if (repPw) repPw.value = ""; }catch(e){}
+      alert("✅ Nytt lösenord sparat lokalt.");
     }, true);
   };
 
-  // ===== Glömt lösenord: 100% LOKAL reset (ingen Google) =====
+  // ===== Glömt lösenord: ENDAST LOKAL RESET (ingen Google) =====
   window.bindTeacherForgotPassword = function(){
     const btn0 = $("btnTeacherReset");
     if (!btn0) return;
@@ -7461,38 +7454,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       clone.__fvResetWiped = true;
       btn = clone;
     }
-
     if (btn.__fvResetBound) return;
     btn.__fvResetBound = true;
-
-    function _clearPwLocal(){
-      const base = _fv_pick(window.STORAGE_KEY) || "fangvaktaren-v17";
-      const keyMain = _fv_pick(window.TEACHER_PW_KEY);
-
-      const keys = [
-        keyMain,
-        base + "::teacherPassword",
-        "fangvaktaren-v17::teacherPassword",
-        "fangvaktaren::teacherPassword",
-        "fv::teacherPassword",
-        "teacherPassword",
-        "teacherPw",
-        "teacher_pass"
-      ].filter(Boolean);
-
-      keys.forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
-
-      try{
-        if (typeof window.loadState==="function" && typeof window.saveState==="function"){
-          const st = window.loadState() || {};
-          st.teacherPassword = "";
-          window.saveState(st);
-        }
-      }catch(e){}
-
-      try{ window.applyPasswordToGate?.(""); }catch(e){}
-      try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
-    }
 
     btn.addEventListener("click", (e)=>{
       e.preventDefault();
@@ -7506,7 +7469,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       );
       if (!ok) return;
 
-      _clearPwLocal();
+      _fv_clearTeacherPwLocal();
 
       const gate = $("teacherGate");
       if (gate) _fv_hideEl(gate);
