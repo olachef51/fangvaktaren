@@ -2488,9 +2488,10 @@ async function handleGoogleLogout(){
 /* start Sektion 3C: MOLN + ROSTER + PROGRESSION + UI-BIND (samlat) */
 
 
-/* start Sektion 3C0C: GLÖMT LÖSENORD (RESET LOKALT, INGEN LÄCKA) */
+
+/* start Sektion 3C0C: GLÖMT LÖSENORD (GOOGLE RECOVERY + RESET LOKALT, INGEN LÄCKA) */
 (function(){
-  "use strict";
+  // OBS: ingen "use strict" här inne – vi vill kunna skapa global alias utanför IIFE säkert.
 
   function _fv_pickStr(v){ return String(v ?? "").trim(); }
 
@@ -2538,123 +2539,109 @@ async function handleGoogleLogout(){
     }
   }catch(e){}
 
-  function _fv_findForgotButtons(){
-    const byId = (id)=>document.getElementById(id);
+  async function _fv_ensureTeacherViaGoogle(){
+    try{
+      // init firebase om det finns
+      if (typeof window.initFirebase === "function"){
+        try{ await window.initFirebase(); }catch(e){}
+      }
 
-    const direct = [
-      byId("btnForgotTeacherPassword"),
-      byId("btnForgotPassword"),
-      byId("btnTeacherForgotPassword"),
-      byId("btnForgotPw"),
-      byId("btnForgot")
-    ].filter(Boolean);
+      // redan inloggad?
+      try{
+        if (typeof window._fv_hasTeacher === "function" && window._fv_hasTeacher()) return true;
+      }catch(e){}
 
-    const byText = Array.from(document.querySelectorAll("button, a, .btn")).filter(el=>{
-      const t = (el.textContent||"").toLowerCase();
-      return t.includes("glömt") && t.includes("lösen");
-    });
+      // försök logga in med befintlig login-funktion om den finns
+      try{
+        if (typeof window.loginWithGoogle === "function"){
+          await window.loginWithGoogle();
+        } else if (window.firebase && typeof firebase.auth === "function"){
+          const auth = firebase.auth();
+          const Provider = (firebase.auth && firebase.auth.GoogleAuthProvider) ? firebase.auth.GoogleAuthProvider : null;
+          if (Provider && auth && typeof auth.signInWithPopup === "function"){
+            await auth.signInWithPopup(new Provider());
+          }
+        }
+      }catch(e){}
 
-    const all = [...direct, ...byText];
-    const uniq = [];
-    const seen = new Set();
-    all.forEach(el=>{
-      if (!el) return;
-      if (seen.has(el)) return;
-      seen.add(el);
-      uniq.push(el);
-    });
-    return uniq;
+      // kolla igen
+      try{
+        if (typeof window._fv_hasTeacher === "function" && window._fv_hasTeacher()) return true;
+      }catch(e){}
+
+      return false;
+    }catch(e){
+      return false;
+    }
   }
 
-  function _fv_forceNoNav(el){
-    try{
-      if (!el) return;
-      // stoppa github/ankarlänk
-      if (String(el.tagName||"").toLowerCase() === "a"){
-        try{ el.setAttribute("href", "javascript:void(0)"); }catch(e){}
-        try{ el.removeAttribute("target"); }catch(e){}
-        try{ el.style.cursor = "pointer"; }catch(e){}
-      }
-      // även om någon annan försöker navigera
-      el.addEventListener("click", (e)=>{
-        try{ e.preventDefault(); }catch(_e){}
-      }, true);
-    }catch(e){}
+  // Bind endast på explicita ID:n (ingen textmatch)
+  function _fv_findForgotBtn(){
+    const ids = [
+      "btnForgotTeacherPassword",
+      "btnTeacherForgotPassword",
+      "btnForgotPassword",
+      "btnForgotPw",
+      "btnTeacherForgotPw"
+    ];
+    for (let i=0;i<ids.length;i++){
+      const el = document.getElementById(ids[i]);
+      if (el) return el;
+    }
+    return null;
   }
 
   function _fv_bindForgot(btn){
+    if (!btn) return;
+
+    // Byt ut noden för att döda gamla handlers (om någon läcker lösenord)
     try{
-      // Wipe gamla handlers: ersätt noden med en klon
       const clone = btn.cloneNode(true);
-      if (btn.parentNode) btn.parentNode.replaceChild(clone, btn);
-
-      if (clone.__fvForgotResetBound) return;
-      clone.__fvForgotResetBound = true;
-
-      _fv_forceNoNav(clone);
-
-      clone.addEventListener("click", (e)=>{
-        e.preventDefault();
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation==="function") e.stopImmediatePropagation();
-
-        const ok = confirm(
-          "Glömt lösenord?\n\nDetta nollställer lärarlösenordet lokalt på DENNA enhet.\n" +
-          "Efteråt kan du sätta ett nytt lösenord nästa gång du öppnar lärarläget.\n\n" +
-          "Vill du nollställa?"
-        );
-        if (!ok) return;
-
-        _fv_clearTeacherPwEverywhere();
-        alert("Lärarlösenord nollställt lokalt. Öppna lärarläget igen och ange ett nytt lösenord.");
-      }, true);
-
+      btn.parentNode && btn.parentNode.replaceChild(clone, btn);
+      btn = clone;
     }catch(e){}
+
+    if (btn.__fvForgotRecoveryBound) return;
+    btn.__fvForgotRecoveryBound = true;
+
+    btn.addEventListener("click", async (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation==="function") e.stopImmediatePropagation();
+
+      const okTeacher = await _fv_ensureTeacherViaGoogle();
+      if (!okTeacher){
+        alert("Återställning kräver Google-inloggning (lärarkonto).");
+        return;
+      }
+
+      const ok = confirm(
+        "Återställa lärarlösenord?\n\n" +
+        "Detta nollställer lärarlösenordet lokalt på DENNA enhet.\n" +
+        "Efteråt kan du sätta ett nytt lösenord nästa gång du öppnar lärarläget.\n\n" +
+        "Vill du fortsätta?"
+      );
+      if (!ok) return;
+
+      _fv_clearTeacherPwEverywhere();
+      alert("Lärarlösenord nollställt lokalt. Öppna lärarläget igen och ange ett nytt lösenord.");
+    }, true);
   }
 
-  function _fv_scanAndBind(){
-    try{
-      const btns = _fv_findForgotButtons();
-      btns.forEach(_fv_bindForgot);
-    }catch(e){}
-  }
-
-  // 1) bind direkt (om knappen redan finns)
-  try{ _fv_scanAndBind(); }catch(e){}
-
-  // 2) bind när DOM är klar (om knappen kommer senare)
   try{
-    if (document.readyState === "loading"){
-      document.addEventListener("DOMContentLoaded", _fv_scanAndBind, { once:true });
-    }
+    const btn = _fv_findForgotBtn();
+    if (btn) _fv_bindForgot(btn);
   }catch(e){}
-
-  // 3) bind igen när lärarmodal öppnas (vanligt att knappar först då finns i DOM)
-  try{
-    if (!window.__fvForgotHooked){
-      window.__fvForgotHooked = true;
-
-      const _hookOpen = function(fnName){
-        const orig = window[fnName];
-        if (typeof orig !== "function") return;
-        if (orig.__fvForgotWrapped) return;
-        function wrapped(){
-          const out = orig.apply(this, arguments);
-          try{ _fv_scanAndBind(); }catch(e){}
-          return out;
-        }
-        wrapped.__fvForgotWrapped = true;
-        window[fnName] = wrapped;
-      };
-
-      _hookOpen("openTeacherModal");
-      _hookOpen("_fv_legacyOpen");
-      _hookOpen("openRosterInline");
-    }
-  }catch(e){}
-
 })();
-/* slut Sektion 3C0C: GLÖMT LÖSENORD (RESET LOKALT, INGEN LÄCKA) */
+
+/* Global alias-fix: vissa delar kallar _fv_getSelectedToken utan window. */
+try{
+  if (typeof window._fv_getSelectedToken === "function" && typeof _fv_getSelectedToken !== "function"){
+    var _fv_getSelectedToken = function(){ return window._fv_getSelectedToken(); };
+  }
+}catch(e){}
+
+/* slut Sektion 3C0C: GLÖMT LÖSENORD (GOOGLE RECOVERY + RESET LOKALT, INGEN LÄCKA) */
 
 
 /* ---------- Cloud helpers ---------- */
