@@ -2487,6 +2487,183 @@ async function handleGoogleLogout(){
 
 /* start Sektion 3C: MOLN + ROSTER + PROGRESSION + UI-BIND (samlat) */
 
+/* ---------- PRE-BOOT FALLBACKS (måste ligga först i 3C) ---------- */
+/* start Sektion 3C0: PRE-BOOT FALLBACKS (pw-key + token + roster + render) */
+(function(){
+  "use strict";
+
+  function _fv_pickStr(v){ return String(v ?? "").trim(); }
+
+  function _fv_getStorageBase(){
+    try{
+      const b = _fv_pickStr(window.STORAGE_KEY);
+      return b || "fangvaktaren-v17";
+    }catch(e){ return "fangvaktaren-v17"; }
+  }
+
+  function _fv_knownPwKeys(){
+    const base = _fv_getStorageBase();
+    const uniq = new Set([
+      _fv_pickStr(window.TEACHER_PW_KEY),
+      base + "::teacherPassword",
+      "fangvaktaren-v17::teacherPassword",
+      "fangvaktaren::teacherPassword",
+      "fv::teacherPassword",
+      "teacherPassword"
+    ].filter(Boolean));
+    return Array.from(uniq);
+  }
+
+  function _fv_readPwFromSomewhere(){
+    try{
+      const keys = _fv_knownPwKeys();
+      for (const k of keys){
+        const v = _fv_pickStr(localStorage.getItem(k));
+        if (v) return { pw:v, key:k, src:"ls" };
+      }
+    }catch(e){}
+    try{
+      const st = (typeof window.loadState==="function") ? (window.loadState()||{}) : {};
+      const pw = _fv_pickStr(st.teacherPassword);
+      if (pw) return { pw, key:"(state.teacherPassword)", src:"state" };
+    }catch(e){}
+    return { pw:"", key:"", src:"none" };
+  }
+
+  function _fv_ensureApplyPasswordToGate(){
+    try{
+      if (typeof window.applyPasswordToGate !== "function"){
+        window.applyPasswordToGate = function(pw){
+          try{
+            const key = _fv_pickStr(window.TEACHER_PW_KEY);
+            if (key) localStorage.setItem(key, _fv_pickStr(pw));
+          }catch(e){}
+          try{
+            const t = document.getElementById("teacherGateText");
+            if (t){
+              const has = _fv_pickStr(pw).length > 0;
+              t.textContent = has
+                ? "Ange lärarlösenord. (Lösenord är redan satt – skriv rätt lösenord för att fortsätta.)"
+                : "Ange lärarlösenord. Första gången du loggar in blir lösenordet det du skriver här.";
+            }
+          }catch(e){}
+        };
+      }
+    }catch(e){}
+  }
+
+  function _fv_syncTeacherPwKey(){
+    try{
+      const base = _fv_getStorageBase();
+      const preferKey = _fv_pickStr(window.TEACHER_PW_KEY) || (base + "::teacherPassword");
+
+      const found = _fv_readPwFromSomewhere();
+      const preferPw = _fv_pickStr((function(){
+        try{ return localStorage.getItem(preferKey); }catch(e){ return ""; }
+      })());
+
+      if (!preferPw && found.pw){
+        try{
+          window.TEACHER_PW_KEY = preferKey;
+          localStorage.setItem(preferKey, found.pw);
+        }catch(e){}
+      }else{
+        try{ window.TEACHER_PW_KEY = preferKey; }catch(e){}
+      }
+
+      try{
+        if (typeof window.loadState==="function" && typeof window.saveState==="function"){
+          const st = window.loadState() || {};
+          if (!_fv_pickStr(st.teacherPassword)){
+            const pw = _fv_pickStr(localStorage.getItem(window.TEACHER_PW_KEY));
+            if (pw){
+              st.teacherPassword = pw;
+              window.saveState(st);
+            }
+          }
+        }
+      }catch(e){}
+
+      try{ _fv_ensureApplyPasswordToGate(); }catch(e){}
+      try{
+        const pwNow = _fv_pickStr(localStorage.getItem(window.TEACHER_PW_KEY));
+        if (pwNow) window.applyPasswordToGate(pwNow);
+      }catch(e){}
+    }catch(e){}
+  }
+
+  _fv_syncTeacherPwKey();
+
+  // REQUIRED GLOBALS (fallbacks) – förhindrar ReferenceError i boot
+  if (typeof window._fv_getSelectedToken !== "function") {
+    window._fv_getSelectedToken = function(){
+      try{
+        const k = "fangvaktaren-teacher-selected-student-token-v17";
+        const v = _fv_pickStr(localStorage.getItem(k));
+        if (v) return v;
+      }catch(e){}
+      try{
+        const st = (typeof window.loadState==="function") ? (window.loadState()||{}) : {};
+        const t = _fv_pickStr(st?.student?.token);
+        if (t) return t;
+      }catch(e){}
+      return "";
+    };
+  }
+
+  if (typeof window._fv_fetchRosterFromActiveBank !== "function") {
+    window._fv_fetchRosterFromActiveBank = async function(){
+      try{
+        const st = (typeof window.loadState==="function") ? (window.loadState()||{}) : {};
+        const ab = st?.activeBank || {};
+        const bankId = _fv_pickStr(ab?.bankId || ab?.id || ab?.publicId || "");
+
+        const byBank =
+          st?.rosterByBank ||
+          st?.rosterByBankId ||
+          st?.teacherRosterByBankId_v1 ||
+          st?.rosterByBank_v1 ||
+          st?.roster;
+
+        if (Array.isArray(byBank)) return byBank;
+
+        if (byBank && typeof byBank === "object") {
+          if (bankId && Array.isArray(byBank[bankId])) return byBank[bankId];
+          for (const k of Object.keys(byBank)){
+            if (Array.isArray(byBank[k])) return byBank[k];
+          }
+        }
+      }catch(e){}
+      return [];
+    };
+  }
+
+  if (typeof window._fv_renderUl !== "function") {
+    window._fv_renderUl = function(host, rows, mapFn){
+      try{
+        if (!host) return;
+        host.innerHTML = "";
+        const ul = document.createElement("ul");
+        (rows||[]).forEach((r, i)=>{
+          const li = document.createElement("li");
+          li.appendChild(mapFn ? mapFn(r,i) : document.createTextNode(String(r)));
+          ul.appendChild(li);
+        });
+        host.appendChild(ul);
+      }catch(e){}
+    };
+  }
+
+  if (typeof window._fv_renderRosterTabs !== "function") {
+    window._fv_renderRosterTabs = function(){ /* noop fallback */ };
+  }
+
+  try{ window.__fv5_bootSafePatched = true; }catch(e){}
+  try{ console.log("✅ [FV] Sektion 3C0 pre-boot fallbacks active."); }catch(e){}
+})();
+/* slut Sektion 3C0: PRE-BOOT FALLBACKS (pw-key + token + roster + render) */
+
+
 /* ---------- Cloud helpers ---------- */
 
 let _fvCloudBanksRenderSeq = 0;
@@ -3022,7 +3199,6 @@ function _fv_bindLegacyRosterButtonsOnce(){
 }
 
 /* slut Sektion 3C: MOLN + ROSTER + PROGRESSION + UI-BIND (samlat) */
-
 
 /* start Sektion 3C-R: ROSTER (LEGACY + OVERLAY FALLBACK + HANDLEDARFÄLT) */
 
