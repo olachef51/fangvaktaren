@@ -7148,15 +7148,15 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       e.stopPropagation();
       if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
 
-      if (typeof window.updateTeacherPasswordStatus !== "function" ||
-          typeof window.pick !== "function" ||
+      if (typeof window.pick !== "function" ||
           typeof window.applyPasswordToGate !== "function" ||
-          typeof window.TEACHER_PW_KEY === "undefined"){
-        alert("Lösenordsbyte: saknar en eller flera beroenden (updateTeacherPasswordStatus/pick/applyPasswordToGate/TEACHER_PW_KEY).");
+          typeof window.TEACHER_PW_KEY === "undefined" ||
+          typeof window._fv5_getTeacherPassword !== "function"){
+        alert("Lösenordsbyte: saknar en eller flera beroenden (pick/applyPasswordToGate/TEACHER_PW_KEY/_fv5_getTeacherPassword).");
         return;
       }
 
-      const current = window.updateTeacherPasswordStatus();
+      const current = window._fv5_getTeacherPassword(); // ✅ riktig källa (LS -> state)
       const oldVal = window.pick(oldPw.value);
       const newVal = window.pick(newPw.value);
       const repVal = repPw ? window.pick(repPw.value) : "";
@@ -7177,21 +7177,20 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         return;
       }
 
-      localStorage.setItem(window.TEACHER_PW_KEY, newVal);
+      // ✅ Sätt via apply (som även synkar state i 5I)
       window.applyPasswordToGate(newVal);
 
       oldPw.value = "";
       newPw.value = "";
       if (repPw) repPw.value = "";
 
-      window.updateTeacherPasswordStatus();
+      try{ window.updateTeacherPasswordStatus?.(); }catch(e){}
       alert("Nytt lösenord sparat.");
     }, true);
   }
   window.bindTeacherPasswordChange = window.bindTeacherPasswordChange || bindTeacherPasswordChange;
 
 /* slut Sektion 5B: LÄRARLÄGE (TeacherGate + modal open/close + bind) */
-
 
 /* start Sektion 5C: TABS (visa panel + exit-läge) */
   function setActiveTab(tabName){
@@ -8050,7 +8049,6 @@ window.initQuestionForms = window.initQuestionForms || initQuestionForms;
 /* slut Sektion 5F: FORMS - MCQ/IMG/DRAG (Lagg till fungerar) */
 
 
-
 /* start Sektion 5I: INIT (bind framsida + teacher + exit + render) */
 (function(){
   "use strict";
@@ -8122,8 +8120,9 @@ window.initQuestionForms = window.initQuestionForms || initQuestionForms;
   }
 
   // ---------------------------
-  // TEACHER PASSWORD (deps fallback)
-  // - Fixar: state har lösenord men localStorage[TEACHER_PW_KEY] är tom
+  // TEACHER PASSWORD (deps + single source of truth)
+  // - Fixar: "Fel nuvarande lösenord" pga fel return/noop
+  // - Synkar: LS + state.teacherPassword
   // ---------------------------
   function _fv5_ensureTeacherPwDeps(){
     // 1) TEACHER_PW_KEY fallback
@@ -8134,56 +8133,126 @@ window.initQuestionForms = window.initQuestionForms || initQuestionForms;
       }
     }catch(e){}
 
-    // 2) applyPasswordToGate fallback (sätter LS + uppdaterar gate-text)
+    // 2) En tydlig getter för "aktuellt lösenord" (LS -> state)
+    try{
+      if (typeof window._fv5_getTeacherPassword !== "function"){
+        window._fv5_getTeacherPassword = function(){
+          let key = "";
+          try{ key = String(window.TEACHER_PW_KEY || "").trim(); }catch(e){}
+          if (key){
+            try{
+              const v = String(localStorage.getItem(key) || "");
+              if (v.trim()) return v.trim();
+            }catch(e){}
+          }
+          try{
+            if (typeof window.loadState === "function"){
+              const s = window.loadState() || {};
+              const v2 = String(s.teacherPassword || "");
+              if (v2.trim()) return v2.trim();
+            }
+          }catch(e){}
+          return "";
+        };
+      }
+    }catch(e){}
+
+    // 3) applyPasswordToGate fallback (sätter LS + synkar state + uppdaterar gate-text)
     try{
       if (typeof window.applyPasswordToGate !== "function"){
         window.applyPasswordToGate = function(pw){
+          const nextPw = String(pw || "").trim();
+          // LS
           try{
             const key = String(window.TEACHER_PW_KEY || "").trim();
-            if (key) localStorage.setItem(key, String(pw || ""));
+            if (key) localStorage.setItem(key, nextPw);
           }catch(e){}
+          // state
+          try{
+            if (typeof window.loadState === "function" && typeof window.saveState === "function"){
+              const s = window.loadState() || {};
+              s.teacherPassword = nextPw;
+              window.saveState(s);
+            }
+          }catch(e){}
+          // UI text
           try{
             const t = document.getElementById("teacherGateText");
             if (t){
-              const has = String(pw||"").trim().length > 0;
+              const has = nextPw.length > 0;
               t.textContent = has
                 ? "Ange lärarlösenord. (Lösenord är redan satt – skriv rätt lösenord för att fortsätta.)"
                 : "Ange lärarlösenord. Första gången du loggar in blir lösenordet det du skriver här.";
             }
           }catch(e){}
         };
+      } else {
+        // Om applyPasswordToGate finns: wrap så vi även synkar state (utan att störa original)
+        if (!window.applyPasswordToGate.__fv5Wrapped){
+          const orig = window.applyPasswordToGate;
+          window.applyPasswordToGate = function(pw){
+            const nextPw = String(pw || "").trim();
+            try{ orig.apply(this, arguments); }catch(e){}
+            try{
+              if (typeof window.loadState === "function" && typeof window.saveState === "function"){
+                const s = window.loadState() || {};
+                s.teacherPassword = nextPw;
+                window.saveState(s);
+              }
+            }catch(e){}
+          };
+          window.applyPasswordToGate.__fv5Wrapped = true;
+        }
       }
     }catch(e){}
 
-    // 3) updateTeacherPasswordStatus fallback (om saknas: gör inget)
+    // 4) updateTeacherPasswordStatus = RETURNERA aktuellt lösenord (och ev uppdatera UI)
     try{
-      if (typeof window.updateTeacherPasswordStatus !== "function"){
-        window.updateTeacherPasswordStatus = function(){ /* noop */ };
-      }
+      window.updateTeacherPasswordStatus = function(){
+        const pw = (typeof window._fv5_getTeacherPassword === "function") ? window._fv5_getTeacherPassword() : "";
+        try{
+          const el = document.getElementById("teacherPasswordStatus");
+          if (el){
+            el.textContent = pw ? "Lösenord: satt" : "Lösenord: ej satt";
+          }
+        }catch(e){}
+        return pw;
+      };
     }catch(e){}
 
-    // 4) Seed: om state.teacherPassword finns men LS saknas -> skriv till LS
+    // 5) Seed/sync: om LS saknas men state finns -> skriv LS
+    //            om state saknas men LS finns -> skriv state
     try{
       const key = String(window.TEACHER_PW_KEY || "").trim();
       if (!key) return;
 
-      const lsPw = String(localStorage.getItem(key) || "");
-      if (lsPw.trim()) return;
+      const lsPw = String(localStorage.getItem(key) || "").trim();
 
-      const s = (typeof window.loadState === "function") ? window.loadState() : null;
-      const statePw = (s && typeof s.teacherPassword !== "undefined") ? String(s.teacherPassword || "") : "";
+      let stPw = "";
+      try{
+        const s = (typeof window.loadState === "function") ? window.loadState() : null;
+        stPw = (s && typeof s.teacherPassword !== "undefined") ? String(s.teacherPassword || "").trim() : "";
+      }catch(e){}
 
-      if (statePw.trim()){
-        localStorage.setItem(key, statePw);
-        try{ window.applyPasswordToGate(statePw); }catch(e){}
+      if (!lsPw && stPw){
+        try{ localStorage.setItem(key, stPw); }catch(e){}
+      } else if (lsPw && !stPw){
+        try{
+          if (typeof window.loadState === "function" && typeof window.saveState === "function"){
+            const s2 = window.loadState() || {};
+            s2.teacherPassword = lsPw;
+            window.saveState(s2);
+          }
+        }catch(e){}
       }
+
+      // Uppdatera gate-text med aktuell
+      try{ window.applyPasswordToGate(window._fv5_getTeacherPassword()); }catch(e){}
     }catch(e){}
   }
 
   // ---------------------------
   // BOOT-SAFE FALLBACKS (för att undvika teacher-boot crash)
-  // - definiera ENDAST om de saknas
-  // - VIKTIGT: körs DIREKT (inte på DOMContentLoaded) så auto-boot inte hinner crasha.
   // ---------------------------
   function _fv5_patchBootSafeFallbacks(){
     try{
@@ -8240,9 +8309,54 @@ window.initQuestionForms = window.initQuestionForms || initQuestionForms;
       }
     }catch(e){}
 
+    // Fallback för roster-tabs builder (om saknas)
     try{
       if (typeof window._fv_buildRosterTabs !== "function"){
-        window._fv_buildRosterTabs = function(){ return true; };
+        window._fv_buildRosterTabs = function(roster){
+          try{
+            roster = Array.isArray(roster) ? roster : [];
+            const host =
+              document.getElementById("teacherRosterTabs") ||
+              document.getElementById("rosterTabs") ||
+              document.getElementById("studentTabs") ||
+              document.querySelector("[data-fv='roster-tabs']");
+            if (!host) return true;
+            host.innerHTML = "";
+            roster.forEach((r, i) => {
+              const btn = document.createElement("button");
+              btn.type = "button";
+              btn.className = "btn btn-sm";
+              btn.textContent = (r?.name || r?.email || r?.token || ("Elev " + (i+1)));
+              btn.addEventListener("click", () => {
+                try{
+                  const token = String(r?.token || "").trim();
+                  if (token) localStorage.setItem("fangvaktaren-teacher-selected-student-token-v17", token);
+                }catch(e){}
+              });
+              host.appendChild(btn);
+            });
+            return true;
+          }catch(e){}
+          return true;
+        };
+      }
+    }catch(e){}
+
+    // ✅ KRITISK FIX: Ersätt tryRefreshRosterTabs med safe variant (anropa INTE originalet)
+    try{
+      if (typeof window.tryRefreshRosterTabs !== "function" || !window.tryRefreshRosterTabs.__fv5Safe){
+        window.tryRefreshRosterTabs = async function(){
+          try{
+            let roster = [];
+            try{ roster = await window._fv_fetchRosterFromActiveBank(); }catch(e){ roster = []; }
+            if (!Array.isArray(roster)) roster = [];
+            try{ window._fv_buildRosterTabs?.(roster); }catch(e){}
+            return roster;
+          }catch(e){
+            return [];
+          }
+        };
+        window.tryRefreshRosterTabs.__fv5Safe = true;
       }
     }catch(e){}
 
@@ -8332,6 +8446,7 @@ window.initQuestionForms = window.initQuestionForms || initQuestionForms;
   }
 })();
 /* slut Sektion 5I: INIT (bind framsida + teacher + exit + render) */
+
 
 
 /* start Sektion 5J: EXIT-TEMPLATE (Lägg till/ta bort frågor + elevvy + dynamisk mailtext) */
