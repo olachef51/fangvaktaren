@@ -7248,12 +7248,18 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const auth = _fv_getAuth();
     if (!fb || !auth) return { ok:false, reason:"no-auth" };
 
-    // Force account picker (best effort)
+    // Försök tvinga konto-picker genom signOut först (Patch v3)
     try{
       if (auth.currentUser){
+        console.warn("[FV] 🔒 currentUser fanns:", auth.currentUser.email, "-> signOut()");
         await auth.signOut();
       }
-    }catch(e){}
+    }catch(e){
+      console.warn("[FV] signOut failed:", e?.code || e);
+    }
+
+    // Liten micro-wait så auth hinner uppdatera state
+    await new Promise(r=>setTimeout(r, 50));
 
     const prov = new fb.auth.GoogleAuthProvider();
     try{
@@ -7264,20 +7270,27 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }catch(e){}
 
     try{
+      console.warn("[FV] ➡️ signInWithPopup(select_account)...");
       const res = await auth.signInWithPopup(prov);
       const u = res?.user || auth.currentUser;
+      console.log("[FV] ✅ Popup OK:", u?.email || null);
       return { ok: !!u, user: u || null, mode: "popup" };
-    }catch(e){
+    }catch(err){
+      console.warn("[FV] ⚠️ Popup FAIL:", err?.code || err, err);
+      
       try{
+        console.warn("[FV] ➡️ fallback: signInWithRedirect(select_account)...");
         await auth.signInWithRedirect(prov);
-        return { ok:false, user:null, mode:"redirect" };
-      }catch(_e){
-        return { ok:false, user:null, mode:"fail", err: e };
+        console.log("[FV] 🔄 Redirect initierad (sidan laddas om).");
+        return { ok:false, user:null, mode:"redirect", err };
+      }catch(err2){
+        console.error("[FV] ❌ Redirect FAIL:", err2?.code || err2, err2);
+        return { ok:false, user:null, mode:"fail", err: err2 };
       }
     }
   }
 
-  async function _fv_requireGoogleOrStop(){
+  async function _fv_requireGoogleOrStop(forcePicker = false){
     try{
       if (typeof window.initFirebase === "function") await window.initFirebase();
     }catch(e){}
@@ -7285,17 +7298,20 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     const auth = _fv_getAuth();
     const u = auth ? auth.currentUser : null;
 
-    // Om du har din egen helper:
-    const isTeacher = (typeof window._fv_hasTeacher === "function") ? !!window._fv_hasTeacher() : !!u;
-    if (isTeacher) return true;
+    // Skippa inte pickern om vi explicitly tvingar den (t.ex. vid "Glömt lösenord")
+    if (!forcePicker) {
+      const isTeacher = (typeof window._fv_hasTeacher === "function") ? !!window._fv_hasTeacher() : !!u;
+      if (isTeacher) return true;
+    }
 
     const res = await _fv_forceGoogleAccountPick();
+    
     if (res.mode === "redirect"){
-      alert("🔄 Fortsätt Google-inloggningen (redirect) och testa igen efter omladdning.");
+      alert("🔄 Redirect startad. När sidan laddat om: klicka 'Glömt lösenord?' igen.");
       return false;
     }
     if (!res.ok){
-      alert("❌ Google-inloggning misslyckades. Se konsolen.");
+      alert("❌ Google-inloggning misslyckades. Kolla konsolen för felkod (popup-blocked / unauthorized-domain etc).");
       return false;
     }
     return true;
@@ -7659,7 +7675,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     }, true);
   };
 
-  // ===== Glömt lösenord: GOOGLE KRÄVS + lokal reset =====
+  // ===== Glömt lösenord: GOOGLE KRÄVS + automatisk transport =====
   window.bindTeacherForgotPassword = function(){
     const btn0 = $("btnTeacherReset");
     if (!btn0) return;
@@ -7675,34 +7691,37 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     if (btn.__fvResetBound) return;
     btn.__fvResetBound = true;
 
-    function _clearPwLocal(){
-      _fv_clearTeacherPwLocal();
-    }
-
     btn.addEventListener("click", async (e)=>{
       e.preventDefault();
       e.stopPropagation();
       if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
 
-      const okGoogle = await _fv_requireGoogleOrStop();
-      if (!okGoogle) return;
+      // 1. Tvinga fram account pickern
+      const okGoogle = await _fv_requireGoogleOrStop(true);
+      if (!okGoogle) return; // Stannar om inloggningen misslyckas
 
-      const ok = confirm(
-        "Återställ lärarlösenord (lokalt på denna enhet)?\n\n" +
-        "Detta tar bort sparat lösenord på datorn.\n" +
-        "Efteråt kan du sätta ett nytt lösenord i Inställningar."
-      );
-      if (!ok) return;
+      // 2. Automatiskt ta bort gamla lösenordet (INGEN extra fråga, vi vet att de vill resetta)
+      _fv_clearTeacherPwLocal();
 
-      _clearPwLocal();
-
+      // 3. Stäng låsskärmen (gate)
       const gate = $("teacherGate");
       if (gate) _fv_hideEl(gate);
 
+      // 4. Öppna inställningarna automatiskt
       try{ window.openTeacherModal?.(); }catch(_e){}
       try{ window._fv5_setActiveTab?.("settings"); }catch(_e){}
       try{ _fv_ensureLocalResetUI(); }catch(_e){}
-      alert("✅ Lösenord nollställt lokalt (Google verifierad). Sätt ett nytt lösenord i inställningar nu.");
+
+      // 5. Scrolla och sätt fokus på fältet för nytt lösenord
+      try {
+        const newPw = $("inputNewPassword");
+        if (newPw) {
+          newPw.scrollIntoView({ behavior: "smooth", block: "center" });
+          setTimeout(() => newPw.focus(), 500);
+        }
+      } catch(_e){}
+
+      alert("✅ Verifierad via Google! Det gamla lösenordet är nollställt.\n\nSkriv in ett nytt lösenord i fälten och klicka Spara.");
     }, true);
   };
 
