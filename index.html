@@ -7193,7 +7193,6 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
 
       const btnCancel  = $("btnTeacherCancel");
       const btnConfirm = $("btnTeacherConfirm");
-      const btnReset   = $("btnTeacherReset");
       const inp = $("teacherPasswordInput");
 
       function hideGate(){
@@ -7201,20 +7200,21 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         _fv5_hide(gateEl);
       }
 
-      // ✅ Robust Google-login (popup/redirect) – INTE via btnGooglePlaceholder
+      // ✅ Google popup/redirect login (robust)
       async function _fv_googlePopupLogin(){
         try{
           if (typeof window.initFirebase === "function"){
             try{ await window.initFirebase(); }catch(e){}
           }
-
           const auth = (window.firebase && firebase.auth && typeof firebase.auth === "function") ? firebase.auth() : null;
           const Provider = (firebase?.auth?.GoogleAuthProvider) ? firebase.auth.GoogleAuthProvider : null;
+          if (!auth || !Provider) return null;
 
-          if (!auth || !Provider){
-            alert("Google-inloggning: auth/provider saknas.");
-            return null;
-          }
+          // redan inloggad?
+          try{
+            const u0 = auth.currentUser;
+            if (u0 && u0.uid) return { user:u0, operationType:"alreadySignedIn" };
+          }catch(e){}
 
           if (typeof auth.signInWithPopup === "function"){
             return await auth.signInWithPopup(new Provider());
@@ -7223,14 +7223,119 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
             await auth.signInWithRedirect(new Provider());
             return true;
           }
-
-          alert("Google-inloggning: saknar signInWithPopup/signInWithRedirect.");
-          return null;
         }catch(err){
           console.error("[FV] Google login failed:", err);
-          alert("Google-inloggning misslyckades. Se konsolen.");
-          return null;
         }
+        return null;
+      }
+
+      function _fv_isGoogleTeacher(){
+        try{
+          if (typeof window._fv_hasTeacher === "function") return !!window._fv_hasTeacher();
+        }catch(e){}
+        try{
+          const auth = (window.firebase && firebase.auth && typeof firebase.auth === "function") ? firebase.auth() : null;
+          const u = auth ? auth.currentUser : null;
+          return !!(u && u.uid);
+        }catch(e){}
+        return false;
+      }
+
+      // ✅ Resetar lokalt lärarlösenord (LS + ev state + gate)
+      function _fv_localResetTeacherPassword(){
+        try{
+          if (typeof window._fv_forgetTeacherPassword === "function"){
+            try{ window._fv_forgetTeacherPassword(); }catch(e){}
+          }
+        }catch(e){}
+
+        const base = (typeof window.pick==="function") ? window.pick(window.STORAGE_KEY) : String(window.STORAGE_KEY||"").trim();
+        const b = base || "fangvaktaren-v17";
+        const kMain = String(window.TEACHER_PW_KEY||"").trim() || (b + "::teacherPassword");
+
+        const keys = [
+          kMain,
+          b + "::teacherPassword",
+          "fangvaktaren-v17::teacherPassword",
+          "fangvaktaren::teacherPassword",
+          "fv::teacherPassword",
+          "teacherPassword"
+        ].filter(Boolean);
+
+        // ta bort + skriv tom sträng (för att slå ut ev fallback-läsningar)
+        keys.forEach(k=>{
+          try{ localStorage.removeItem(k); }catch(_e){}
+          try{ localStorage.setItem(k, ""); }catch(_e){}
+        });
+
+        try{
+          if (typeof window.loadState==="function" && typeof window.saveState==="function"){
+            const st = window.loadState() || {};
+            st.teacherPassword = "";
+            window.saveState(st);
+          }
+        }catch(_e){}
+
+        try{
+          if (typeof window.applyPasswordToGate==="function"){
+            window.applyPasswordToGate("");
+          }
+        }catch(_e){}
+
+        try{ window.updateTeacherPasswordStatus?.(); }catch(_e){}
+      }
+
+      // ✅ Glömt lösenord? måste VINNA över alla andra listeners:
+      // - klona knappen (wipar gamla handlers)
+      // - bind vår handler i capture
+      function _fv_bindForgotResetHard(){
+        const oldBtn = $("btnTeacherReset");
+        if (!oldBtn) return;
+
+        // skydd mot dubbelklon
+        if (oldBtn.__fvForgotHardBound) return;
+        oldBtn.__fvForgotHardBound = true;
+
+        // wipe ALL listeners genom clone/replace
+        const newBtn = oldBtn.cloneNode(true);
+        newBtn.__fvGoogleOnlyBound = true; // debug-flagga
+        try{
+          oldBtn.parentNode && oldBtn.parentNode.replaceChild(newBtn, oldBtn);
+        }catch(e){
+          // om replace failar, bind bara på gamla
+          newBtn.__fvFallbackBound = true;
+        }
+
+        const btn = (newBtn && newBtn.id === "btnTeacherReset") ? newBtn : oldBtn;
+
+        btn.addEventListener("click", async (e)=>{
+          e.preventDefault();
+          e.stopPropagation();
+          if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+
+          // 1) Google-verifiera
+          if (!_fv_isGoogleTeacher()){
+            await _fv_googlePopupLogin();
+          }
+          if (!_fv_isGoogleTeacher()){
+            alert("Återställning kräver Google-inloggning (lärarkonto).");
+            return;
+          }
+
+          // 2) Reset direkt (ingen “bara verifiera”)
+          _fv_localResetTeacherPassword();
+
+          // 3) Släpp in direkt till settings för att sätta nytt lösenord
+          try{ hideGate(); }catch(_e){}
+          try{ if (typeof window.openTeacherModal === "function") window.openTeacherModal(); }catch(_e){}
+          try{ if (typeof window._fv5_setActiveTab === "function") window._fv5_setActiveTab("settings"); }catch(_e){}
+          try{
+            const np = $("inputNewPassword");
+            if (np) setTimeout(()=>np.focus(), 0);
+          }catch(_e){}
+
+          alert("✅ Lösenord nollställt lokalt. Sätt ett nytt lösenord i inställningar nu.");
+        }, true);
       }
 
       if (btnCancel && btnCancel.dataset.fv5Bound !== "1"){
@@ -7248,19 +7353,8 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
         });
       }
 
-      // ✅ Glömt lösenord? -> trigga Google-login direkt (popup/redirect)
-      // Viktigt: ingen global "gate"-variabel används här (förhindrar ReferenceError som låser UI).
-      if (btnReset && btnReset.dataset.fv5ForgotBound !== "1"){
-        btnReset.dataset.fv5ForgotBound = "1";
-
-        btnReset.addEventListener("click", async (e)=>{
-          e.preventDefault();
-          e.stopPropagation();
-          if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
-
-          await _fv_googlePopupLogin();
-        }, true);
-      }
+      // bind forgot reset (hard override)
+      _fv_bindForgotResetHard();
 
       on(gateEl, "click", (e)=>{
         if (e.target === gateEl){
@@ -7301,7 +7395,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
     if (btn.dataset.fv5PwBound === "1") return;
     btn.dataset.fv5PwBound = "1";
 
-    // init status (om din kodbas har funktionen)
+    // init status
     if (typeof window.updateTeacherPasswordStatus === "function"){
       try{ window.updateTeacherPasswordStatus(); }catch(e){}
     }
@@ -7341,6 +7435,7 @@ try{ window.saveCurrentResultToFirestore = saveCurrentResultToFirestore; }catch(
       }
 
       localStorage.setItem(window.TEACHER_PW_KEY, newVal);
+      try{ localStorage.setItem("teacherPassword", newVal); }catch(e){}
       window.applyPasswordToGate(newVal);
 
       oldPw.value = "";
